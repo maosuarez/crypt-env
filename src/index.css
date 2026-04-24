@@ -1,0 +1,87 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@300;400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-ui: 'Space Grotesk', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+
+  --color-bg:      #0a0b0e;
+  --color-surface: #111318;
+  --color-raised:  #181b22;
+  --color-bd:      #1e2230;
+  --color-bd2:     #252a3a;
+  --color-tx:      #e4e8f0;
+  --color-tx2:     #8892a4;
+  --color-tx3:     #4a5268;
+
+  --color-accent:   oklch(0.70 0.17 162);
+  --color-accent-d: oklch(0.38 0.10 162);
+  --color-accent-b: oklch(0.18 0.06 162);
+
+  --color-danger:   oklch(0.62 0.20 22);
+  --color-danger-b: oklch(0.18 0.08 22);
+
+  --color-warn:   oklch(0.72 0.16 68);
+  --color-warn-b: oklch(0.16 0.06 68);
+  --color-warn-d: oklch(0.45 0.12 68);
+
+  --color-cred:   oklch(0.70 0.15 220);
+  --color-cred-b: oklch(0.16 0.06 220);
+
+  --color-lnk:   oklch(0.68 0.15 270);
+  --color-lnk-b: oklch(0.15 0.05 270);
+
+  --animate-fade-in:   fade-in   130ms ease forwards;
+  --animate-shake:     shake     0.35s ease;
+  --animate-toast-in:  toast-in  150ms ease;
+  --animate-blink:     blink     1s    ease infinite;
+  --animate-spin-fast: spin      0.7s  linear infinite;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes shake {
+  0%,100% { transform: translateX(0); }
+  20%     { transform: translateX(-6px); }
+  40%     { transform: translateX(6px); }
+  60%     { transform: translateX(-4px); }
+  80%     { transform: translateX(4px); }
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+@keyframes blink {
+  0%,100% { opacity: 1; }
+  50%     { opacity: 0.3; }
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: #040506;
+  font-family: 'Space Grotesk', sans-serif;
+  color: #e4e8f0;
+}
+
+::-webkit-scrollbar       { width: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #1e2230; border-radius: 2px; }
+
+input::-ms-reveal,
+input::-ms-clear { display: none; }
+
+input, textarea, select {
+  font-family: 'Space Grotesk', sans-serif;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #e4e8f0;
+}
+

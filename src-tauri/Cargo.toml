@@ -1,0 +1,62 @@
+[package]
+name = "tauri-private-vault"
+version = "0.1.0"
+description = "Secure local secret vault with AES-256-GCM encryption"
+authors = ["maosuarez"]
+edition = "2021"
+default-run = "tauri-private-vault"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "tauri_private_vault_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+# Tauri plugins
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-clipboard-manager = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database — Plan B: SQLite bundled (no system dep) + AES-GCM app-level encryption
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros"] }
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+
+# Cryptography
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+subtle = "2"
+
+# HTTP server (local REST API on 127.0.0.1:47821)
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+
+# HTTP client — solo para el binario vault CLI
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+
+[[bin]]
+name = "vault"
+path = "src/bin/vault.rs"
+
+[[bin]]
+name = "vault-mcp"
+path = "src/bin/vault-mcp.rs"

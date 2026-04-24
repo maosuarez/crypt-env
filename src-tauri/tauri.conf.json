@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Vault",
+  "version": "0.1.0",
+  "identifier": "com.maosuarez.vault",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Vault",
+        "width": 560,
+        "height": 700,
+        "decorations": false,
+        "resizable": true,
+        "minWidth": 440,
+        "minHeight": 580,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "publisher": "maosuarez",
+    "copyright": "Copyright © 2026 maosuarez",
+    "category": "Utility",
+    "shortDescription": "Secure local secret vault",
+    "longDescription": "Private vault for storing and managing secrets locally with AES-256-GCM encryption. No cloud, no telemetry.",
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false,
+        "installMode": "currentUser",
+        "languages": ["SpaVA"]
+      },
+      "wix": {
+        "language": "es-ES"
+      }
+    }
+  }
+}

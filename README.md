@@ -34,7 +34,6 @@ DevVault is a desktop application that centralizes your API keys, credentials, c
 - **SQLite** local database — your data never leaves your machine
 - **Zeroized keys** — encryption key is wiped from memory on lock
 - **Timing-safe** token comparison to prevent brute-force attacks
-- **Rate limiting** on the local API (5 unlock attempts / 60s)
 - **Strict CSP** on the Tauri webview
 - **MCP never exposes secret values** — injects them directly as environment variables
 
@@ -192,9 +191,10 @@ Contributions are welcome! DevVault is actively developed and there's a lot of g
 - [x] Export to `.env` / shell formats
 - [x] Editable categories
 - [x] Auto-lock timeout
-- [ ] CLI (`vault` binary)
-- [ ] Local REST API (Axum)
-- [ ] MCP server
+- [x] CLI (`vault` binary)
+- [x] Local REST API (Axum, port 47821)
+- [x] MCP server (JSON-RPC 2.0 over stdio)
+- [ ] Rate limiting on `/unlock` endpoint
 - [ ] macOS & Linux support
 - [ ] Import from password managers
 - [ ] Encrypted backup

@@ -32,3 +32,18 @@ src-tauri/target/
 # Environment
 .env
 .env.local
+
+# Added by commit-orchestrator
+*.db
+
+# Added by commit-orchestrator
+*.db-shm
+
+# Added by commit-orchestrator
+*.db-wal
+
+# Added by commit-orchestrator
+vault.key
+
+# Added by commit-orchestrator
+/src-tauri/gen/

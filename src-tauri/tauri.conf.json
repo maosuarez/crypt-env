@@ -45,7 +45,7 @@
       "nsis": {
         "displayLanguageSelector": false,
         "installMode": "currentUser",
-        "languages": ["SpaVA"]
+        "languages": ["Spanish"]
       },
       "wix": {
         "language": "es-ES"

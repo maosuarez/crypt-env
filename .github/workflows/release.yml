@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Tauri app
+        run: pnpm tauri build
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "DevVault v${{ steps.version.outputs.VERSION }}"
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            1. Download `Vault_${{ steps.version.outputs.VERSION }}_x64-setup.exe` and run the installer.
+            2. *(Optional)* Copy `vault.exe` and `vault-mcp.exe` to a directory on your `PATH` for CLI and MCP integration.
+
+            ### MCP Integration (Claude Code / Claude Desktop)
+            After copying `vault-mcp.exe` to your PATH, add this to your agent config:
+            ```json
+            {
+              "mcpServers": {
+                "devvault": {
+                  "command": "vault-mcp",
+                  "args": []
+                }
+              }
+            }
+            ```
+            The main DevVault app must be running and unlocked. Generate an MCP token in **Settings → Integrations**.
+
+            ---
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for full details.
+          files: |
+            src-tauri/target/release/bundle/nsis/Vault_${{ steps.version.outputs.VERSION }}_x64-setup.exe
+            src-tauri/target/release/vault-mcp.exe
+            src-tauri/target/release/vault.exe
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

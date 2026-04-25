@@ -45,10 +45,10 @@
       "nsis": {
         "displayLanguageSelector": false,
         "installMode": "currentUser",
-        "languages": ["Spanish"]
+        "languages": ["English"]
       },
       "wix": {
-        "language": "es-ES"
+        "language": "en-US"
       }
     }
   }

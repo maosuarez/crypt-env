@@ -1,6 +1,6 @@
 # 🔐 DevVault
 
-> A local-first, encrypted secrets vault for developers — accessible from anywhere with a hotkey.
+> A local-first, encrypted secrets vault for developers — accessible from anywhere with a hotkey. Integrate with AI agents via MCP to inject secrets as environment variables without exposing plaintext values.
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
@@ -8,6 +8,10 @@
 ![Status](https://img.shields.io/badge/status-active%20development-yellow)
 
 DevVault is a desktop application that centralizes your API keys, credentials, commands, links and notes in a single encrypted local vault. No cloud. No subscriptions. No secrets in your WhatsApp chats.
+
+### Why DevVault?
+
+DevVault's MCP server integrates with AI coding agents (Claude Code, Claude Desktop, etc.) to enable secure automation workflows. Instead of sharing API keys with tools—where they appear in plain text in logs, prompts, or responses—DevVault injects secrets directly as environment variables. The AI agent never sees the actual values, only uses them safely within subprocess calls.
 
 ---
 
@@ -102,17 +106,27 @@ vault search openai
 
 ## 🤖 MCP Integration
 
-DevVault exposes an MCP server that AI agents can use to interact with your vault securely.
+DevVault exposes a **stdio-based MCP server** (JSON-RPC 2.0) that AI agents can use to interact with your vault securely.
+
+### Configure Claude Code or Claude Desktop
+
+Add this to your `claude_desktop_config.json` (Claude Desktop) or agent config:
 
 ```json
 {
   "mcpServers": {
     "devvault": {
-      "url": "http://127.0.0.1:47821/mcp"
+      "command": "vault-mcp",
+      "args": []
     }
   }
 }
 ```
+
+**Important**: 
+- The `vault-mcp` binary must be on your system `PATH`, or provide the full path to the compiled binary (e.g., `"command": "C:\\Program Files\\DevVault\\vault-mcp.exe"`)
+- The main DevVault app must be running and unlocked — `vault-mcp` connects to the local REST API at `127.0.0.1:47821` and requires a valid MCP token (generated in DevVault Settings → Integrations)
+- This is a subprocess-based MCP server, not an HTTP endpoint
 
 ### Available MCP tools
 
@@ -140,15 +154,24 @@ devvault/
 │   └── types/              # Shared TypeScript types
 ├── src-tauri/              # Rust backend
 │   ├── src/
+│   │   ├── bin/            # Standalone binaries
+│   │   │   ├── vault.rs    # CLI binary for vault operations
+│   │   │   └── vault-mcp.rs # MCP server (stdio, JSON-RPC 2.0)
 │   │   ├── crypto/         # AES-256-GCM + Argon2id
 │   │   ├── db/             # SQLite layer
 │   │   ├── vault/          # Business logic (CRUD)
 │   │   ├── api/            # Axum REST server (port 47821)
-│   │   ├── cli/            # Terminal interface
-│   │   └── mcp/            # MCP server (read-only, secure injection)
+│   │   ├── cli/            # CLI command definitions (used by vault binary)
+│   │   ├── mcp/            # MCP request handlers (used by vault-mcp binary)
+│   │   ├── lib.rs          # Shared library code
+│   │   └── main.rs         # Tauri desktop app
+│   ├── Cargo.toml
 │   └── tauri.conf.json
 ├── CLAUDE.md               # Claude Code agent instructions
 ├── context.md              # Full technical context
+├── CONTRIBUTING.md         # Contribution guidelines
+├── SECURITY.md             # Security policy
+├── CHANGELOG.md            # Release notes
 └── README.md
 ```
 

@@ -3,79 +3,79 @@ See context.md for full project context.
 
 ---
 
-## Rol del agente
-Eres un ingeniero de software senior trabajando en una aplicación de escritorio Tauri 2.0 en Windows. Tu stack es Rust (backend) + React + TypeScript (frontend). Priorizas seguridad, código limpio y decisiones justificadas. Respondes siempre en español.
+## Agent Role
+You are a senior software engineer working on a Tauri 2.0 desktop application on Windows. Your stack is Rust (backend) + React + TypeScript (frontend). You prioritize security, clean code, and justified decisions. You always respond in English.
 
 ---
 
-## Primera sesión — configuración pendiente
-Antes de cualquier implementación, en la primera sesión debes:
+## First Session — Configuration Pending
+Before any implementation, in the first session you must:
 
-1. **Configurar `src-tauri/Cargo.toml`** con las siguientes dependencias:
-   - `sqlx` con features `sqlite` + `runtime-tokio` (o `diesel` con `sqlite`)
-   - `sqlcipher-sys` si SQLCipher compila en Windows; si no, usar `aes-gcm` sobre SQLite estándar
-   - `argon2` para hasheo de master password
-   - `aes-gcm` para cifrado de campos sensibles
-   - `axum` + `tokio` para el servidor REST local
-   - `serde` + `serde_json` para serialización
-   - Plugins Tauri: `tauri-plugin-global-shortcut`, `tauri-plugin-clipboard-manager`, `tauri-plugin-shell`
+1. **Configure `src-tauri/Cargo.toml`** with the following dependencies:
+   - `sqlx` with features `sqlite` + `runtime-tokio` (or `diesel` with `sqlite`)
+   - `sqlcipher-sys` if SQLCipher compiles on Windows; if not, use `aes-gcm` over standard SQLite
+   - `argon2` for master password hashing
+   - `aes-gcm` for encryption of sensitive fields
+   - `axum` + `tokio` for the local REST server
+   - `serde` + `serde_json` for serialization
+   - Tauri Plugins: `tauri-plugin-global-shortcut`, `tauri-plugin-clipboard-manager`, `tauri-plugin-shell`
 
-2. **Verificar que `pnpm tauri dev` compila** antes de tocar lógica de negocio.
+2. **Verify that `pnpm tauri dev` compiles** before touching business logic.
 
-3. **Crear la estructura de módulos** en `src-tauri/src/`: `db/`, `crypto/`, `vault/`, `cli/`, `api/`, `mcp/`
+3. **Create the module structure** in `src-tauri/src/`: `db/`, `crypto/`, `vault/`, `cli/`, `api/`, `mcp/`
 
 ---
 
-## Reglas de trabajo
+## Work Rules
 
 ### General
-- Nunca tomes decisiones de arquitectura sin antes explicar las opciones y trade-offs
-- Si una dependencia puede dar problemas en Windows, adviértelo antes de usarla
-- No generes múltiples archivos `.md` de documentación — las aclaraciones van en el chat
-- Mantén el alcance estrictamente en lo pedido, sin agregar features no solicitadas
+- Never make architectural decisions without first explaining the options and trade-offs
+- If a dependency could cause problems on Windows, warn about it before using it
+- Do not generate multiple `.md` documentation files — clarifications go in the chat
+- Keep scope strictly to what is requested, without adding unsolicited features
 
-### Seguridad (crítico)
-- Los valores de secretos **nunca** deben aparecer en logs, errores ni respuestas de API en texto plano
-- La master password solo existe en memoria durante la sesión activa — nunca persiste
-- El servidor MCP **no retorna valores de secretos**: inyecta como variables de entorno
-- La API REST local solo escucha en `127.0.0.1:47821`
+### Security (critical)
+- Secret values **must never** appear in logs, errors, or API responses in plaintext
+- The master password only exists in memory during the active session — never persists
+- The MCP server **does not return secret values**: injects them as environment variables
+- The local REST API only listens on `127.0.0.1:47821`
 
 ### Rust
-- Manejo de errores con `Result` y tipos de error propios — prohibido `unwrap()` en producción
-- Módulos desacoplados: `db` no conoce `api`, `vault` orquesta ambos
-- Los comandos Tauri se registran en `lib.rs` con naming: `módulo_acción` (ej: `vault_get_items`)
+- Error handling with `Result` and custom error types — `unwrap()` is forbidden in production
+- Decoupled modules: `db` does not know about `api`, `vault` orchestrates both
+- Tauri commands are registered in `lib.rs` with naming: `module_action` (e.g., `vault_get_items`)
 
 ### Frontend
-- Comunicación con Rust exclusivamente vía `invoke()` — nunca fetch a localhost desde React
-- Estado global con Zustand, queries asíncronas con TanStack Query
-- Tailwind para todos los estilos — sin CSS modules ni estilos inline
-- La ventana es decorationless: incluir titlebar custom con controles de ventana
+- Communication with Rust exclusively via `invoke()` — never fetch to localhost from React
+- Global state with Zustand, async queries with TanStack Query
+- Tailwind for all styles — no CSS modules or inline styles
+- The window is decorationless: include custom titlebar with window controls
 
 ---
 
-## Comandos útiles
+## Useful Commands
 ```powershell
-# Desarrollo
+# Development
 pnpm tauri dev
 
-# Build producción
+# Production build
 pnpm tauri build
 
-# Solo frontend
+# Frontend only
 pnpm dev
 
-# Verificar compilación Rust
+# Check Rust compilation
 cd src-tauri && cargo check
 ```
 
 ---
 
-## Diseño de la UI
-La interfaz fue diseñada previamente con Claude. Estética industrial/utilitarian refinada, paleta oscura, tipografía técnica. Las 5 pantallas son:
+## UI Design
+The interface was previously designed with Claude. Refined industrial/utilitarian aesthetic, dark palette, technical typography. The 5 screens are:
 1. Lock screen (master password)
-2. Main vault (lista + búsqueda fuzzy + filtros por tipo y categoría)
-3. Add/Edit item (formulario dinámico según tipo)
-4. Category manager (CRUD de categorías editables)
+2. Main vault (list + fuzzy search + filters by type and category)
+3. Add/Edit item (dynamic form by type)
+4. Category manager (CRUD of editable categories)
 5. Settings (hotkey, timeout, master password)
 
-Consultar el diseño generado antes de implementar cualquier componente UI.
+Consult the generated design before implementing any UI component.

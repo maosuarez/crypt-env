@@ -1,148 +1,148 @@
 # tauri-private-vault
 
-## Descripción
-Bóveda personal de productividad para desarrolladores. Centraliza credenciales, API keys, tokens, contraseñas, links, comandos y notas en una app de escritorio local accesible por hotkey (Ctrl+Alt+Z). Los secretos se almacenan cifrados localmente. Incluye CLI, API REST local y servidor MCP para integración con herramientas externas.
+## Description
+Personal productivity vault for developers. Centralizes credentials, API keys, tokens, passwords, links, commands, and notes in a local desktop app accessible by hotkey (Ctrl+Alt+Z). Secrets are stored encrypted locally. Includes CLI, local REST API, and MCP server for integration with external tools.
 
 ## Stack
 - **Frontend**: React 18 + TypeScript + Vite + Tailwind CSS + Framer Motion
-- **Backend (Rust)**: Tauri 2.0, Axum (REST local), Tokio
-- **Base de datos**: SQLite con `libsqlite3-sys` bundled (no SQLCipher; ver Decisión #1)
-- **Cifrado**: AES-256-GCM para campos sensibles, Argon2id para master password, `subtle::ConstantTimeEq` para comparaciones timing-safe
-- **CLI**: Interfaz de terminal para gestión de ítems sin abrir la GUI (binario `vault`)
-- **MCP**: Servidor Model Context Protocol para consulta segura de secretos (binario `vault-mcp`)
-- **API REST**: Axum en `127.0.0.1:47821` con autenticación dual (session token + MCP token)
-- **OS objetivo**: Windows (desarrollo), multiplataforma en el futuro
+- **Backend (Rust)**: Tauri 2.0, Axum (local REST), Tokio
+- **Database**: SQLite with `libsqlite3-sys` bundled (no SQLCipher; see Decision #1)
+- **Encryption**: AES-256-GCM for sensitive fields, Argon2id for master password, `subtle::ConstantTimeEq` for timing-safe comparisons
+- **CLI**: Terminal interface for item management without opening the GUI (binary `vault`)
+- **MCP**: Model Context Protocol server for secure secret queries (binary `vault-mcp`)
+- **REST API**: Axum on `127.0.0.1:47821` with dual authentication (session token + MCP token)
+- **Target OS**: Windows (development), multi-platform in the future
 - **Package manager**: pnpm
 
-## Arquitectura
+## Architecture
 ```
 tauri-private-vault/
-├── src/                          # Frontend React
-│   ├── components/               # Componentes UI por pantalla
-│   ├── store/                    # Estado global con Zustand
-│   ├── hooks/                    # Custom hooks para invoke() de Tauri
-│   └── types/                    # Tipos TypeScript compartidos
+├── src/                          # React frontend
+│   ├── components/               # UI components by screen
+│   ├── store/                    # Global state with Zustand
+│   ├── hooks/                    # Custom hooks for Tauri invoke()
+│   └── types/                    # Shared TypeScript types
 ├── src-tauri/
 │   ├── src/
-│   │   ├── main.rs               # Entrypoint Tauri (inicializa lib)
-│   │   ├── lib.rs                # Registro de comandos Tauri (10+), setup de AppState
-│   │   ├── db/mod.rs             # Pool SQLite, tablas, CRUD items/categories/settings
+│   │   ├── main.rs               # Tauri entrypoint (initializes lib)
+│   │   ├── lib.rs                # Tauri command registry (10+), AppState setup
+│   │   ├── db/mod.rs             # SQLite pool, tables, CRUD items/categories/settings
 │   │   ├── crypto/mod.rs         # Argon2id KDF + AES-256-GCM encrypt/decrypt
-│   │   ├── vault/mod.rs          # VaultState, 10+ comandos Tauri, change_password, wipe
-│   │   ├── api/mod.rs            # Servidor Axum en 127.0.0.1:47821, auth dual token
-│   │   ├── cli/mod.rs            # Módulo CLI (stub)
-│   │   ├── mcp/mod.rs            # Módulo MCP (stub)
+│   │   ├── vault/mod.rs          # VaultState, 10+ Tauri commands, change_password, wipe
+│   │   ├── api/mod.rs            # Axum server on 127.0.0.1:47821, dual token auth
+│   │   ├── cli/mod.rs            # CLI module (stub)
+│   │   ├── mcp/mod.rs            # MCP module (stub)
 │   │   └── bin/
-│   │       ├── vault.rs          # CLI standalone (clap), conecta vía HTTP a API
-│   │       └── vault-mcp.rs      # Servidor MCP JSON-RPC 2.0 sobre stdio
-│   ├── Cargo.toml                # Dependencias Rust
-│   └── tauri.conf.json           # Config de ventana, permisos, hotkey
+│   │       ├── vault.rs          # CLI standalone (clap), connects via HTTP to API
+│   │       └── vault-mcp.rs      # MCP JSON-RPC 2.0 server over stdio
+│   ├── Cargo.toml                # Rust dependencies
+│   └── tauri.conf.json           # Window config, permissions, hotkey
 ```
 
-**Comunicación**:
-- Frontend → `invoke()` de Tauri → comandos registrados en Rust
-- CLI (`vault`) → HTTP REST a `127.0.0.1:47821` con session/MCP token
-- MCP (`vault-mcp`) → HTTP REST a `127.0.0.1:47821` con MCP token
+**Communication**:
+- Frontend → Tauri `invoke()` → registered Rust commands
+- CLI (`vault`) → HTTP REST to `127.0.0.1:47821` with session/MCP token
+- MCP (`vault-mcp`) → HTTP REST to `127.0.0.1:47821` with MCP token
 
-## Tipos de ítem en la bóveda
-1. **Secret / API Key**: nombre, valor cifrado, categoría, notas. Export como `.env` / `export` / `$env:`
-2. **Credential**: nombre del sitio, URL, usuario, contraseña cifrada, notas
-3. **Link**: título, URL, descripción, categoría
-4. **Command**: nombre, comando, descripción, shell target (bash/zsh/PowerShell/cmd), placeholders `{{VAR}}`
-5. **Note**: título, contenido libre, categoría
+## Vault Item Types
+1. **Secret / API Key**: name, encrypted value, category, notes. Export as `.env` / `export` / `$env:`
+2. **Credential**: site name, URL, username, encrypted password, notes
+3. **Link**: title, URL, description, category
+4. **Command**: name, command, description, shell target (bash/zsh/PowerShell/cmd), placeholders `{{VAR}}`
+5. **Note**: title, free-form content, category
 
-## Seguridad — decisiones tomadas
-- **Master password** derivada con Argon2id (m=65536, t=3, p=4), nunca almacenada en texto plano
-- **Valores sensibles** cifrados con AES-256-GCM antes de escribir a SQLite
-- **Comparaciones timing-safe** usando `subtle::ConstantTimeEq` para tokens y verify_token
-- **Clave en memoria** almacenada en `Zeroizing<[u8;32]>` que sobrescribe automáticamente al hacer Drop
-- **MCP no expone valores directamente**: inyecta secretos como variables de entorno en el proceso del cliente, sin retornarlos como texto
-- **API REST local** escucha solo en `127.0.0.1:47821`, nunca en interfaces externas
-- **Autenticación dual**: session tokens (con expiración) + MCP token (estático, almacenado en `%APPDATA%`)
-- **Ventana se bloquea** automáticamente tras timeout configurable, poniendo `VaultState.key = None`
+## Security — Decisions Made
+- **Master password** derived with Argon2id (m=65536, t=3, p=4), never stored in plaintext
+- **Sensitive values** encrypted with AES-256-GCM before writing to SQLite
+- **Timing-safe comparisons** using `subtle::ConstantTimeEq` for tokens and verify_token
+- **Key in memory** stored in `Zeroizing<[u8;32]>` which automatically overwrites on Drop
+- **MCP does not expose values directly**: injects secrets as environment variables in the client process, without returning them as text
+- **Local REST API** listens only on `127.0.0.1:47821`, never on external interfaces
+- **Dual authentication**: session tokens (with expiration) + MCP token (static, stored in `%APPDATA%`)
+- **Window auto-locks** after configurable timeout, setting `VaultState.key = None`
 
-## Convenciones
-- Idioma del código: inglés (variables, funciones, comentarios)
-- Idioma de respuestas del agente: español
-- Naming Rust: snake_case. Naming React/TS: camelCase, PascalCase para componentes
-- Los comandos Tauri (`invoke`) se nombran con prefijo del módulo: `vault_get_items`, `crypto_unlock`, etc.
-- No usar `unwrap()` en producción — manejar errores con `Result` y tipos de error propios
-- Tailwind para estilos, sin CSS modules ni styled-components
+## Conventions
+- Code language: English (variables, functions, comments)
+- Agent response language: English
+- Rust naming: snake_case. React/TS naming: camelCase, PascalCase for components
+- Tauri commands (`invoke`) are named with module prefix: `vault_get_items`, `crypto_unlock`, etc.
+- Do not use `unwrap()` in production — handle errors with `Result` and custom error types
+- Tailwind for styles, no CSS modules or styled-components
 
-## Restricciones
-- Las dependencias de `src-tauri/Cargo.toml` están **pendientes**: se configuran en la primera sesión de Claude Code
-- No implementar sincronización en la nube en esta versión
-- No asumir que SQLCipher compila sin fricción en Windows — tener plan B (AES-GCM sobre SQLite estándar)
-- La ventana es **decorationless** (sin titlebar del SO), con titlebar custom en React
-- No guardar la master password en memoria más tiempo del necesario para desbloquear
-- El MCP es de solo lectura — no permite crear ni modificar ítems
+## Constraints
+- Dependencies in `src-tauri/Cargo.toml` are **pending**: configured in Claude Code's first session
+- Do not implement cloud synchronization in this version
+- Do not assume SQLCipher compiles frictionlessly on Windows — have Plan B (AES-GCM over standard SQLite)
+- The window is **decorationless** (no OS titlebar), with custom titlebar in React
+- Do not keep master password in memory longer than necessary to unlock
+- MCP is read-only — does not allow creating or modifying items
 
-## Contexto de negocio
-Usuario desarrollador que actualmente comparte credenciales de forma insegura por WhatsApp. Necesita acceso rápido (hotkey), facilidad para copiar al clipboard, y poder usar secretos como variables de entorno sin exponerlos visualmente. Uso estrictamente personal y local.
+## Business Context
+Developer user currently sharing credentials insecurely over WhatsApp. Needs quick access (hotkey), ease of copying to clipboard, and ability to use secrets as environment variables without visual exposure. Strictly personal and local usage.
 
 ---
 
-## Decisiones de implementación
+## Implementation Decisions
 
-### 1. SQLite + AES-GCM en lugar de SQLCipher (Plan B)
-**Contexto**: SQLCipher requiere OpenSSL/vcpkg con configuración compleja en Windows, generando errores de enlace (linking) durante la compilación.
+### 1. SQLite + AES-GCM Instead of SQLCipher (Plan B)
+**Context**: SQLCipher requires OpenSSL/vcpkg with complex configuration on Windows, generating linking errors during compilation.
 
-**Decisión**: Adoptar Plan B: SQLite estándar con `libsqlite3-sys` bundled + cifrado AES-256-GCM a nivel de aplicación.
+**Decision**: Adopt Plan B: Standard SQLite with `libsqlite3-sys` bundled + AES-256-GCM encryption at application level.
 
 **Rationale**: 
-- Evita compilación de OpenSSL en Windows (fricción alta, mantenimiento costoso)
-- Todos los campos sensibles (`data` en `items`, `data` en `categories`) se cifran antes de escribir a BD
-- La DB en disco no está cifrada a nivel de archivo, pero los datos más sensibles están protegidos por AES-256-GCM
-- Permite integración futura con bases de datos de mayor escala
+- Avoids OpenSSL compilation on Windows (high friction, costly maintenance)
+- All sensitive fields (`data` in `items`, `data` in `categories`) are encrypted before writing to DB
+- The DB file on disk is not encrypted at file level, but the most sensitive data is protected by AES-256-GCM
+- Allows future integration with larger-scale databases
 
-**Consecuencias**:
-- Si el archivo `vault.db` se accede directamente sin ejecutar la aplicación, los datos permanecen cifrados a nivel de campos
-- Se asume control físico del equipo (Windows local, usuario único) — no es defensa contra ataques directos a memoria
-- La clave AES derivada existe solo en memoria durante la sesión activa
-
----
-
-### 2. Estructura de módulos Rust desacoplada
-**Contexto**: Necesidad de separar responsabilidades entre crypto, persistencia, API y lógica de negocio.
-
-**Decisión**: 
-- `crypto/mod.rs`: Argon2id KDF, AES-256-GCM encrypt/decrypt, manejo de claves en `Zeroizing`
-- `db/mod.rs`: Pool SQLite, DDL de tablas, CRUD de ítems/categorías/settings (no conoce `api`, `vault`)
-- `vault/mod.rs`: `VaultState` (orquestador), 10+ comandos Tauri, operaciones de unlock/lock
-- `api/mod.rs`: Servidor Axum REST, endpoints, autenticación con tokens
-
-**Rationale**: Cada módulo tiene una responsabilidad clara. `vault` orquesta entre `crypto` y `db` sin que estos se conozcan mutuamente.
-
-**Consecuencias**: 
-- La API REST (`api/mod.rs`) también usa los mismos módulos subyacentes
-- CLI y MCP hablan con el backend vía HTTP REST; no tienen linkage directo con Rust
+**Consequences**:
+- If the `vault.db` file is accessed directly without running the application, data remains encrypted at field level
+- Assumes physical control of the machine (local Windows, single user) — not a defense against direct memory attacks
+- The AES key derived only exists in memory during the active session
 
 ---
 
-### 3. Almacenamiento de MCP token en archivo
-**Contexto**: MCP server necesita token para autenticar llamadas a la API REST; requiere persistencia entre sesiones (sin expiración).
+### 2. Decoupled Rust Module Structure
+**Context**: Need to separate responsibilities between crypto, persistence, API, and business logic.
 
-**Decisión**: 
-- Token MCP: 32 bytes generado aleatoriamente con `rand::thread_rng()`, guardado en `vault_meta.mcp_token` (DB)
-- Copia redundante en `%APPDATA%\com.maosuarez.vault\mcp_token` (archivo plaintext)
-- Se genera una única vez con `vault_generate_mcp_token` cuando se inicia MCP por primera vez
-- Sin expiración, válido mientras el vault esté desbloqueado
+**Decision**: 
+- `crypto/mod.rs`: Argon2id KDF, AES-256-GCM encrypt/decrypt, key management in `Zeroizing`
+- `db/mod.rs`: SQLite pool, DDL of tables, CRUD of items/categories/settings (does not know about `api`, `vault`)
+- `vault/mod.rs`: `VaultState` (orchestrator), 10+ Tauri commands, unlock/lock operations
+- `api/mod.rs`: Axum REST server, endpoints, token authentication
+
+**Rationale**: Each module has a clear responsibility. `vault` orchestrates between `crypto` and `db` without them knowing each other.
+
+**Consequences**: 
+- The REST API (`api/mod.rs`) also uses the same underlying modules
+- CLI and MCP communicate with the backend via HTTP REST; no direct Rust linkage
+
+---
+
+### 3. MCP Token Storage in File
+**Context**: MCP server needs token to authenticate calls to the REST API; requires persistence between sessions (no expiration).
+
+**Decision**: 
+- MCP Token: 32 bytes randomly generated with `rand::thread_rng()`, saved in `vault_meta.mcp_token` (DB)
+- Redundant copy in `%APPDATA%\com.maosuarez.vault\mcp_token` (plaintext file)
+- Generated only once with `vault_generate_mcp_token` when MCP is started for the first time
+- No expiration, valid while the vault is unlocked
 
 **Rationale**: 
-- Permite al MCP server leer su token sin necesidad de desbloquear interactivamente
-- Archivo en `%APPDATA%` evita que deba ser leído desde DB cada vez
-- La verificación del token en API REST usa `subtle::ConstantTimeEq`
+- Allows MCP server to read its token without need to unlock interactively
+- File in `%APPDATA%` avoids having to read from DB each time
+- Token verification in REST API uses `subtle::ConstantTimeEq`
 
-**Consecuencias**:
-- El archivo `mcp_token` en `%APPDATA%` necesita permisos restrictivos (idealmente 0600, en Windows: solo propietario)
-- Si se compromete ese archivo, cualquiera puede hacer llamadas al MCP
+**Consequences**:
+- The `mcp_token` file in `%APPDATA%` needs restrictive permissions (ideally 0600, on Windows: owner only)
+- If that file is compromised, anyone can make calls to MCP
 
 ---
 
-### 4. Esquema de base de datos (SQLite en `%APPDATA%`)
-**Contexto**: Necesidad de almacenar ítems cifrados, categorías, metadatos de crypto y settings.
+### 4. Database Schema (SQLite in `%APPDATA%`)
+**Context**: Need to store encrypted items, categories, crypto metadata, and settings.
 
-**Decisión**: 4 tablas en `vault.db` ubicada en `%APPDATA%\com.maosuarez.vault\vault.db`:
+**Decision**: 4 tables in `vault.db` located at `%APPDATA%\com.maosuarez.vault\vault.db`:
 
 ```sql
 CREATE TABLE vault_meta (
@@ -150,19 +150,19 @@ CREATE TABLE vault_meta (
     key   TEXT NOT NULL UNIQUE,
     value TEXT NOT NULL
 );
--- Contiene: kdf_salt (hex, 32 bytes), verify_token (hex, cifrado con AES-GCM)
+-- Contains: kdf_salt (hex, 32 bytes), verify_token (hex, encrypted with AES-GCM)
 
 CREATE TABLE items (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     item_type  TEXT NOT NULL,  -- 'secret', 'credential', 'link', 'command', 'note'
-    data       TEXT NOT NULL,  -- JSON cifrado con AES-GCM
+    data       TEXT NOT NULL,  -- JSON encrypted with AES-GCM
     created_at TEXT NOT NULL,  -- ISO 8601
     updated_at TEXT NOT NULL   -- ISO 8601
 );
 
 CREATE TABLE categories (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    data  TEXT NOT NULL  -- JSON array cifrado
+    data  TEXT NOT NULL  -- JSON array encrypted
 );
 
 CREATE TABLE settings (
@@ -173,217 +173,217 @@ CREATE TABLE settings (
 ```
 
 **Rationale**:
-- `vault_meta`: almacena salt (público) y verify_token (privado, cifrado) para derivación de clave
-- `items.data`: JSON serializado cifrado (evita columnas individuales)
-- `categories.data`: array JSON único, cifrado (CRUD simple)
-- `settings`: plaintext (no contiene secretos, solo configuración de usuario)
+- `vault_meta`: stores salt (public) and verify_token (private, encrypted) for key derivation
+- `items.data`: JSON serialized and encrypted (avoids individual columns)
+- `categories.data`: single JSON array, encrypted (simple CRUD)
+- `settings`: plaintext (contains no secrets, only user configuration)
 
-**Consecuencias**:
-- La tabla `items` crece indefinidamente; indexación por `id` y `item_type` recomendada para búsquedas futuras
-- JSON cifrado requiere deserialización post-decryption en la aplicación
+**Consequences**:
+- The `items` table grows indefinitely; indexing by `id` and `item_type` recommended for future searches
+- Encrypted JSON requires deserialization post-decryption in the application
 
 ---
 
-### 5. Flujo de unlock y gestión de clave en sesión
-**Contexto**: La clave AES debe existir solo en memoria durante la sesión activa; debe destruirse al bloquear.
+### 5. Unlock Flow and Key Management in Session
+**Context**: The AES key must only exist in memory during the active session; must be destroyed when locking.
 
-**Decisión**:
+**Decision**:
 
-1. **Primera inicialización** (`init_vault_crypto`):
-   - Genera `salt` de 32 bytes con `rand::thread_rng()`
-   - Deriva clave AES con Argon2id(m=65536, t=3, p=4) desde password + salt
-   - Cifra `b"vault_ok_v1"` como `verify_token` con AES-256-GCM
-   - Guarda `salt` y `verify_token` en `vault_meta`
-   - Guarda clave en `VaultState.key` como `Zeroizing<[u8;32]>`
+1. **First initialization** (`init_vault_crypto`):
+   - Generates 32-byte `salt` with `rand::thread_rng()`
+   - Derives AES key with Argon2id(m=65536, t=3, p=4) from password + salt
+   - Encrypts `b"vault_ok_v1"` as `verify_token` with AES-256-GCM
+   - Saves `salt` and `verify_token` in `vault_meta`
+   - Saves key in `VaultState.key` as `Zeroizing<[u8;32]>`
 
 2. **Unlock** (`unlock_vault_crypto`):
-   - Lee `salt` y `verify_token` de `vault_meta`
-   - Re-deriva clave con Argon2id
-   - Intenta descifrar `verify_token` → si OK, password correcto
-   - Guarda clave en `VaultState.key`
-   - Genera session token (32 bytes hex)
-   - Retorna token al cliente
+   - Reads `salt` and `verify_token` from `vault_meta`
+   - Re-derives key with Argon2id
+   - Attempts to decrypt `verify_token` → if OK, password is correct
+   - Saves key in `VaultState.key`
+   - Generates session token (32 bytes hex)
+   - Returns token to client
 
 3. **Lock**:
-   - Pone `VaultState.key = None`
-   - El `Zeroizing` automáticamente sobrescribe los 32 bytes al hacer Drop
+   - Sets `VaultState.key = None`
+   - The `Zeroizing` automatically overwrites the 32 bytes on Drop
 
 **Rationale**:
-- `Zeroizing` es obligatorio para evitar que la clave persista en heap entre sesiones
-- Argon2id con parámetros altos (m=65536) hace brute-force muy costoso
-- `verify_token` permite detectar password incorrecto sin necesidad de descifrar todos los ítems
+- `Zeroizing` is mandatory to prevent the key from persisting on heap between sessions
+- Argon2id with high parameters (m=65536) makes brute-force very costly
+- `verify_token` allows detecting incorrect password without decrypting all items
 
-**Consecuencias**:
-- El tiempo de unlock es ~200-500ms (por diseño, Argon2id es lento)
-- Si el proceso se mata abruptamente, la clave puede no sobrescribirse (defensa contra ataques de DMA no es posible en Windows user-mode)
+**Consequences**:
+- Unlock time is ~200-500ms (by design, Argon2id is slow)
+- If the process is abruptly killed, the key may not be overwritten (defense against DMA attacks is not possible in Windows user-mode)
 
 ---
 
-### 6. Autenticación REST: session token vs MCP token
-**Contexto**: API REST debe autenticar solicitudes; session tokens expiran, MCP token es persistente.
+### 6. REST Authentication: Session Token vs MCP Token
+**Context**: REST API must authenticate requests; session tokens expire, MCP token is persistent.
 
-**Decisión**:
+**Decision**:
 
-- **Session token**: 32 bytes hex, generado en `/unlock`, válido por `auto_lock_minutes` (Instant + Duration en servidor)
+- **Session token**: 32 bytes hex, generated on `/unlock`, valid for `auto_lock_minutes` (Instant + Duration on server)
   - Header: `X-Vault-Token: <hex32>`
-  - Expira automáticamente
-  - Usado por CLI y frontend (vía Tauri `invoke`)
+  - Expires automatically
+  - Used by CLI and frontend (via Tauri `invoke`)
 
-- **MCP token**: 32 bytes hex, generado una vez, sin expiración
-  - Header: `X-Vault-Token: <hex32>` (mismo header)
-  - Verificación en tiempo-constante con `subtle::ConstantTimeEq`
-  - Usado únicamente por servidor MCP
-  - Permite MCP funcionar sin que el vault esté "desbloqueado" interactivamente
+- **MCP token**: 32 bytes hex, generated once, no expiration
+  - Header: `X-Vault-Token: <hex32>` (same header)
+  - Constant-time verification with `subtle::ConstantTimeEq`
+  - Used only by MCP server
+  - Allows MCP to function without explicit unlock interface
 
 **Rationale**: 
-- Dos canales separados: session (efímera, UI) vs MCP (persistente, backend)
-- MCP puede funcionar sin interfaz gráfica
-- Expiración previene reutilización de tokens exfiltrados
+- Two separate channels: session (ephemeral, UI) vs MCP (persistent, backend)
+- MCP can function without GUI interface
+- Expiration prevents reuse of exfiltrated tokens
 
-**Consecuencias**:
-- Servidor debe mantener mapa `HashMap<String, Instant>` de tokens activos
-- Limpieza periódica de tokens expirados recomendada
+**Consequences**:
+- Server must maintain `HashMap<String, Instant>` of active tokens
+- Periodic cleanup of expired tokens recommended
 
 ---
 
-### 7. Endpoints REST implementados
-**Contexto**: API REST en `127.0.0.1:47821` como interfaz unificada para CLI, MCP y Tauri.
+### 7. Implemented REST Endpoints
+**Context**: REST API on `127.0.0.1:47821` as unified interface for CLI, MCP, and Tauri.
 
-**Decisión**: Implementar endpoints RESTful con autenticación dual:
+**Decision**: Implement RESTful endpoints with dual authentication:
 
-| Método | Ruta | Auth | Descripción |
-|--------|------|------|-------------|
-| POST | `/unlock` | - | Valida password, retorna session token |
-| GET | `/items` | token | Lista ítems (sin campos sensibles) |
-| POST | `/items` | token | Crea ítem nuevo |
-| GET | `/items/:id` | token | Obtiene ítem (sin valores cifrados) |
-| PUT | `/items/:id` | token | Actualiza ítem |
-| DELETE | `/items/:id` | token | Elimina ítem |
-| POST | `/items/:id/reveal` | token | Descifra y retorna valor sensible (único endpoint que lo hace) |
-| GET | `/categories` | token | Lista categorías |
-| POST | `/categories` | token | Crea/actualiza categorías |
-| GET | `/settings` | token | Retorna settings (no secretos) |
-| PUT | `/settings` | token | Actualiza settings |
-| GET | `/commands` | token | Lista comandos disponibles (solo lectura MCP) |
+| Method | Route | Auth | Description |
+|--------|-------|------|-------------|
+| POST | `/unlock` | - | Validates password, returns session token |
+| GET | `/items` | token | Lists items (no sensitive fields) |
+| POST | `/items` | token | Creates new item |
+| GET | `/items/:id` | token | Gets item (no encrypted values) |
+| PUT | `/items/:id` | token | Updates item |
+| DELETE | `/items/:id` | token | Deletes item |
+| POST | `/items/:id/reveal` | token | Decrypts and returns sensitive value (only endpoint that does this) |
+| GET | `/categories` | token | Lists categories |
+| POST | `/categories` | token | Creates/updates categories |
+| GET | `/settings` | token | Returns settings (no secrets) |
+| PUT | `/settings` | token | Updates settings |
+| GET | `/commands` | token | Lists available commands (MCP read-only) |
 
 **Rationale**:
-- `/unlock` sin token (puerta de entrada)
-- `/items/:id/reveal` es el único endpoint que retorna secretos en plaintext (justificable porque requiere session token válido)
-- Responses nunca incluyen valores cifrados en plaintext (solo JSON de metadatos)
+- `/unlock` without token (entry point)
+- `/items/:id/reveal` is the only endpoint returning secrets in plaintext (justifiable because it requires valid session token)
+- Responses never include encrypted values in plaintext (only metadata JSON)
 
-**Consecuencias**:
-- CLI debe hacer 2 llamadas: `/unlock` + luego requests autenticadas
-- MCP hace un `/unlock` inicial o reutiliza MCP token directamente
-- Auditoría de llamadas a `/items/:id/reveal` recomendada (puede loguear accesos)
-
----
-
-### 8. CLI (`vault` binario)
-**Contexto**: Herramienta standalone para gestión sin GUI, escrita en Rust + clap, conecta vía HTTP REST.
-
-**Decisión**: Binario `src-tauri/src/bin/vault.rs` que:
-- Usa `clap` para parsing de argumentos
-- Conecta vía HTTP a `127.0.0.1:47821` (si el vault GUI está corriendo) o inicia servidor API localmente
-- Almacena session token en `%APPDATA%\com.maosuarez.vault\cli_session_token` (con expiración)
-- Soporta comandos:
-  - `vault unlock` — solicita master password, guarda token
-  - `vault lock` — invalida sesión
-  - `vault list [--type TYPE]` — lista ítems sin secretos
-  - `vault get <name>` — muestra metadata
-  - `vault set <name>` — copia valor al clipboard (requiere `/reveal`)
-  - `vault fill <name>` — exporta como `export VAR=value` (para `eval`)
-  - `vault cmd <name>` — ejecuta comando guardado
-  - `vault add` — asistente interactivo
-
-**Rationale**: CLI desacoplado del servidor REST permite control independiente; almacenamiento de token evita re-autenticar.
-
-**Consecuencias**:
-- Token en archivo `cli_session_token` necesita permisos restrictivos (0600)
-- Si servidor API está inactivo, CLI debe poder levantarlo (posible futura característica)
+**Consequences**:
+- CLI must make 2 calls: `/unlock` + then authenticated requests
+- MCP makes initial `/unlock` or reuses MCP token directly
+- Audit of `/items/:id/reveal` calls recommended (can log accesses)
 
 ---
 
-### 9. MCP server (`vault-mcp` binario)
-**Contexto**: Servidor Model Context Protocol para integración con agentes IA, comunicación vía JSON-RPC 2.0 sobre stdio.
+### 8. CLI (`vault` Binary)
+**Context**: Standalone tool for management without GUI, written in Rust + clap, connects via HTTP REST.
 
-**Decisión**: Binario `src-tauri/src/bin/vault-mcp.rs` que:
-- Lee MCP token de `%APPDATA%\com.maosuarez.vault\mcp_token`
-- Conecta vía HTTP REST a `127.0.0.1:47821`
-- Implementa tools JSON-RPC:
-  - `vault_list_items` — lista sin secretos
-  - `vault_get_item` — obtiene por ID/nombre
-  - `vault_generate_env` — escribe `.env` en `%TEMP%` (RAII pendiente)
-  - `vault_inject_env` — set_var en proceso actual (validación `[A-Z0-9_]+`)
-  - `vault_add_item` — crea ítem
-  - `vault_update_settings` — modifica settings
-  - `vault_list_commands` — lista comandos
-  - `vault_run_command` — ejecuta comando shell
+**Decision**: Binary `src-tauri/src/bin/vault.rs` that:
+- Uses `clap` for argument parsing
+- Connects via HTTP to `127.0.0.1:47821` (if vault GUI is running) or starts API server locally
+- Stores session token in `%APPDATA%\com.maosuarez.vault\cli_session_token` (with expiration)
+- Supports commands:
+  - `vault unlock` — requests master password, saves token
+  - `vault lock` — invalidates session
+  - `vault list [--type TYPE]` — lists items without secrets
+  - `vault get <name>` — shows metadata
+  - `vault set <name>` — copies value to clipboard (requires `/reveal`)
+  - `vault fill <name>` — exports as `export VAR=value` (for `eval`)
+  - `vault cmd <name>` — executes saved command
+  - `vault add` — interactive assistant
+
+**Rationale**: Decoupled CLI from REST server allows independent control; token storage avoids re-authentication.
+
+**Consequences**:
+- Token in `cli_session_token` file needs restrictive permissions (0600)
+- If API server is inactive, CLI should be able to start it (possible future feature)
+
+---
+
+### 9. MCP Server (`vault-mcp` Binary)
+**Context**: Model Context Protocol server for AI agent integration, communication via JSON-RPC 2.0 over stdio.
+
+**Decision**: Binary `src-tauri/src/bin/vault-mcp.rs` that:
+- Reads MCP token from `%APPDATA%\com.maosuarez.vault\mcp_token`
+- Connects via HTTP REST to `127.0.0.1:47821`
+- Implements JSON-RPC tools:
+  - `vault_list_items` — lists without secrets
+  - `vault_get_item` — gets by ID/name
+  - `vault_generate_env` — writes `.env` to `%TEMP%` (RAII pending)
+  - `vault_inject_env` — set_var in current process (validation `[A-Z0-9_]+`)
+  - `vault_add_item` — creates item
+  - `vault_update_settings` — modifies settings
+  - `vault_list_commands` — lists commands
+  - `vault_run_command` — executes shell command
 
 **Rationale**:
-- Protocolo estándar MCP permite integración con cualquier cliente compatible
-- No retorna secretos en plaintext, solo inyecta como variables de entorno
-- Token MCP persistente permite funcionar sin interfaz de unlock explícita
+- Standard MCP protocol allows integration with any compatible client
+- Does not return secrets in plaintext, only injects as environment variables
+- Persistent MCP token allows functioning without explicit unlock interface
 
-**Consecuencias**:
-- Si `mcp_token` se compromete, MCP puede ser accedido remotamente (si se escucha en red, lo cual está fuera de alcance actual)
-- `vault_inject_env` requiere validación estricta de nombres (prevenir inyección)
+**Consequences**:
+- If `mcp_token` is compromised, MCP can be accessed remotely (if listening on network, outside current scope)
+- `vault_inject_env` requires strict name validation (prevent injection)
 
 ---
 
-### 10. Ubicación de archivos en Windows
-**Contexto**: Necesidad de almacenar DB, tokens, configuración de forma persistente y segura.
+### 10. File Location on Windows
+**Context**: Need to store DB, tokens, configuration persistently and securely.
 
-**Decisión**: Usar `%APPDATA%\com.maosuarez.vault\` como directorio base:
+**Decision**: Use `%APPDATA%\com.maosuarez.vault\` as base directory:
 
 ```
 %APPDATA%\com.maosuarez.vault\
-├── vault.db                    # BD SQLite (cifrado AES-GCM a nivel de campos)
-├── mcp_token                   # Token MCP (plaintext, permisos 0600)
-├── cli_session_token           # Session token CLI (plaintext, permisos 0600)
-└── logs/                        # (futuro) Auditoría de accesos
+├── vault.db                    # SQLite DB (AES-GCM encryption at field level)
+├── mcp_token                   # MCP token (plaintext, permissions 0600)
+├── cli_session_token           # CLI session token (plaintext, permissions 0600)
+└── logs/                        # (future) Access audit
 ```
 
 **Rationale**: 
-- `%APPDATA%` es estándar para datos de usuario en Windows (roameable en dominio)
-- Subdirectorio `com.maosuarez.vault` evita conflictos con otras aplicaciones
-- Tokens en archivo en lugar de memory-only facilita acceso por CLI/MCP sin servidor GUI
+- `%APPDATA%` is standard for user data on Windows (roameable on domain)
+- Subdirectory `com.maosuarez.vault` prevents conflicts with other applications
+- Token in file rather than memory-only facilitates access by CLI/MCP without GUI server
 
-**Consecuencias**:
-- Si cuenta de usuario se compromete, los tokens también
-- Encriptado a nivel de SO (NTFS EFS) opcional pero no implementado
-
----
-
-## Estado de seguridad (post-revisión 2026-04-24)
-
-Se realizó una **revisión de seguridad comprehensiva** que identificó **19 hallazgos** (7 ALTA, 8 MEDIA, 4 BAJA). 
-
-**Hallazgos críticos (ALTA) implementados**:
-1. ✅ **Timing-safe token comparison**: Implementado `subtle::ConstantTimeEq` para todas las comparaciones de tokens
-2. ✅ **Master password derivation**: Argon2id con parámetros reforzados (m=65536, t=3, p=4)
-3. ✅ **Clave en memoria con Zeroizing**: Usar `zeroize` crate para sobrescribir clave al hacer Drop
-
-**Hallazgos críticos (ALTA) pendientes de implementación**:
-4. ⏳ **Rate limiting en `/unlock`**: Evitar brute-force de master password
-5. ⏳ **Auditoría de accesos a `/items/:id/reveal`**: Loguear quién accede a qué secretos y cuándo
-6. ⏳ **Permisos de archivos (mcp_token, cli_session_token)**: Configurar 0600 en creación
-7. ⏳ **Cifrado de credenciales en el MCP server**: Mantener tokens en memoria con Zeroizing
-
-**Hallazgos MEDIA implementados**:
-- ✅ Gestión de errores sin exposición de paths internos
-
-**Hallazgos MEDIA pendientes**:
-- ⏳ HTTPS para API REST local (mkcert)
-- ⏳ Validación de entrada en `/items` POST/PUT
-- ⏳ Limpieza de `.env` temporal generado por `vault_generate_env` (RAII)
-- ⏳ Session timeout no implementado aún (solo estructura)
-
-**Hallazgos BAJA**:
-- Documentación de seguridad
-- Trazabilidad de cambios (audit log)
-- Exportación segura de datos
+**Consequences**:
+- If user account is compromised, tokens are also compromised
+- Encryption at OS level (NTFS EFS) optional but not implemented
 
 ---
 
-> Este archivo es el contexto principal del proyecto.
-> Referenciado desde CLAUDE.md con: `See context.md for full project context.`
+## Security Status (post-review 2026-04-24)
+
+A **comprehensive security review** was performed that identified **19 findings** (7 HIGH, 8 MEDIUM, 4 LOW). 
+
+**Critical findings (HIGH) implemented**:
+1. ✅ **Timing-safe token comparison**: Implemented `subtle::ConstantTimeEq` for all token comparisons
+2. ✅ **Master password derivation**: Argon2id with hardened parameters (m=65536, t=3, p=4)
+3. ✅ **Key in memory with Zeroizing**: Use `zeroize` crate to overwrite key on Drop
+
+**Critical findings (HIGH) pending implementation**:
+4. ⏳ **Rate limiting on `/unlock`**: Prevent brute-force of master password
+5. ⏳ **Access audit for `/items/:id/reveal`**: Log who accesses which secrets and when
+6. ⏳ **File permissions (mcp_token, cli_session_token)**: Configure 0600 on creation
+7. ⏳ **Credential encryption in MCP server**: Keep tokens in memory with Zeroizing
+
+**MEDIUM findings implemented**:
+- ✅ Error handling without exposure of internal paths
+
+**MEDIUM findings pending**:
+- ⏳ HTTPS for local REST API (mkcert)
+- ⏳ Input validation on `/items` POST/PUT
+- ⏳ Cleanup of temporary `.env` generated by `vault_generate_env` (RAII)
+- ⏳ Session timeout not yet implemented (structure only)
+
+**LOW findings**:
+- Security documentation
+- Change traceability (audit log)
+- Secure data export
+
+---
+
+> This file is the main project context.
+> Referenced from CLAUDE.md with: `See context.md for full project context.`

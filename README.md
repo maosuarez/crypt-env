@@ -41,7 +41,9 @@ DevVault is a desktop application that centralizes your API keys, credentials, c
 
 ## 🖥️ Screenshots
 
-> Coming soon — contributions welcome!
+![Lock Screen](/docs/images/lockscreen.png "Lock Screen")
+
+![Main View](/docs/images/mainscreen.png "Main View")
 
 ---
 

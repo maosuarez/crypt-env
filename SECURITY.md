@@ -1,6 +1,6 @@
 # Security Policy
 
-Thank you for helping keep DevVault secure. This document outlines our security model, supported versions, and how to report vulnerabilities.
+Thank you for helping keep CryptEnv secure. This document outlines our security model, supported versions, and how to report vulnerabilities.
 
 ---
 
@@ -48,7 +48,7 @@ Thank you for helping keep DevVault secure. This document outlines our security 
 
 ### Core Principles
 
-DevVault is a **local-first vault** — no cloud, no network dependencies (except optional local REST API).
+CryptEnv is a **local-first secrets manager** — no cloud, no network dependencies (except optional local REST API).
 
 ### Encryption & Key Derivation
 
@@ -115,7 +115,7 @@ Security updates are announced via:
 
 ## Dependencies
 
-DevVault depends on trusted crates for cryptography:
+CryptEnv depends on trusted crates for cryptography:
 
 - **argon2** — OWASP recommended password hashing
 - **aes-gcm** — NIST approved AEAD cipher

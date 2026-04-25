@@ -24,9 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Clipboard integration** — Copy secrets in one click, auto-clear after timeout
 - **Export formats** — Generate `.env`, bash `export VAR=val`, PowerShell `$env:VAR = "val"` format
 - **Auto-lock timeout** — Vault locks automatically after configurable inactivity (5 min default)
-- **CLI binary** (`vault`) — Manage vault from terminal: fill `.env`, set env vars, run commands with placeholders, search items
+- **CLI binary** (`crypt-env`) — Manage vault from terminal: fill `.env`, set env vars, run commands with placeholders, search items
 - **Local REST API** — Axum server at `127.0.0.1:47821` for local integrations (locked by default, requires token)
-- **MCP server** (`vault-mcp`) — Stdio-based JSON-RPC 2.0 server for AI agents (Claude Code, Claude Desktop)
+- **MCP server** (`crypt-env-mcp`) — Stdio-based JSON-RPC 2.0 server for AI agents (Claude Code, Claude Desktop)
   - `vault_list_items` — List items by type/category (no secrets exposed)
   - `vault_get_item` — Get item metadata without secret values
   - `vault_generate_env` — Generate `.env` file (values never in response)
@@ -55,5 +55,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - No encrypted cloud backup (intentional — local-first design)
 - No import from password managers yet
 
-[Unreleased]: https://github.com/maosuarez/devvault/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/maosuarez/devvault/releases/tag/v0.1.0
+[Unreleased]: https://github.com/maosuarez/crypt-env/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/maosuarez/crypt-env/releases/tag/v0.1.0

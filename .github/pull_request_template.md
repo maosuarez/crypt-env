@@ -1,6 +1,6 @@
 ---
 name: Pull Request
-about: Submit a change to DevVault
+about: Submit a change to CryptEnv
 ---
 
 ## Summary

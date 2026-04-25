@@ -1,4 +1,4 @@
-# 🔐 DevVault
+# 🔐 CryptEnv
 
 > A local-first, encrypted secrets vault for developers — accessible from anywhere with a hotkey. Integrate with AI agents via MCP to inject secrets as environment variables without exposing plaintext values.
 
@@ -7,11 +7,11 @@
 ![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202.0-orange)
 ![Status](https://img.shields.io/badge/status-active%20development-yellow)
 
-DevVault is a desktop application that centralizes your API keys, credentials, commands, links and notes in a single encrypted local vault. No cloud. No subscriptions. No secrets in your WhatsApp chats.
+CryptEnv is a desktop application that centralizes your API keys, credentials, commands, links and notes in a single encrypted local vault. No cloud. No subscriptions. No secrets in your WhatsApp chats.
 
-### Why DevVault?
+### Why CryptEnv?
 
-DevVault's MCP server integrates with AI coding agents (Claude Code, Claude Desktop, etc.) to enable secure automation workflows. Instead of sharing API keys with tools—where they appear in plain text in logs, prompts, or responses—DevVault injects secrets directly as environment variables. The AI agent never sees the actual values, only uses them safely within subprocess calls.
+CryptEnv's MCP server integrates with AI coding agents (Claude Code, Claude Desktop, etc.) to enable secure automation workflows. Instead of sharing API keys with tools—where they appear in plain text in logs, prompts, or responses—CryptEnv injects secrets directly as environment variables. The AI agent never sees the actual values, only uses them safely within subprocess calls.
 
 ---
 
@@ -25,7 +25,7 @@ DevVault's MCP server integrates with AI coding agents (Claude Code, Claude Desk
 - **Export formats** — generate `.env`, `export VAR=val` or `$env:VAR = "val"` from any secret
 - **Command runner** — store terminal commands with `{{placeholders}}` and fill them on the fly
 - **Auto-lock** — vault locks automatically after configurable inactivity timeout
-- **CLI** — manage your vault from the terminal with `vault` commands
+- **CLI** — manage your vault from the terminal with `crypt-env` commands
 - **Local REST API** — integrate with your own tools at `127.0.0.1:47821`
 - **MCP server** — let AI agents (like Claude) inject secrets as environment variables without seeing them in plain text
 
@@ -63,8 +63,8 @@ DevVault's MCP server integrates with AI coding agents (Claude Code, Claude Desk
 ### Install & Run
 
 ```bash
-git clone https://github.com/maosuarez/devvault.git
-cd devvault
+git clone https://github.com/maosuarez/crypt-env.git
+cd crypt-env
 pnpm install
 pnpm tauri dev
 ```
@@ -83,56 +83,56 @@ pnpm tauri build
 
 ```bash
 # Fill a .env file with secrets from the vault
-vault --fill .env
+crypt-env --fill .env
 
 # Set a secret as an environment variable in the current shell
-eval $(vault set OPENAI_API_KEY)          # bash/zsh
-vault set OPENAI_API_KEY | Invoke-Expression  # PowerShell
+eval $(crypt-env set OPENAI_API_KEY)          # bash/zsh
+crypt-env set OPENAI_API_KEY | Invoke-Expression  # PowerShell
 
 # List saved commands
-vault cmd --list
+crypt-env cmd --list
 
 # Get help for a specific command
-vault cmd deploy --help
+crypt-env cmd deploy --help
 
 # Run a command resolving its placeholders
-vault cmd deploy --HOST=production --PORT=8080
+crypt-env cmd deploy --HOST=production --PORT=8080
 
 # Search items without exposing values
-vault search openai
+crypt-env search openai
 ```
 
 ---
 
 ## 🤖 MCP Integration
 
-DevVault exposes a **stdio-based MCP server** (JSON-RPC 2.0) that AI agents can use to interact with your vault securely.
+CryptEnv exposes a **stdio-based MCP server** (JSON-RPC 2.0) that AI agents can use to interact with your vault securely.
 
 ### Configure Claude Desktop
 
-`vault-mcp` is a **stdio subprocess** — Claude Desktop launches it directly. It is **not** an HTTP server and must **not** be configured with a `url` field.
+`crypt-env-mcp` is a **stdio subprocess** — Claude Desktop launches it directly. It is **not** an HTTP server and must **not** be configured with a `url` field.
 
 Locate your Claude Desktop config at `%APPDATA%\Claude\claude_desktop_config.json` and add:
 
 ```json
 {
   "mcpServers": {
-    "devvault": {
-      "command": "C:\\full\\path\\to\\vault-mcp.exe"
+    "cryptenv": {
+      "command": "C:\\full\\path\\to\\crypt-env-mcp.exe"
     }
   }
 }
 ```
 
-Replace the path with the actual location of your `vault-mcp.exe` binary. If you built from source, it is at:
+Replace the path with the actual location of your `crypt-env-mcp.exe` binary. If you built from source, it is at:
 
 ```
-src-tauri\target\release\vault-mcp.exe
+src-tauri\target\release\crypt-env-mcp.exe
 ```
 
 **Prerequisites before using the MCP tools:**
-1. Generate an MCP token once: open DevVault → Settings → Integrations → Generate MCP Token
-2. Start the DevVault app and unlock the vault — `vault-mcp` connects to the local REST API at `127.0.0.1:47821`
+1. Generate an MCP token once: open CryptEnv → Settings → Integrations → Generate MCP Token
+2. Start the CryptEnv app and unlock the vault — `crypt-env-mcp` connects to the local REST API at `127.0.0.1:47821`
 3. Restart Claude Desktop after editing the config
 
 ### Available MCP tools
@@ -153,7 +153,7 @@ src-tauri\target\release\vault-mcp.exe
 ## 🗂️ Project Structure
 
 ```
-devvault/
+crypt-env/
 ├── src/                    # React + TypeScript frontend
 │   ├── components/         # UI components (Lock, MainVault, AddItem, Settings...)
 │   ├── store/              # Zustand global state
@@ -162,14 +162,14 @@ devvault/
 ├── src-tauri/              # Rust backend
 │   ├── src/
 │   │   ├── bin/            # Standalone binaries
-│   │   │   ├── vault.rs    # CLI binary for vault operations
-│   │   │   └── vault-mcp.rs # MCP server (stdio, JSON-RPC 2.0)
+│   │   │   ├── crypt-env.rs    # CLI binary for vault operations
+│   │   │   └── crypt-env-mcp.rs # MCP server (stdio, JSON-RPC 2.0)
 │   │   ├── crypto/         # AES-256-GCM + Argon2id
 │   │   ├── db/             # SQLite layer
 │   │   ├── vault/          # Business logic (CRUD)
 │   │   ├── api/            # Axum REST server (port 47821)
 │   │   ├── cli/            # CLI command definitions (used by vault binary)
-│   │   ├── mcp/            # MCP request handlers (used by vault-mcp binary)
+│   │   ├── mcp/            # MCP request handlers (used by crypt-env-mcp binary)
 │   │   ├── lib.rs          # Shared library code
 │   │   └── main.rs         # Tauri desktop app
 │   ├── Cargo.toml
@@ -186,7 +186,7 @@ devvault/
 
 ## 🤝 Contributing
 
-Contributions are welcome! DevVault is actively developed and there's a lot of ground to cover.
+Contributions are welcome! CryptEnv is actively developed and there's a lot of ground to cover.
 
 ### How to contribute
 
@@ -203,7 +203,7 @@ Contributions are welcome! DevVault is actively developed and there's a lot of g
 - [ ] Browser extension for auto-filling credentials
 - [ ] Encrypted backup & restore
 - [ ] Vault item sharing via QR code (local network only)
-- [ ] `vault` CLI as a standalone installable binary
+- [ ] `crypt-env` CLI as a standalone installable binary
 
 ### Guidelines
 

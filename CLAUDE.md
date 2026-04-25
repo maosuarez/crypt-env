@@ -1,4 +1,4 @@
-# VAULT — Private Dev Vault
+# CRYPTENV — Encrypted Local Secrets Manager
 See context.md for full project context.
 
 ---

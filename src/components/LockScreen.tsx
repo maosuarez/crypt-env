@@ -50,7 +50,7 @@ export function LockScreen() {
             </div>
             <div className="absolute inset-[-1px] rounded-[4px] pointer-events-none shadow-[0_0_20px_-4px_color-mix(in_oklch,oklch(0.70_0.17_162)_40%,transparent)]" />
           </div>
-          <div className="text-[22px] font-bold tracking-[-0.01em] text-tx">Vault</div>
+          <div className="text-[22px] font-bold tracking-[-0.01em] text-tx">CryptEnv</div>
           <div className="text-[11px] text-tx3 font-mono tracking-[0.06em]">ENCRYPTED LOCAL STORE</div>
         </div>
 

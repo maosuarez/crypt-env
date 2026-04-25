@@ -16,7 +16,7 @@ export function WindowChrome() {
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
         <div className="flex items-center gap-2 text-xs font-medium tracking-widest text-tx3 font-mono">
           <Icon name="shield" size={14} color="oklch(0.70 0.17 162)" />
-          VAULT
+          CRYPTENV
         </div>
       </div>
 

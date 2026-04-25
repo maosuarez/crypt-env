@@ -1,4 +1,4 @@
-# tauri-private-vault
+# crypt-env
 
 ## Description
 Personal productivity vault for developers. Centralizes credentials, API keys, tokens, passwords, links, commands, and notes in a local desktop app accessible by hotkey (Ctrl+Alt+Z). Secrets are stored encrypted locally. Includes CLI, local REST API, and MCP server for integration with external tools.
@@ -8,15 +8,15 @@ Personal productivity vault for developers. Centralizes credentials, API keys, t
 - **Backend (Rust)**: Tauri 2.0, Axum (local REST), Tokio
 - **Database**: SQLite with `libsqlite3-sys` bundled (no SQLCipher; see Decision #1)
 - **Encryption**: AES-256-GCM for sensitive fields, Argon2id for master password, `subtle::ConstantTimeEq` for timing-safe comparisons
-- **CLI**: Terminal interface for item management without opening the GUI (binary `vault`)
-- **MCP**: Model Context Protocol server for secure secret queries (binary `vault-mcp`)
+- **CLI**: Terminal interface for item management without opening the GUI (binary `crypt-env`)
+- **MCP**: Model Context Protocol server for secure secret queries (binary `crypt-env-mcp`)
 - **REST API**: Axum on `127.0.0.1:47821` with dual authentication (session token + MCP token)
 - **Target OS**: Windows (development), multi-platform in the future
 - **Package manager**: pnpm
 
 ## Architecture
 ```
-tauri-private-vault/
+crypt-env/
 ├── src/                          # React frontend
 │   ├── components/               # UI components by screen
 │   ├── store/                    # Global state with Zustand
@@ -33,16 +33,16 @@ tauri-private-vault/
 │   │   ├── cli/mod.rs            # CLI module (stub)
 │   │   ├── mcp/mod.rs            # MCP module (stub)
 │   │   └── bin/
-│   │       ├── vault.rs          # CLI standalone (clap), connects via HTTP to API
-│   │       └── vault-mcp.rs      # MCP JSON-RPC 2.0 server over stdio
+│   │       ├── crypt-env.rs      # CLI standalone (clap), connects via HTTP to API
+│   │       └── crypt-env-mcp.rs  # MCP JSON-RPC 2.0 server over stdio
 │   ├── Cargo.toml                # Rust dependencies
 │   └── tauri.conf.json           # Window config, permissions, hotkey
 ```
 
 **Communication**:
 - Frontend → Tauri `invoke()` → registered Rust commands
-- CLI (`vault`) → HTTP REST to `127.0.0.1:47821` with session/MCP token
-- MCP (`vault-mcp`) → HTTP REST to `127.0.0.1:47821` with MCP token
+- CLI (`crypt-env`) → HTTP REST to `127.0.0.1:47821` with session/MCP token
+- MCP (`crypt-env-mcp`) → HTTP REST to `127.0.0.1:47821` with MCP token
 
 ## Vault Item Types
 1. **Secret / API Key**: name, encrypted value, category, notes. Export as `.env` / `export` / `$env:`
@@ -124,7 +124,7 @@ Developer user currently sharing credentials insecurely over WhatsApp. Needs qui
 
 **Decision**: 
 - MCP Token: 32 bytes randomly generated with `rand::thread_rng()`, saved in `vault_meta.mcp_token` (DB)
-- Redundant copy in `%APPDATA%\com.maosuarez.vault\mcp_token` (plaintext file)
+- Redundant copy in `%APPDATA%\com.maosuarez.cryptenv\mcp_token` (plaintext file)
 - Generated only once with `vault_generate_mcp_token` when MCP is started for the first time
 - No expiration, valid while the vault is unlocked
 
@@ -142,7 +142,7 @@ Developer user currently sharing credentials insecurely over WhatsApp. Needs qui
 ### 4. Database Schema (SQLite in `%APPDATA%`)
 **Context**: Need to store encrypted items, categories, crypto metadata, and settings.
 
-**Decision**: 4 tables in `vault.db` located at `%APPDATA%\com.maosuarez.vault\vault.db`:
+**Decision**: 4 tables in `vault.db` located at `%APPDATA%\com.maosuarez.cryptenv\vault.db`:
 
 ```sql
 CREATE TABLE vault_meta (
@@ -281,10 +281,10 @@ CREATE TABLE settings (
 ### 8. CLI (`vault` Binary)
 **Context**: Standalone tool for management without GUI, written in Rust + clap, connects via HTTP REST.
 
-**Decision**: Binary `src-tauri/src/bin/vault.rs` that:
+**Decision**: Binary `src-tauri/src/bin/crypt-env.rs` that:
 - Uses `clap` for argument parsing
 - Connects via HTTP to `127.0.0.1:47821` (if vault GUI is running) or starts API server locally
-- Stores session token in `%APPDATA%\com.maosuarez.vault\cli_session_token` (with expiration)
+- Stores session token in `%APPDATA%\com.maosuarez.cryptenv\cli_session_token` (with expiration)
 - Supports commands:
   - `vault unlock` — requests master password, saves token
   - `vault lock` — invalidates session
@@ -303,11 +303,11 @@ CREATE TABLE settings (
 
 ---
 
-### 9. MCP Server (`vault-mcp` Binary)
+### 9. MCP Server (`crypt-env-mcp` Binary)
 **Context**: Model Context Protocol server for AI agent integration, communication via JSON-RPC 2.0 over stdio.
 
-**Decision**: Binary `src-tauri/src/bin/vault-mcp.rs` that:
-- Reads MCP token from `%APPDATA%\com.maosuarez.vault\mcp_token`
+**Decision**: Binary `src-tauri/src/bin/crypt-env-mcp.rs` that:
+- Reads MCP token from `%APPDATA%\com.maosuarez.cryptenv\mcp_token`
 - Connects via HTTP REST to `127.0.0.1:47821`
 - Implements JSON-RPC tools:
   - `vault_list_items` — lists without secrets
@@ -333,10 +333,10 @@ CREATE TABLE settings (
 ### 10. File Location on Windows
 **Context**: Need to store DB, tokens, configuration persistently and securely.
 
-**Decision**: Use `%APPDATA%\com.maosuarez.vault\` as base directory:
+**Decision**: Use `%APPDATA%\com.maosuarez.cryptenv\` as base directory:
 
 ```
-%APPDATA%\com.maosuarez.vault\
+%APPDATA%\com.maosuarez.cryptenv\
 ├── vault.db                    # SQLite DB (AES-GCM encryption at field level)
 ├── mcp_token                   # MCP token (plaintext, permissions 0600)
 ├── cli_session_token           # CLI session token (plaintext, permissions 0600)
@@ -345,7 +345,7 @@ CREATE TABLE settings (
 
 **Rationale**: 
 - `%APPDATA%` is standard for user data on Windows (roameable on domain)
-- Subdirectory `com.maosuarez.vault` prevents conflicts with other applications
+- Subdirectory `com.maosuarez.cryptenv` prevents conflicts with other applications
 - Token in file rather than memory-only facilitates access by CLI/MCP without GUI server
 
 **Consequences**:

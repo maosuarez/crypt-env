@@ -22,7 +22,7 @@ What actually happened.
 
 ## Environment
 - OS: (e.g. Windows 11, macOS 14, Ubuntu 22.04)
-- DevVault version: (e.g. 0.1.0)
+- CryptEnv version: (e.g. 0.1.0)
 - Rust version: (`rustc --version`)
 - Node version: (`node --version`)
 

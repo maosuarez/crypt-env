@@ -1,6 +1,6 @@
-# Contributing to DevVault
+# Contributing to CryptEnv
 
-Thank you for your interest in contributing to DevVault! This is a local-first, security-focused tool built for developers — contributions of all kinds are welcome.
+Thank you for your interest in contributing to CryptEnv! This is a local-first, security-focused tool built for developers — contributions of all kinds are welcome.
 
 ---
 
@@ -49,8 +49,8 @@ There are many ways to contribute beyond writing code:
 ### Run locally
 
 ```bash
-git clone https://github.com/maosuarez/devvault.git
-cd devvault
+git clone https://github.com/maosuarez/crypt-env.git
+cd crypt-env
 pnpm install
 pnpm tauri dev
 ```
@@ -78,7 +78,7 @@ pnpm tauri build
 ## Project Structure
 
 ```
-devvault/
+crypt-env/
 ├── src/                    # React + TypeScript frontend
 │   ├── components/         # One folder per screen/feature
 │   ├── store/              # Zustand state management
@@ -132,7 +132,7 @@ devvault/
 
 ## Security Contributions
 
-DevVault handles sensitive data. Security contributions are treated with extra care.
+CryptEnv handles sensitive data. Security contributions are treated with extra care.
 
 **Do not open a public issue for security vulnerabilities.**
 
@@ -185,4 +185,4 @@ Look for issues labeled `good first issue` on GitHub. Some specific areas where 
 
 ## Questions?
 
-Open a [Discussion](https://github.com/maosuarez/devvault/discussions) — we're happy to help you get started.
+Open a [Discussion](https://github.com/maosuarez/crypt-env/discussions) — we're happy to help you get started.

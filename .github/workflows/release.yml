@@ -50,33 +50,33 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "DevVault v${{ steps.version.outputs.VERSION }}"
+          name: "CryptEnv v${{ steps.version.outputs.VERSION }}"
           generate_release_notes: true
           body: |
             ## Installation
 
             1. Download `Vault_${{ steps.version.outputs.VERSION }}_x64-setup.exe` and run the installer.
-            2. *(Optional)* Copy `vault.exe` and `vault-mcp.exe` to a directory on your `PATH` for CLI and MCP integration.
+            2. *(Optional)* Copy `crypt-env.exe` and `crypt-env-mcp.exe` to a directory on your `PATH` for CLI and MCP integration.
 
             ### MCP Integration (Claude Code / Claude Desktop)
-            After copying `vault-mcp.exe` to your PATH, add this to your agent config:
+            After copying `crypt-env-mcp.exe` to your PATH, add this to your agent config:
             ```json
             {
               "mcpServers": {
-                "devvault": {
-                  "command": "vault-mcp",
+                "crypt-env": {
+                  "command": "crypt-env-mcp",
                   "args": []
                 }
               }
             }
             ```
-            The main DevVault app must be running and unlocked. Generate an MCP token in **Settings → Integrations**.
+            The main CryptEnv app must be running and unlocked. Generate an MCP token in **Settings → Integrations**.
 
             ---
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for full details.
           files: |
             src-tauri/target/release/bundle/nsis/Vault_${{ steps.version.outputs.VERSION }}_x64-setup.exe
-            src-tauri/target/release/vault-mcp.exe
-            src-tauri/target/release/vault.exe
+            src-tauri/target/release/crypt-env-mcp.exe
+            src-tauri/target/release/crypt-env.exe
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}

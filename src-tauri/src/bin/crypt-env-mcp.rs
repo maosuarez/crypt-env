@@ -1,5 +1,5 @@
-// vault-mcp.rs — Binario standalone MCP sobre stdio.
-// No importa de la lib del proyecto — solo usa serde, serde_json, reqwest::blocking.
+// crypt-env-mcp.rs — Standalone MCP server over stdio.
+// Does not import from the project lib — uses only serde, serde_json, reqwest::blocking.
 
 use std::io::BufRead;
 use std::io::Write;
@@ -19,13 +19,13 @@ const MCP_VERSION: &str = "2024-11-05";
 
 fn read_mcp_token() -> Result<String, String> {
     let path = std::env::var("APPDATA")
-        .map(|d| std::path::PathBuf::from(d).join("com.maosuarez.vault").join("mcp_token"))
+        .map(|d| std::path::PathBuf::from(d).join("com.maosuarez.cryptenv").join("mcp_token"))
         .or_else(|_| {
             std::env::var("HOME").map(|d| {
                 std::path::PathBuf::from(d)
                     .join(".local")
                     .join("share")
-                    .join("com.maosuarez.vault")
+                    .join("com.maosuarez.cryptenv")
                     .join("mcp_token")
             })
         })
@@ -771,7 +771,7 @@ fn dispatch(
         "initialize" => Ok(serde_json::json!({
             "protocolVersion": MCP_VERSION,
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "vault-mcp", "version": "0.1.0" }
+            "serverInfo": { "name": "crypt-env-mcp", "version": "0.1.0" }
         })),
         "ping" => Ok(serde_json::json!({})),
         "tools/list" => Ok(serde_json::json!({ "tools": tool_definitions() })),
@@ -822,7 +822,7 @@ fn main() {
     let token = match read_mcp_token() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("[vault-mcp] {e}");
+            eprintln!("[crypt-env-mcp] {e}");
             std::process::exit(1);
         }
     };

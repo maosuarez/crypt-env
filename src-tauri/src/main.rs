@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    tauri_private_vault_lib::run()
+    crypt_env_lib::run()
 }

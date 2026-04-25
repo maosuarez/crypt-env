@@ -91,16 +91,16 @@ struct RevealResponse {
 // ─── Token de sesión ──────────────────────────────────────────────────────────
 
 fn token_path() -> Option<PathBuf> {
-    // %APPDATA%\com.maosuarez.vault\.cli_token en Windows
-    // ~/.local/share/com.maosuarez.vault/.cli_token como fallback
+    // %APPDATA%\com.maosuarez.cryptenv\.cli_token en Windows
+    // ~/.local/share/com.maosuarez.cryptenv/.cli_token como fallback
     if let Ok(appdata) = std::env::var("APPDATA") {
-        Some(PathBuf::from(appdata).join("com.maosuarez.vault").join(".cli_token"))
+        Some(PathBuf::from(appdata).join("com.maosuarez.cryptenv").join(".cli_token"))
     } else if let Ok(home) = std::env::var("HOME") {
         Some(
             PathBuf::from(home)
                 .join(".local")
                 .join("share")
-                .join("com.maosuarez.vault")
+                .join("com.maosuarez.cryptenv")
                 .join(".cli_token"),
         )
     } else {

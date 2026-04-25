@@ -1,16 +1,16 @@
 [package]
-name = "tauri-private-vault"
+name = "tauri-crypt-env"
 version = "0.1.0"
-description = "Secure local secret vault with AES-256-GCM encryption"
+description = "Secure local secrets manager with AES-256-GCM encryption"
 authors = ["maosuarez"]
 edition = "2021"
-default-run = "tauri-private-vault"
+default-run = "tauri-crypt-env"
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "tauri_private_vault_lib"
+name = "crypt_env_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -54,9 +54,9 @@ rpassword = "7"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 
 [[bin]]
-name = "vault"
-path = "src/bin/vault.rs"
+name = "crypt-env"
+path = "src/bin/crypt-env.rs"
 
 [[bin]]
-name = "vault-mcp"
-path = "src/bin/vault-mcp.rs"
+name = "crypt-env-mcp"
+path = "src/bin/crypt-env-mcp.rs"

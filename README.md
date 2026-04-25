@@ -108,25 +108,32 @@ vault search openai
 
 DevVault exposes a **stdio-based MCP server** (JSON-RPC 2.0) that AI agents can use to interact with your vault securely.
 
-### Configure Claude Code or Claude Desktop
+### Configure Claude Desktop
 
-Add this to your `claude_desktop_config.json` (Claude Desktop) or agent config:
+`vault-mcp` is a **stdio subprocess** — Claude Desktop launches it directly. It is **not** an HTTP server and must **not** be configured with a `url` field.
+
+Locate your Claude Desktop config at `%APPDATA%\Claude\claude_desktop_config.json` and add:
 
 ```json
 {
   "mcpServers": {
     "devvault": {
-      "command": "vault-mcp",
-      "args": []
+      "command": "C:\\full\\path\\to\\vault-mcp.exe"
     }
   }
 }
 ```
 
-**Important**: 
-- The `vault-mcp` binary must be on your system `PATH`, or provide the full path to the compiled binary (e.g., `"command": "C:\\Program Files\\DevVault\\vault-mcp.exe"`)
-- The main DevVault app must be running and unlocked — `vault-mcp` connects to the local REST API at `127.0.0.1:47821` and requires a valid MCP token (generated in DevVault Settings → Integrations)
-- This is a subprocess-based MCP server, not an HTTP endpoint
+Replace the path with the actual location of your `vault-mcp.exe` binary. If you built from source, it is at:
+
+```
+src-tauri\target\release\vault-mcp.exe
+```
+
+**Prerequisites before using the MCP tools:**
+1. Generate an MCP token once: open DevVault → Settings → Integrations → Generate MCP Token
+2. Start the DevVault app and unlock the vault — `vault-mcp` connects to the local REST API at `127.0.0.1:47821`
+3. Restart Claude Desktop after editing the config
 
 ### Available MCP tools
 

@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Zeroized keys** — Encryption key wiped from memory on lock
 - **Timing-safe token comparison** — Prevent brute-force attacks on unlock endpoint
 - **Strict Content Security Policy** — Tauri webview hardening
+- **Import from password managers** — Import secrets from `.env` files, Bitwarden CSV, and 1Password CSV
+- **Encrypted backup & restore** — Export and restore full vault with encryption
 
 ### Security Notes
 
@@ -50,10 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Limitations
 
-- Windows only (macOS and Linux support planned)
+- Windows focus (macOS and Linux support in progress)
 - Single-user per vault file
 - No encrypted cloud backup (intentional — local-first design)
-- No import from password managers yet
 
 [Unreleased]: https://github.com/maosuarez/crypt-env/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/maosuarez/crypt-env/releases/tag/v0.1.0

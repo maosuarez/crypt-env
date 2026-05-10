@@ -325,9 +325,9 @@ Claude: "Now executing deployment with secrets safely in environment..."
 
 ## 🔌 REST API
 
-CryptEnv runs a local HTTP API at `127.0.0.1:47821` (encrypted in transit). This is useful for custom integrations, scripts, or tools that want to interact with your vault without using the CLI or GUI.
+CryptEnv runs a local HTTP API at `127.0.0.1:47821` (localhost only). This is useful for custom integrations, scripts, or tools that want to interact with your vault without using the CLI or GUI.
 
-**Authentication**: All endpoints (except `/health`) require the `X-MCP-Token` header with your MCP token. Generate this in CryptEnv → Settings → Integrations → Generate MCP Token.
+**Authentication**: All endpoints (except `/health`) require the `X-Vault-Token` header with your MCP token. Generate this in CryptEnv → Settings → Integrations → Generate MCP Token.
 
 ### Endpoints
 
@@ -337,7 +337,7 @@ Health check — no authentication required.
 
 ```bash
 curl http://127.0.0.1:47821/health
-# Response: { "status": "ok", "version": "0.2.0" }
+# Response: { "status": "ok", "version": "0.1.0" }
 ```
 
 #### `POST /unlock`
@@ -347,8 +347,8 @@ Unlock the vault with the master password. Rate-limited to 5 attempts per 60 sec
 ```bash
 curl -X POST http://127.0.0.1:47821/unlock \
   -H "Content-Type: application/json" \
-  -d '{"password": "your_master_password"}'
-# Response: { "success": true, "token": "session_token..." }
+  -d '{"master_password": "your_master_password"}'
+# Response: { "token": "session_token..." }
 ```
 
 **Rate Limit Headers**:
@@ -360,7 +360,7 @@ Fill a `.env.example` template with secrets from the vault.
 
 ```bash
 curl -X POST http://127.0.0.1:47821/fill \
-  -H "X-MCP-Token: your_mcp_token" \
+  -H "X-Vault-Token: your_mcp_token" \
   -H "Content-Type: application/json" \
   -d '{
     "template": "API_KEY=\nDATABASE_URL=",
@@ -375,7 +375,7 @@ List all items in the vault (no secret values exposed).
 
 ```bash
 curl http://127.0.0.1:47821/items \
-  -H "X-MCP-Token: your_mcp_token"
+  -H "X-Vault-Token: your_mcp_token"
 # Response: [
 #   { "id": "uuid1", "name": "OPENAI_API_KEY", "type": "key", "category": "api" },
 #   { "id": "uuid2", "name": "prod_db", "type": "credential", "category": "database" },
@@ -394,7 +394,7 @@ Create a new item in the vault.
 
 ```bash
 curl -X POST http://127.0.0.1:47821/items \
-  -H "X-MCP-Token: your_mcp_token" \
+  -H "X-Vault-Token: your_mcp_token" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "STRIPE_API_KEY",
@@ -412,7 +412,7 @@ Get a specific item's metadata (not the secret value).
 
 ```bash
 curl http://127.0.0.1:47821/items/uuid1 \
-  -H "X-MCP-Token: your_mcp_token"
+  -H "X-Vault-Token: your_mcp_token"
 # Response: {
 #   "id": "uuid1",
 #   "name": "OPENAI_API_KEY",
@@ -429,7 +429,7 @@ Reveal the secret value of an item (use with caution — logs this action).
 
 ```bash
 curl http://127.0.0.1:47821/items/uuid1/reveal \
-  -H "X-MCP-Token: your_mcp_token"
+  -H "X-Vault-Token: your_mcp_token"
 # Response: { "value": "sk_live_..." }
 ```
 
@@ -439,7 +439,7 @@ Update an item.
 
 ```bash
 curl -X PUT http://127.0.0.1:47821/items/uuid1 \
-  -H "X-MCP-Token: your_mcp_token" \
+  -H "X-Vault-Token: your_mcp_token" \
   -H "Content-Type: application/json" \
   -d '{ "value": "new_value", "category": "new_category" }'
 # Response: { "updated_at": "2026-05-10T..." }
@@ -451,7 +451,7 @@ Delete an item from the vault.
 
 ```bash
 curl -X DELETE http://127.0.0.1:47821/items/uuid1 \
-  -H "X-MCP-Token: your_mcp_token"
+  -H "X-Vault-Token: your_mcp_token"
 # Response: { "deleted": true }
 ```
 
@@ -461,24 +461,27 @@ List all categories in use.
 
 ```bash
 curl http://127.0.0.1:47821/categories \
-  -H "X-MCP-Token: your_mcp_token"
+  -H "X-Vault-Token: your_mcp_token"
 # Response: ["api", "database", "deployment", "personal"]
 ```
 
-#### `POST /commands`
+#### `GET /commands/:id`
 
-Execute a saved command with placeholder resolution.
+Get a specific command's details (name, description, placeholders).
 
 ```bash
-curl -X POST http://127.0.0.1:47821/commands \
-  -H "X-MCP-Token: your_mcp_token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "deploy",
-    "variables": { "ENV": "production", "REGION": "us-west-2" }
-  }'
-# Response: { "resolved": "cd ~/project && deploy.sh --env=production --region=us-west-2" }
+curl http://127.0.0.1:47821/commands/123 \
+  -H "X-Vault-Token: your_mcp_token"
+# Response: {
+#   "id": 123,
+#   "name": "deploy",
+#   "description": "Deploy to production",
+#   "command": "cd ~/project && deploy.sh --env={{ENV}} --region={{REGION}}",
+#   "placeholders": ["{{ENV}}", "{{REGION}}"]
+# }
 ```
+
+**Note**: To execute a saved command with resolved placeholders, use the MCP tool `crypt_env_run_command` instead. The REST API is read-only for commands.
 
 #### `GET /settings`
 
@@ -486,7 +489,7 @@ Get current app settings.
 
 ```bash
 curl http://127.0.0.1:47821/settings \
-  -H "X-MCP-Token: your_mcp_token"
+  -H "X-Vault-Token: your_mcp_token"
 # Response: {
 #   "timeout_minutes": 5,
 #   "hotkey": "Ctrl+Alt+Z",
@@ -501,7 +504,7 @@ Update app settings.
 
 ```bash
 curl -X PUT http://127.0.0.1:47821/settings \
-  -H "X-MCP-Token: your_mcp_token" \
+  -H "X-Vault-Token: your_mcp_token" \
   -H "Content-Type: application/json" \
   -d '{ "timeout_minutes": 10, "theme": "light" }'
 # Response: { "updated_at": "2026-05-10T..." }
@@ -558,11 +561,8 @@ Contributions are welcome! CryptEnv is actively developed and there's a lot of g
 
 - [ ] macOS & Linux testing and fixes
 - [ ] Dark/light theme toggle
-- [ ] Import from 1Password / Bitwarden / `.env` files
 - [ ] Browser extension for auto-filling credentials
-- [ ] Encrypted backup & restore
 - [ ] Vault item sharing via QR code (local network only)
-- [ ] `crypt-env` CLI as a standalone installable binary
 
 ### Guidelines
 
@@ -586,9 +586,9 @@ Contributions are welcome! CryptEnv is actively developed and there's a lot of g
 - [x] Local REST API (Axum, port 47821)
 - [x] MCP server (JSON-RPC 2.0 over stdio)
 - [x] Rate limiting on `/unlock` endpoint (5 attempts per 60s)
+- [x] Import from password managers (ENV, Bitwarden CSV, 1Password CSV)
+- [x] Encrypted backup (`.cenvbak` format)
 - [ ] macOS & Linux support (in progress)
-- [ ] Import from password managers (ENV, Bitwarden CSV, 1Password CSV)
-- [ ] Encrypted backup (`.cenvbak` format)
 
 ---
 

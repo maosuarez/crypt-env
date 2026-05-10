@@ -5,6 +5,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router, middleware};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
@@ -12,6 +13,7 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::crypto;
+use crate::tls;
 use crate::vault::{SharedState, VaultItem};
 
 // ─── Estado compartido de la API ──────────────────────────────────────────────
@@ -195,6 +197,102 @@ fn now_ts_str() -> String {
         .unwrap_or_default()
         .as_secs()
         .to_string()
+}
+
+// ─── Input validation ─────────────────────────────────────────────────────────
+
+const VALID_ITEM_TYPES: &[&str] = &["secret", "credential", "link", "note", "command"];
+
+/// Returns an HTTP 422 response with the standard error body.
+fn err_validation(field: &str, reason: &str) -> axum::response::Response {
+    err_json(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        &format!("{field}: {reason}"),
+        "VALIDATION_ERROR",
+    )
+    .into_response()
+}
+
+/// Validates fields for a POST /items (create) request.
+/// All required fields must be present and non-empty; optional fields are
+/// validated only when present.
+fn validate_create(body: &VaultItem) -> Result<(), axum::response::Response> {
+    // name: required, non-empty, max 255
+    match body.name.as_deref() {
+        None | Some("") => return Err(err_validation("name", "required and must not be empty")),
+        Some(n) if n.len() > 255 => return Err(err_validation("name", "must be 255 characters or fewer")),
+        _ => {}
+    }
+
+    // type: required, must be a known variant
+    if body.item_type.is_empty() {
+        return Err(err_validation("type", "required"));
+    }
+    if !VALID_ITEM_TYPES.contains(&body.item_type.as_str()) {
+        return Err(err_validation(
+            "type",
+            &format!(
+                "must be one of: {}",
+                VALID_ITEM_TYPES.join(", ")
+            ),
+        ));
+    }
+
+    // value: required, non-empty
+    match body.value.as_deref() {
+        None | Some("") => return Err(err_validation("value", "required and must not be empty")),
+        _ => {}
+    }
+
+    // categories: each entry max 100 chars
+    for cat in &body.categories {
+        if cat.len() > 100 {
+            return Err(err_validation("category", "each entry must be 100 characters or fewer"));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates fields for a PUT /items/:id (update) request.
+/// All fields are optional, but any field that is present must satisfy its rule.
+fn validate_update(body: &VaultItem) -> Result<(), axum::response::Response> {
+    // name: if present must be non-empty and max 255
+    if let Some(n) = body.name.as_deref() {
+        if n.is_empty() {
+            return Err(err_validation("name", "must not be empty"));
+        }
+        if n.len() > 255 {
+            return Err(err_validation("name", "must be 255 characters or fewer"));
+        }
+    }
+
+    // type: if present (non-empty string sent) must be a known variant
+    if !body.item_type.is_empty() && !VALID_ITEM_TYPES.contains(&body.item_type.as_str()) {
+        return Err(err_validation(
+            "type",
+            &format!(
+                "must be one of: {}",
+                VALID_ITEM_TYPES.join(", ")
+            ),
+        ));
+    }
+
+    // value: if present must be non-empty
+    if let Some(v) = body.value.as_deref() {
+        if v.is_empty() {
+            return Err(err_validation("value", "must not be empty"));
+        }
+    }
+
+    // categories: each entry max 100 chars
+    for cat in &body.categories {
+        if cat.len() > 100 {
+            return Err(err_validation("category", "each entry must be 100 characters or fewer"));
+        }
+    }
+
+    Ok(())
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -414,6 +512,10 @@ async fn handle_create_item(
         return err_json(code, msg, err_code).into_response();
     }
 
+    if let Err(resp) = validate_create(&body) {
+        return resp;
+    }
+
     // Asegurar timestamp de creación
     if body.created.is_empty() {
         body.created = now_ts_str();
@@ -486,6 +588,10 @@ async fn handle_update_item(
             _ => ("error interno", "INTERNAL_ERROR"),
         };
         return err_json(code, msg, err_code).into_response();
+    }
+
+    if let Err(resp) = validate_update(&body) {
+        return resp;
     }
 
     // Verificar que el item existe
@@ -873,6 +979,61 @@ async fn handle_health(State(state): State<Arc<ApiState>>) -> impl IntoResponse 
         .into_response()
 }
 
+// ─── TempEnvFile — RAII guard for secret-bearing files ───────────────────────
+//
+// Ensures that a file containing plaintext secrets is always zeroed and deleted
+// when it goes out of scope — even on panic or early error return.
+//
+// Usage pattern:
+//   let guard = TempEnvFile::create(path, content)?;
+//   // ... any fallible work ...
+//   let path = guard.persist(); // disarms the guard; caller now owns the file
+//
+// If `persist()` is never called (error path or panic), `Drop` wipes the file.
+
+struct TempEnvFile {
+    path: std::path::PathBuf,
+    /// Byte length of the content written, used for the zero-overwrite pass.
+    content_len: usize,
+    /// Set to true by `persist()` to suppress cleanup in `Drop`.
+    persisted: bool,
+}
+
+impl TempEnvFile {
+    /// Write `content` to `path` and return a guard that will clean up on drop.
+    fn create(path: std::path::PathBuf, content: &str) -> Result<Self, std::io::Error> {
+        std::fs::write(&path, content.as_bytes())?;
+        Ok(Self {
+            path,
+            content_len: content.len(),
+            persisted: false,
+        })
+    }
+
+    /// Disarm the guard: the file will NOT be deleted on drop.
+    /// Returns the path so the caller can report it.
+    fn persist(mut self) -> std::path::PathBuf {
+        self.persisted = true;
+        // We consume `self` so Drop still runs, but the persisted flag prevents
+        // any cleanup. Clone the path before consumption.
+        self.path.clone()
+    }
+}
+
+impl Drop for TempEnvFile {
+    fn drop(&mut self) {
+        if self.persisted {
+            return;
+        }
+        // Overwrite with zeros first to hinder file-system recovery of secrets.
+        // Use max(content_len, 1) so we always issue at least one write attempt
+        // even if content_len is somehow zero.
+        let zeros = vec![0u8; self.content_len.max(1)];
+        let _ = std::fs::write(&self.path, &zeros);
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 // ─── /fill ────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -973,7 +1134,11 @@ async fn handle_fill(
         filled.push('\n');
     }
 
-    // When output_path is given: write to disk, return stats only (no secret content).
+    // When output_path is given: write to disk via RAII guard, return stats only
+    // (no secret content in the response).
+    //
+    // The guard zeros and deletes the file if any error occurs before persist().
+    // On success, persist() disarms the guard so the caller can consume the file.
     if let Some(ref out) = body.output_path {
         let path = std::path::PathBuf::from(out);
         if let Some(parent) = path.parent() {
@@ -986,19 +1151,24 @@ async fn handle_fill(
                 .into_response();
             }
         }
-        if let Err(e) = std::fs::write(&path, &filled) {
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("cannot write file: {e}"),
-                "INTERNAL_ERROR",
-            )
-            .into_response();
-        }
+        let guard = match TempEnvFile::create(path, &filled) {
+            Ok(g) => g,
+            Err(e) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("cannot write file: {e}"),
+                    "INTERNAL_ERROR",
+                )
+                .into_response();
+            }
+        };
+        // Disarm: caller is now responsible for the file.
+        let final_path = guard.persist();
         return (
             StatusCode::OK,
             Json(FillResponse {
                 content: None,
-                path: Some(out.clone()),
+                path: Some(final_path.to_string_lossy().into_owned()),
                 injected,
                 not_found,
                 missing_keys,
@@ -1023,7 +1193,7 @@ async fn handle_fill(
 
 // ─── Función pública de arranque ──────────────────────────────────────────────
 
-pub async fn start_server(vault: SharedState) {
+pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
     let api_state = Arc::new(ApiState {
         vault,
         session_token: Arc::new(Mutex::new(None)),
@@ -1052,18 +1222,32 @@ pub async fn start_server(vault: SharedState) {
         .with_state(api_state)
         .layer(middleware::from_fn(cors_guard));
 
-    // Limitación aceptada v1: no hay TLS ni verificación de identidad del servidor.
-    // Un proceso local del mismo usuario podría suplantar el socket si se bindea primero.
-    // Mitigación: el token X-Vault-Token autentica cada request individual.
-    let listener = match tokio::net::TcpListener::bind("127.0.0.1:47821").await {
-        Ok(l) => l,
+    const ADDR: &str = "127.0.0.1:47821";
+
+    // Ensure a valid self-signed TLS certificate is present (generated on first
+    // launch, regenerated if within 30 days of expiry).
+    let tls_config = match tls::ensure_tls_config(&app_data_dir).await {
+        Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("[api] No se pudo iniciar el servidor REST en 127.0.0.1:47821: {e}");
+            eprintln!("[api] Failed to initialise TLS certificate: {e}");
             return;
         }
     };
 
-    if let Err(e) = axum::serve(listener, app).await {
-        eprintln!("[api] Error en el servidor REST: {e}");
+    let addr: std::net::SocketAddr = match ADDR.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("[api] Invalid bind address {ADDR}: {e}");
+            return;
+        }
+    };
+
+    eprintln!("[api] Listening on https://{ADDR} (TLS)");
+
+    if let Err(e) = axum_server::bind_rustls(addr, tls_config)
+        .serve(app.into_make_service())
+        .await
+    {
+        eprintln!("[api] REST server error: {e}");
     }
 }

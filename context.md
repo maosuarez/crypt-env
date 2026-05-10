@@ -4,7 +4,7 @@
 Personal productivity vault for developers. Centralizes credentials, API keys, tokens, passwords, links, commands, and notes in a local desktop app accessible by hotkey (Ctrl+Alt+Z). Secrets are stored encrypted locally. Includes CLI, local REST API, and MCP server for integration with external tools.
 
 ## Stack
-- **Frontend**: React 18 + TypeScript + Vite + Tailwind CSS + Framer Motion
+- **Frontend**: React 19 + TypeScript + Vite + Tailwind CSS + Framer Motion
 - **Backend (Rust)**: Tauri 2.0, Axum (local REST), Tokio
 - **Database**: SQLite with `libsqlite3-sys` bundled (no SQLCipher; see Decision #1)
 - **Encryption**: AES-256-GCM for sensitive fields, Argon2id for master password, `subtle::ConstantTimeEq` for timing-safe comparisons
@@ -25,10 +25,10 @@ crypt-env/
 ├── src-tauri/
 │   ├── src/
 │   │   ├── main.rs               # Tauri entrypoint (initializes lib)
-│   │   ├── lib.rs                # Tauri command registry (10+), AppState setup
+│   │   ├── lib.rs                # Tauri command registry (19 commands), AppState setup
 │   │   ├── db/mod.rs             # SQLite pool, tables, CRUD items/categories/settings
 │   │   ├── crypto/mod.rs         # Argon2id KDF + AES-256-GCM encrypt/decrypt
-│   │   ├── vault/mod.rs          # VaultState, 10+ Tauri commands, change_password, wipe
+│   │   ├── vault/mod.rs          # VaultState, 19 Tauri commands including backup/import
 │   │   ├── api/mod.rs            # Axum server on 127.0.0.1:47821, dual token auth
 │   │   ├── cli/mod.rs            # CLI module (stub)
 │   │   ├── mcp/mod.rs            # MCP module (stub)
@@ -48,7 +48,7 @@ crypt-env/
 1. **Secret / API Key**: name, encrypted value, category, notes. Export as `.env` / `export` / `$env:`
 2. **Credential**: site name, URL, username, encrypted password, notes
 3. **Link**: title, URL, description, category
-4. **Command**: name, command, description, shell target (bash/zsh/PowerShell/cmd), placeholders `{{VAR}}`
+4. **Command**: name, command, description, shell target (bash/zsh/sh/PowerShell), placeholders `{{VAR}}`
 5. **Note**: title, free-form content, category
 
 ## Security — Decisions Made
@@ -91,8 +91,9 @@ Developer user currently sharing credentials insecurely over WhatsApp. Needs qui
 
 **Rationale**: 
 - Avoids OpenSSL compilation on Windows (high friction, costly maintenance)
-- All sensitive fields (`data` in `items`, `data` in `categories`) are encrypted before writing to DB
-- The DB file on disk is not encrypted at file level, but the most sensitive data is protected by AES-256-GCM
+- Sensitive fields (`data` in `items`) are encrypted before writing to DB
+- The DB file on disk is not encrypted at file level, but item secrets are protected by AES-256-GCM
+- Categories and settings are stored plaintext (not confidential metadata)
 - Allows future integration with larger-scale databases
 
 **Consequences**:
@@ -108,8 +109,8 @@ Developer user currently sharing credentials insecurely over WhatsApp. Needs qui
 **Decision**: 
 - `crypto/mod.rs`: Argon2id KDF, AES-256-GCM encrypt/decrypt, key management in `Zeroizing`
 - `db/mod.rs`: SQLite pool, DDL of tables, CRUD of items/categories/settings (does not know about `api`, `vault`)
-- `vault/mod.rs`: `VaultState` (orchestrator), 10+ Tauri commands, unlock/lock operations
-- `api/mod.rs`: Axum REST server, endpoints, token authentication
+- `vault/mod.rs`: `VaultState` (orchestrator), 19 Tauri commands including unlock/lock, backup/import, and settings
+- `api/mod.rs`: Axum REST server, 14 endpoints, dual token authentication
 
 **Rationale**: Each module has a clear responsibility. `vault` orchestrates between `crypto` and `db` without them knowing each other.
 
@@ -146,36 +147,38 @@ Developer user currently sharing credentials insecurely over WhatsApp. Needs qui
 
 ```sql
 CREATE TABLE vault_meta (
-    id    INTEGER PRIMARY KEY,
-    key   TEXT NOT NULL UNIQUE,
-    value TEXT NOT NULL
+    id            INTEGER PRIMARY KEY CHECK(id = 1),
+    kdf_salt      TEXT NOT NULL,
+    verify_token  TEXT NOT NULL
 );
--- Contains: kdf_salt (hex, 32 bytes), verify_token (hex, encrypted with AES-GCM)
+-- Stores crypto material: kdf_salt (hex, 32 bytes) and verify_token (AES-GCM encrypted)
 
 CREATE TABLE items (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    item_type  TEXT NOT NULL,  -- 'secret', 'credential', 'link', 'command', 'note'
-    data       TEXT NOT NULL,  -- JSON encrypted with AES-GCM
-    created_at TEXT NOT NULL,  -- ISO 8601
-    updated_at TEXT NOT NULL   -- ISO 8601
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_type TEXT NOT NULL,  -- 'secret', 'credential', 'link', 'command', 'note'
+    data      TEXT NOT NULL,  -- JSON encrypted with AES-GCM
+    created   TEXT NOT NULL,  -- Unix epoch seconds
+    updated   TEXT NOT NULL   -- Unix epoch seconds
 );
 
 CREATE TABLE categories (
-    id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    data  TEXT NOT NULL  -- JSON array encrypted
+    cid   TEXT PRIMARY KEY,
+    name  TEXT NOT NULL,
+    color TEXT NOT NULL
 );
+-- Categories stored plaintext with id, name, and color (not encrypted at DB level)
 
 CREATE TABLE settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
--- Keys: auto_lock_minutes, hotkey, mcp_token
+-- Keys: auto_lock_timeout, hotkey, mcp_token (plaintext, user configuration only)
 ```
 
 **Rationale**:
-- `vault_meta`: stores salt (public) and verify_token (private, encrypted) for key derivation
+- `vault_meta`: stores salt (public) and verify_token (private, encrypted) for key derivation with single row constraint
 - `items.data`: JSON serialized and encrypted (avoids individual columns)
-- `categories.data`: single JSON array, encrypted (simple CRUD)
+- `categories`: plaintext columns for UI efficiency (category metadata is not confidential)
 - `settings`: plaintext (contains no secrets, only user configuration)
 
 **Consequences**:
@@ -261,10 +264,12 @@ CREATE TABLE settings (
 | DELETE | `/items/:id` | token | Deletes item |
 | POST | `/items/:id/reveal` | token | Decrypts and returns sensitive value (only endpoint that does this) |
 | GET | `/categories` | token | Lists categories |
-| POST | `/categories` | token | Creates/updates categories |
 | GET | `/settings` | token | Returns settings (no secrets) |
 | PUT | `/settings` | token | Updates settings |
 | GET | `/commands` | token | Lists available commands (MCP read-only) |
+| GET | `/commands/:id` | token | Gets command details with placeholders |
+| POST | `/fill` | token | Fills .env template with secret values (writes to disk, not response) |
+| GET | `/health` | - | Health check (vault lock state, item count, version) |
 
 **Rationale**:
 - `/unlock` without token (entry point)
@@ -278,22 +283,24 @@ CREATE TABLE settings (
 
 ---
 
-### 8. CLI (`vault` Binary)
+### 8. CLI (`crypt-env` Binary)
 **Context**: Standalone tool for management without GUI, written in Rust + clap, connects via HTTP REST.
 
-**Decision**: Binary `src-tauri/src/bin/crypt-env.rs` that:
+**Decision**: Binary `src-tauri/src/bin/crypt-env/main.rs` that:
 - Uses `clap` for argument parsing
-- Connects via HTTP to `127.0.0.1:47821` (if vault GUI is running) or starts API server locally
-- Stores session token in `%APPDATA%\com.maosuarez.cryptenv\cli_session_token` (with expiration)
+- Connects via HTTP to `127.0.0.1:47821` (requires vault GUI running)
+- Authenticates with session token from REST `/unlock` endpoint
 - Supports commands:
-  - `vault unlock` — requests master password, saves token
-  - `vault lock` — invalidates session
-  - `vault list [--type TYPE]` — lists items without secrets
-  - `vault get <name>` — shows metadata
-  - `vault set <name>` — copies value to clipboard (requires `/reveal`)
-  - `vault fill <name>` — exports as `export VAR=value` (for `eval`)
-  - `vault cmd <name>` — executes saved command
-  - `vault add` — interactive assistant
+  - `add` — Import secrets from KEY=value, environment variables, or .env files
+  - `doctor` — Check app health, vault status, token files, and version
+  - `fill` — Fill .env or .env.example templates with vault secrets
+  - `inject` — Print shell-compatible variable assignment (safe for `eval`)
+  - `list` — Display saved shell commands in a table
+  - `exec` — Execute a saved command by name
+  - `memory` — Save a command string to the vault (interactive)
+  - `search` — Search items by name (no secret values exposed)
+  - `set` — Print environment variable assignment for a secret
+  - `cmd` — Manage saved commands (list, info, run)
 
 **Rationale**: Decoupled CLI from REST server allows independent control; token storage avoids re-authentication.
 
@@ -309,15 +316,18 @@ CREATE TABLE settings (
 **Decision**: Binary `src-tauri/src/bin/crypt-env-mcp.rs` that:
 - Reads MCP token from `%APPDATA%\com.maosuarez.cryptenv\mcp_token`
 - Connects via HTTP REST to `127.0.0.1:47821`
-- Implements JSON-RPC tools:
-  - `vault_list_items` — lists without secrets
-  - `vault_get_item` — gets by ID/name
-  - `vault_generate_env` — writes `.env` to `%TEMP%` (RAII pending)
-  - `vault_inject_env` — set_var in current process (validation `[A-Z0-9_]+`)
-  - `vault_add_item` — creates item
-  - `vault_update_settings` — modifies settings
-  - `vault_list_commands` — lists commands
-  - `vault_run_command` — executes shell command
+- Implements JSON-RPC tools (all prefixed `crypt_env_`):
+  - `crypt_env_list_items` — lists items without secrets, with type/category filters
+  - `crypt_env_get_item` — gets item metadata by ID
+  - `crypt_env_search_items` — searches items by name (no values)
+  - `crypt_env_generate_env` — writes `.env` to disk with secret values (path in response, not values)
+  - `crypt_env_inject_env` — injects a secret as environment variable into MCP process
+  - `crypt_env_add_item` — creates new vault item
+  - `crypt_env_update_settings` — modifies auto_lock_timeout and hotkey
+  - `crypt_env_fill_env` — fills .env.example template with real values to disk
+  - `crypt_env_doctor` — health check (status, vault lock state, item count, version)
+  - `crypt_env_list_commands` — lists saved shell commands with placeholders
+  - `crypt_env_run_command` — resolves command placeholders (does not execute)
 
 **Rationale**:
 - Standard MCP protocol allows integration with any compatible client
@@ -364,10 +374,9 @@ A **comprehensive security review** was performed that identified **19 findings*
 3. ✅ **Key in memory with Zeroizing**: Use `zeroize` crate to overwrite key on Drop
 
 **Critical findings (HIGH) pending implementation**:
-4. ⏳ **Rate limiting on `/unlock`**: Prevent brute-force of master password
-5. ⏳ **Access audit for `/items/:id/reveal`**: Log who accesses which secrets and when
-6. ⏳ **File permissions (mcp_token, cli_session_token)**: Configure 0600 on creation
-7. ⏳ **Credential encryption in MCP server**: Keep tokens in memory with Zeroizing
+4. ⏳ **Access audit for `/items/:id/reveal`**: Log who accesses which secrets and when
+5. ⏳ **File permissions (mcp_token, cli_session_token)**: Configure 0600 on creation
+6. ⏳ **Credential encryption in MCP server**: Keep tokens in memory with Zeroizing
 
 **MEDIUM findings implemented**:
 - ✅ Error handling without exposure of internal paths

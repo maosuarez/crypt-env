@@ -6,14 +6,15 @@ pub mod cli;
 pub mod crypto;
 pub mod db;
 pub mod mcp;
+pub mod tls;
 pub mod vault;
 
 use vault::{
-    vault_change_password, vault_delete_item, vault_export_backup, vault_generate_mcp_token,
-    vault_get_categories, vault_get_items, vault_get_mcp_token, vault_get_settings,
-    vault_import_backup, vault_import_backup_data, vault_import_items, vault_is_setup, vault_lock,
-    vault_parse_import, vault_save_categories, vault_save_item, vault_save_settings, vault_unlock,
-    vault_wipe, SharedState, VaultState,
+    lock_vault, vault_change_password, vault_delete_item, vault_export_backup,
+    vault_generate_mcp_token, vault_get_categories, vault_get_items, vault_get_mcp_token,
+    vault_get_settings, vault_import_backup, vault_import_backup_data, vault_import_items,
+    vault_is_setup, vault_lock, vault_parse_import, vault_save_categories, vault_save_item,
+    vault_save_settings, vault_unlock, vault_wipe, SharedState, VaultState,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -40,7 +41,55 @@ pub fn run() {
             app.manage(state.clone());
 
             let api_state = state.clone();
-            tauri::async_runtime::spawn(api::start_server(api_state));
+            let api_app_dir = app_dir.clone();
+            tauri::async_runtime::spawn(api::start_server(api_state, api_app_dir));
+
+            // Background auto-lock: every 30 s, check idle time against the
+            // configured timeout. Timeout = 0 means "never lock".
+            let auto_lock_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(30));
+                // The first tick fires immediately; skip it so we don't lock
+                // right at startup before the user has a chance to unlock.
+                interval.tick().await;
+
+                loop {
+                    interval.tick().await;
+
+                    // Acquire lock, compute whether we should auto-lock, then
+                    // release before calling lock_vault (which re-acquires).
+                    let should_lock = {
+                        let s = auto_lock_state.lock().await;
+
+                        // Only relevant while the vault is unlocked.
+                        let last = match s.last_activity {
+                            Some(t) => t,
+                            None => continue,
+                        };
+
+                        let timeout_mins: u64 = s
+                            .db
+                            .get_setting("auto_lock_timeout")
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(5);
+
+                        // 0 means "never auto-lock".
+                        if timeout_mins == 0 {
+                            continue;
+                        }
+
+                        last.elapsed() >= std::time::Duration::from_secs(timeout_mins * 60)
+                    };
+
+                    if should_lock {
+                        lock_vault(&auto_lock_state).await;
+                    }
+                }
+            });
 
             let handle = app.handle().clone();
             app.handle()

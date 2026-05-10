@@ -1,5 +1,5 @@
 //! Standalone CLI binary for the encrypted secrets vault.
-//! Connects to the local REST API at http://127.0.0.1:47821.
+//! Connects to the local REST API at https://127.0.0.1:47821.
 
 mod client;
 mod commands;

@@ -325,7 +325,14 @@ Claude: "Now executing deployment with secrets safely in environment..."
 
 ## 🔌 REST API
 
-CryptEnv runs a local HTTP API at `127.0.0.1:47821` (localhost only). This is useful for custom integrations, scripts, or tools that want to interact with your vault without using the CLI or GUI.
+CryptEnv runs a local HTTPS API at `127.0.0.1:47821` (localhost only). This is useful for custom integrations, scripts, or tools that want to interact with your vault without using the CLI or GUI.
+
+**TLS**: The API uses a self-signed certificate generated automatically on first launch. The cert is stored at `%APPDATA%\com.maosuarez.cryptenv\tls\cert.pem`. For `curl` testing, pass `--cacert` with that path or use `-k` (insecure, for local dev only):
+```bash
+curl --cacert "%APPDATA%\com.maosuarez.cryptenv\tls\cert.pem" https://127.0.0.1:47821/health
+# or (local dev only):
+curl -k https://127.0.0.1:47821/health
+```
 
 **Authentication**: All endpoints (except `/health`) require the `X-Vault-Token` header with your MCP token. Generate this in CryptEnv → Settings → Integrations → Generate MCP Token.
 
@@ -336,7 +343,7 @@ CryptEnv runs a local HTTP API at `127.0.0.1:47821` (localhost only). This is us
 Health check — no authentication required.
 
 ```bash
-curl http://127.0.0.1:47821/health
+curl https://127.0.0.1:47821/health
 # Response: { "status": "ok", "version": "0.1.0" }
 ```
 
@@ -345,7 +352,7 @@ curl http://127.0.0.1:47821/health
 Unlock the vault with the master password. Rate-limited to 5 attempts per 60 seconds.
 
 ```bash
-curl -X POST http://127.0.0.1:47821/unlock \
+curl -X POST https://127.0.0.1:47821/unlock \
   -H "Content-Type: application/json" \
   -d '{"master_password": "your_master_password"}'
 # Response: { "token": "session_token..." }
@@ -359,7 +366,7 @@ curl -X POST http://127.0.0.1:47821/unlock \
 Fill a `.env.example` template with secrets from the vault.
 
 ```bash
-curl -X POST http://127.0.0.1:47821/fill \
+curl -X POST https://127.0.0.1:47821/fill \
   -H "X-Vault-Token: your_mcp_token" \
   -H "Content-Type: application/json" \
   -d '{
@@ -374,7 +381,7 @@ curl -X POST http://127.0.0.1:47821/fill \
 List all items in the vault (no secret values exposed).
 
 ```bash
-curl http://127.0.0.1:47821/items \
+curl https://127.0.0.1:47821/items \
   -H "X-Vault-Token: your_mcp_token"
 # Response: [
 #   { "id": "uuid1", "name": "OPENAI_API_KEY", "type": "key", "category": "api" },
@@ -393,7 +400,7 @@ Query parameters:
 Create a new item in the vault.
 
 ```bash
-curl -X POST http://127.0.0.1:47821/items \
+curl -X POST https://127.0.0.1:47821/items \
   -H "X-Vault-Token: your_mcp_token" \
   -H "Content-Type: application/json" \
   -d '{
@@ -411,7 +418,7 @@ curl -X POST http://127.0.0.1:47821/items \
 Get a specific item's metadata (not the secret value).
 
 ```bash
-curl http://127.0.0.1:47821/items/uuid1 \
+curl https://127.0.0.1:47821/items/uuid1 \
   -H "X-Vault-Token: your_mcp_token"
 # Response: {
 #   "id": "uuid1",
@@ -428,7 +435,7 @@ curl http://127.0.0.1:47821/items/uuid1 \
 Reveal the secret value of an item (use with caution — logs this action).
 
 ```bash
-curl http://127.0.0.1:47821/items/uuid1/reveal \
+curl https://127.0.0.1:47821/items/uuid1/reveal \
   -H "X-Vault-Token: your_mcp_token"
 # Response: { "value": "sk_live_..." }
 ```
@@ -438,7 +445,7 @@ curl http://127.0.0.1:47821/items/uuid1/reveal \
 Update an item.
 
 ```bash
-curl -X PUT http://127.0.0.1:47821/items/uuid1 \
+curl -X PUT https://127.0.0.1:47821/items/uuid1 \
   -H "X-Vault-Token: your_mcp_token" \
   -H "Content-Type: application/json" \
   -d '{ "value": "new_value", "category": "new_category" }'
@@ -450,7 +457,7 @@ curl -X PUT http://127.0.0.1:47821/items/uuid1 \
 Delete an item from the vault.
 
 ```bash
-curl -X DELETE http://127.0.0.1:47821/items/uuid1 \
+curl -X DELETE https://127.0.0.1:47821/items/uuid1 \
   -H "X-Vault-Token: your_mcp_token"
 # Response: { "deleted": true }
 ```
@@ -460,7 +467,7 @@ curl -X DELETE http://127.0.0.1:47821/items/uuid1 \
 List all categories in use.
 
 ```bash
-curl http://127.0.0.1:47821/categories \
+curl https://127.0.0.1:47821/categories \
   -H "X-Vault-Token: your_mcp_token"
 # Response: ["api", "database", "deployment", "personal"]
 ```
@@ -470,7 +477,7 @@ curl http://127.0.0.1:47821/categories \
 Get a specific command's details (name, description, placeholders).
 
 ```bash
-curl http://127.0.0.1:47821/commands/123 \
+curl https://127.0.0.1:47821/commands/123 \
   -H "X-Vault-Token: your_mcp_token"
 # Response: {
 #   "id": 123,
@@ -488,7 +495,7 @@ curl http://127.0.0.1:47821/commands/123 \
 Get current app settings.
 
 ```bash
-curl http://127.0.0.1:47821/settings \
+curl https://127.0.0.1:47821/settings \
   -H "X-Vault-Token: your_mcp_token"
 # Response: {
 #   "timeout_minutes": 5,
@@ -503,7 +510,7 @@ curl http://127.0.0.1:47821/settings \
 Update app settings.
 
 ```bash
-curl -X PUT http://127.0.0.1:47821/settings \
+curl -X PUT https://127.0.0.1:47821/settings \
   -H "X-Vault-Token: your_mcp_token" \
   -H "Content-Type: application/json" \
   -d '{ "timeout_minutes": 10, "theme": "light" }'

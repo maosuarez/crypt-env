@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Archivos .env temporales pendientes de limpieza del ciclo anterior.
 static TEMP_FILES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-const API_BASE: &str = "http://127.0.0.1:47821";
+const API_BASE: &str = "https://127.0.0.1:47821";
 const MCP_VERSION: &str = "2024-11-05";
 
 // ─── Token ────────────────────────────────────────────────────────────────────
@@ -72,6 +72,77 @@ fn read_mcp_token() -> Result<String, String> {
         .map_err(|_| {
             "MCP token not found. Generate one in crypt-env Settings → INTEGRATIONS.".to_string()
         })
+}
+
+// ─── TLS-aware HTTP client ────────────────────────────────────────────────────
+
+/// Returns the path to the self-signed cert written by the Tauri app.
+fn tls_cert_path() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return Some(
+            std::path::PathBuf::from(appdata)
+                .join("com.maosuarez.cryptenv")
+                .join("tls")
+                .join("cert.pem"),
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            return Some(
+                std::path::PathBuf::from(xdg)
+                    .join("com.maosuarez.cryptenv")
+                    .join("tls")
+                    .join("cert.pem"),
+            );
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            return Some(
+                std::path::PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join("com.maosuarez.cryptenv")
+                    .join("tls")
+                    .join("cert.pem"),
+            );
+        }
+    }
+    None
+}
+
+/// Build a reqwest client that trusts the vault's self-signed cert.
+/// Falls back to a plain client on failure (which will produce a clear TLS error).
+fn mcp_http_client() -> reqwest::blocking::Client {
+    (|| -> Result<reqwest::blocking::Client, Box<dyn std::error::Error>> {
+        let cert_path = tls_cert_path().ok_or("cannot determine cert path")?;
+        let pem_bytes = std::fs::read(&cert_path)?;
+        let cert = reqwest::Certificate::from_pem(&pem_bytes)?;
+        Ok(reqwest::blocking::ClientBuilder::new()
+            .add_root_certificate(cert)
+            .build()?)
+    })()
+    .unwrap_or_else(|_| reqwest::blocking::Client::new())
+}
+
+/// Build a reqwest client with a custom timeout and the vault's self-signed cert.
+fn mcp_http_client_timeout(timeout: std::time::Duration) -> reqwest::blocking::Client {
+    (|| -> Result<reqwest::blocking::Client, Box<dyn std::error::Error>> {
+        let cert_path = tls_cert_path().ok_or("cannot determine cert path")?;
+        let pem_bytes = std::fs::read(&cert_path)?;
+        let cert = reqwest::Certificate::from_pem(&pem_bytes)?;
+        Ok(reqwest::blocking::ClientBuilder::new()
+            .add_root_certificate(cert)
+            .timeout(timeout)
+            .build()?)
+    })()
+    .unwrap_or_else(|_| {
+        reqwest::blocking::ClientBuilder::new()
+            .timeout(timeout)
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+    })
 }
 
 // ─── JSON-RPC types ───────────────────────────────────────────────────────────
@@ -249,7 +320,7 @@ fn tool_definitions() -> serde_json::Value {
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
 
 fn vault_get(path: &str, token: &str) -> Result<reqwest::blocking::Response, String> {
-    reqwest::blocking::Client::new()
+    mcp_http_client()
         .get(format!("{API_BASE}{path}"))
         .header("X-Vault-Token", token)
         .send()
@@ -267,7 +338,7 @@ fn vault_post(
     token: &str,
     body: &serde_json::Value,
 ) -> Result<reqwest::blocking::Response, String> {
-    reqwest::blocking::Client::new()
+    mcp_http_client()
         .post(format!("{API_BASE}{path}"))
         .header("X-Vault-Token", token)
         .json(body)
@@ -286,7 +357,7 @@ fn vault_put(
     token: &str,
     body: &serde_json::Value,
 ) -> Result<reqwest::blocking::Response, String> {
-    reqwest::blocking::Client::new()
+    mcp_http_client()
         .put(format!("{API_BASE}{path}"))
         .header("X-Vault-Token", token)
         .json(body)
@@ -783,10 +854,9 @@ fn tool_fill_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
 }
 
 fn tool_doctor(_args: &serde_json::Value, _token: &str) -> serde_json::Value {
-    let resp = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .and_then(|c| c.get(format!("{API_BASE}/health")).send())
+    let resp = match mcp_http_client_timeout(std::time::Duration::from_secs(3))
+        .get(format!("{API_BASE}/health"))
+        .send()
     {
         Ok(r) => r,
         Err(e) => {

@@ -61,13 +61,24 @@ pub struct UnlockPayload {
 
 pub struct VaultState {
     pub db: VaultDb,
-    /// Zeroizing garantiza que los 32 bytes se sobreescriben al asignar None o al drop.
+    /// Zeroizing guarantees the 32 bytes are overwritten when set to None or dropped.
     pub key: Option<Zeroizing<[u8; 32]>>,
+    /// Monotonic timestamp of the last vault operation. None when the vault is locked.
+    pub last_activity: Option<std::time::Instant>,
 }
 
 impl VaultState {
     pub fn new(db: VaultDb) -> Self {
-        VaultState { db, key: None }
+        VaultState {
+            db,
+            key: None,
+            last_activity: None,
+        }
+    }
+
+    /// Record activity. Call this on every vault operation that accesses the key.
+    pub fn touch(&mut self) {
+        self.last_activity = Some(std::time::Instant::now());
     }
 }
 
@@ -120,6 +131,7 @@ pub async fn vault_unlock(
     };
 
     s.key = Some(Zeroizing::new(key));
+    s.touch();
 
     // Decrypt all items
     let raw = s.db.list_items().await?;
@@ -147,21 +159,28 @@ pub async fn vault_unlock(
     })
 }
 
+/// Internal lock used by both the Tauri command and the background auto-lock task.
+pub async fn lock_vault(shared: &SharedState) {
+    let mut s = shared.lock().await;
+    s.key = None;
+    s.last_activity = None;
+}
+
 #[tauri::command]
 pub async fn vault_lock(state: State<'_, SharedState>) -> Result<(), String> {
-    let mut s = state.lock().await;
-    s.key = None;
+    lock_vault(&state).await;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn vault_get_items(state: State<'_, SharedState>) -> Result<Vec<VaultItem>, String> {
-    let s = state.lock().await;
-    let key = s.key.as_ref().ok_or("vault is locked")?;
+    let mut s = state.lock().await;
+    let key = s.key.as_ref().ok_or("vault is locked")?.clone();
+    s.touch();
     let raw = s.db.list_items().await?;
     Ok(raw
         .into_iter()
-        .filter_map(|(id, _, data, _)| decrypt_item(key, id, &data).ok())
+        .filter_map(|(id, _, data, _)| decrypt_item(&key, id, &data).ok())
         .collect())
 }
 
@@ -170,9 +189,10 @@ pub async fn vault_save_item(
     item: VaultItem,
     state: State<'_, SharedState>,
 ) -> Result<VaultItem, String> {
-    let s = state.lock().await;
-    let key = s.key.as_ref().ok_or("vault is locked")?;
-    let encrypted = encrypt_item(key, &item)?;
+    let mut s = state.lock().await;
+    let key = s.key.as_ref().ok_or("vault is locked")?.clone();
+    s.touch();
+    let encrypted = encrypt_item(&key, &item)?;
     let new_id = s
         .db
         .upsert_item(item.id, &item.item_type, &encrypted, &item.created)
@@ -184,8 +204,9 @@ pub async fn vault_save_item(
 
 #[tauri::command]
 pub async fn vault_delete_item(id: i64, state: State<'_, SharedState>) -> Result<(), String> {
-    let s = state.lock().await;
+    let mut s = state.lock().await;
     s.key.as_ref().ok_or("vault is locked")?;
+    s.touch();
     s.db.delete_item(id).await
 }
 
@@ -278,6 +299,7 @@ pub async fn vault_change_password(
 
     // Update in-memory key
     s.key = Some(Zeroizing::new(new_key));
+    s.touch();
 
     Ok(())
 }
@@ -286,6 +308,7 @@ pub async fn vault_change_password(
 pub async fn vault_wipe(state: State<'_, SharedState>) -> Result<(), String> {
     let mut s = state.lock().await;
     s.key = None;
+    s.last_activity = None;
     s.db.wipe_and_reset().await
 }
 
@@ -307,8 +330,9 @@ pub async fn vault_generate_mcp_token(
     state: State<'_, SharedState>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
-    let s = state.lock().await;
+    let mut s = state.lock().await;
     s.key.as_ref().ok_or("vault is locked")?;
+    s.touch();
 
     // Generar token de 32 bytes hex
     let mut bytes = [0u8; 32];
@@ -332,8 +356,9 @@ pub async fn vault_generate_mcp_token(
 pub async fn vault_get_mcp_token(
     state: State<'_, SharedState>,
 ) -> Result<Option<String>, String> {
-    let s = state.lock().await;
+    let mut s = state.lock().await;
     s.key.as_ref().ok_or("vault is locked")?;
+    s.touch();
     s.db.get_setting("mcp_token").await
 }
 
@@ -371,8 +396,9 @@ pub async fn vault_export_backup(
     path: String,
     state: State<'_, SharedState>,
 ) -> Result<usize, String> {
-    let s = state.lock().await;
+    let mut s = state.lock().await;
     s.key.as_ref().ok_or("vault is locked")?;
+    s.touch();
 
     // Read vault crypto material
     let (salt, token) = s
@@ -485,6 +511,7 @@ async fn do_restore_backup(
         s.db.wipe_and_reset().await?;
         s.db.init_vault(&backup.salt, &backup.token).await?;
         s.key = Some(Zeroizing::new(backup_key));
+        s.touch();
 
         // Insert items using their original encrypted blobs (already keyed with backup_key).
         for item in &backup.items {
@@ -508,7 +535,8 @@ async fn do_restore_backup(
         s.db.save_categories(&db_cats).await?;
     } else {
         // Merge: re-encrypt each item from backup_key → current vault key.
-        let current_key = *s.key.as_ref().ok_or("vault is locked")?;
+        let current_key = s.key.as_ref().ok_or("vault is locked")?.clone();
+        s.touch();
 
         for item in &backup.items {
             let plaintext = crypto::decrypt(&backup_key, &item.data)
@@ -584,8 +612,10 @@ pub async fn vault_import_items(
     items: Vec<ImportItem>,
     state: State<'_, SharedState>,
 ) -> Result<usize, String> {
-    let s = state.lock().await;
-    let key = s.key.as_ref().ok_or("vault is locked")?;
+    let mut s = state.lock().await;
+    let key = s.key.as_ref().ok_or("vault is locked")?.clone();
+    s.touch();
+    let key = &key;
 
     // Build the set of existing item names to detect duplicates.
     let raw = s.db.list_items().await?;

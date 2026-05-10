@@ -38,7 +38,7 @@ pub fn run(_args: DoctorArgs) -> Result<(), CliError> {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            println!("  [OK] App running        http://127.0.0.1:47821  (v{version})");
+            println!("  [OK] App running        https://127.0.0.1:47821  (v{version})");
 
             if vault_locked {
                 println!("  [!!] Vault status       locked");

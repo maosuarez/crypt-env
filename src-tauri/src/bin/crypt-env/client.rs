@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub const API_BASE: &str = "http://127.0.0.1:47821";
+pub const API_BASE: &str = "https://127.0.0.1:47821";
 
 // ─── Error types ──────────────────────────────────────────────────────────────
 
@@ -126,8 +126,68 @@ pub fn clear_token() {
 
 // ─── HTTP client ──────────────────────────────────────────────────────────────
 
+/// Returns the path where the Tauri app stores its TLS certificate.
+/// Mirrors the path used by `src-tauri/src/tls/mod.rs`.
+fn tls_cert_path() -> Option<PathBuf> {
+    // Windows: %APPDATA%\com.maosuarez.cryptenv\tls\cert.pem
+    // Linux/macOS: $HOME/.local/share/com.maosuarez.cryptenv/tls/cert.pem (or XDG)
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return Some(
+            PathBuf::from(appdata)
+                .join("com.maosuarez.cryptenv")
+                .join("tls")
+                .join("cert.pem"),
+        );
+    }
+    // Fallback for Linux/macOS (XDG data home).
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        return Some(
+            PathBuf::from(xdg)
+                .join("com.maosuarez.cryptenv")
+                .join("tls")
+                .join("cert.pem"),
+        );
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("com.maosuarez.cryptenv")
+                .join("tls")
+                .join("cert.pem"),
+        );
+    }
+    None
+}
+
+/// Build a `reqwest` blocking client that trusts the vault's self-signed cert.
+///
+/// The cert is loaded from disk at the same path where the Tauri app stores it.
+/// If the cert file cannot be read (e.g. the app hasn't run yet), the function
+/// returns a connection-refused error via the `CliError::ConnectionRefused`
+/// variant so the caller shows a clear "start the app first" message.
 pub fn http_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::new()
+    build_http_client().unwrap_or_else(|_| {
+        // Fallback: plain client — it will fail on TLS handshake, which will
+        // surface as a connection error with an appropriate message to the user.
+        reqwest::blocking::Client::new()
+    })
+}
+
+fn build_http_client() -> Result<reqwest::blocking::Client, Box<dyn std::error::Error>> {
+    let cert_path = tls_cert_path()
+        .ok_or("cannot determine cert path")?;
+
+    let pem_bytes = std::fs::read(&cert_path)?;
+    let cert = reqwest::Certificate::from_pem(&pem_bytes)?;
+
+    let client = reqwest::blocking::ClientBuilder::new()
+        .add_root_certificate(cert)
+        // Do NOT use danger_accept_invalid_certs — we load the actual cert.
+        .build()?;
+
+    Ok(client)
 }
 
 /// POST /unlock — returns session token.

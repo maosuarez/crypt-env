@@ -43,6 +43,14 @@ subtle = "2"
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 
+# TLS for the local REST API — auto-generated self-signed cert via rcgen
+rcgen = "0.13"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = "0.23"
+tokio-rustls = "0.26"
+time = { version = "0.3", features = ["std"] }
+pem = "3"
+
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 
@@ -57,7 +65,8 @@ shell-escape = "0.1"
 shlex = "1"
 
 # HTTP client — only for the crypt-env CLI binary
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+# rustls-tls-native-roots: use the OS trust store PLUS our custom cert addition
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls-native-roots"] }
 
 [[bin]]
 name = "crypt-env"

@@ -9,10 +9,11 @@ pub mod mcp;
 pub mod vault;
 
 use vault::{
-    vault_change_password, vault_delete_item, vault_generate_mcp_token, vault_get_categories,
-    vault_get_items, vault_get_mcp_token, vault_get_settings, vault_is_setup, vault_lock,
-    vault_save_categories, vault_save_item, vault_save_settings, vault_unlock, vault_wipe,
-    SharedState, VaultState,
+    vault_change_password, vault_delete_item, vault_export_backup, vault_generate_mcp_token,
+    vault_get_categories, vault_get_items, vault_get_mcp_token, vault_get_settings,
+    vault_import_backup, vault_import_backup_data, vault_import_items, vault_is_setup, vault_lock,
+    vault_parse_import, vault_save_categories, vault_save_item, vault_save_settings, vault_unlock,
+    vault_wipe, SharedState, VaultState,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -75,6 +76,11 @@ pub fn run() {
             vault_wipe,
             vault_generate_mcp_token,
             vault_get_mcp_token,
+            vault_export_backup,
+            vault_import_backup,
+            vault_import_backup_data,
+            vault_parse_import,
+            vault_import_items,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

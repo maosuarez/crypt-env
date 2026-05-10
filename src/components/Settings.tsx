@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './ui/Icon';
+import { ImportModal } from './ImportModal';
+import { BackupModal } from './BackupModal';
 import { useVaultStore } from '../store';
 import type { IconName } from '../types';
 
@@ -64,6 +66,8 @@ export function Settings() {
   const [saved,        setSaved]        = useState(false);
   const [wipeOpen,     setWipeOpen]     = useState(false);
   const [wiping,       setWiping]       = useState(false);
+  const [importOpen,   setImportOpen]   = useState(false);
+  const [backupOpen,   setBackupOpen]   = useState(false);
 
   // MCP token
   const [mcpToken,        setMcpToken]        = useState<string | null>(null);
@@ -237,9 +241,20 @@ export function Settings() {
         </Row>
 
         <Sec title="// DATA" />
-        <Row icon="export" label="Export Encrypted Backup">
-          <button className="bg-transparent border border-bd2 rounded-[3px] text-tx2 px-[11px] py-[5px] text-[11px] cursor-pointer font-ui font-medium tracking-[0.04em] hover:text-tx transition-colors">
-            EXPORT
+        <Row icon="export" label="Import from Password Manager">
+          <button
+            onClick={() => setImportOpen(true)}
+            className="bg-transparent border border-bd2 rounded-[3px] text-tx2 px-[11px] py-[5px] text-[11px] cursor-pointer font-ui font-medium tracking-[0.04em] hover:text-tx transition-colors"
+          >
+            IMPORT
+          </button>
+        </Row>
+        <Row icon="export" label="Backup & Restore">
+          <button
+            onClick={() => setBackupOpen(true)}
+            className="bg-transparent border border-bd2 rounded-[3px] text-tx2 px-[11px] py-[5px] text-[11px] cursor-pointer font-ui font-medium tracking-[0.04em] hover:text-tx transition-colors"
+          >
+            MANAGE
           </button>
         </Row>
         <Row icon="trash" label="Wipe All Data">
@@ -409,6 +424,16 @@ export function Settings() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Import Modal */}
+      {importOpen && (
+        <ImportModal onClose={() => setImportOpen(false)} />
+      )}
+
+      {/* Backup Modal */}
+      {backupOpen && (
+        <BackupModal onClose={() => setBackupOpen(false)} />
       )}
     </div>
   );

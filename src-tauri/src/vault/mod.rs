@@ -1,12 +1,15 @@
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Manager, State};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, CryptoKey};
 use crate::db::{DbCategory, VaultDb};
+
+pub mod import;
 
 // ─── Serializable types (shared with frontend) ────────────────────────────────
 
@@ -332,4 +335,331 @@ pub async fn vault_get_mcp_token(
     let s = state.lock().await;
     s.key.as_ref().ok_or("vault is locked")?;
     s.db.get_setting("mcp_token").await
+}
+
+// ─── Backup types ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+struct BackupItem {
+    id: i64,
+    item_type: String,
+    /// Raw AES-GCM encrypted blob from the DB (hex-encoded nonce || ciphertext).
+    data: String,
+    created: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct BackupFile {
+    version: u32,
+    created_at: u64,
+    /// Hex-encoded Argon2id salt used to derive the vault key.
+    salt: String,
+    /// AES-GCM verify token that proves the master password is correct.
+    token: String,
+    items: Vec<BackupItem>,
+    categories: Vec<serde_json::Value>,
+}
+
+// ─── Backup commands ──────────────────────────────────────────────────────────
+
+/// Export all vault items and categories to a `.cenvbak` file.
+/// The backup preserves the vault's existing salt and verify token so that
+/// restoring only requires the original master password — no separate backup password.
+/// Returns the number of items written.
+#[tauri::command]
+pub async fn vault_export_backup(
+    path: String,
+    state: State<'_, SharedState>,
+) -> Result<usize, String> {
+    let s = state.lock().await;
+    s.key.as_ref().ok_or("vault is locked")?;
+
+    // Read vault crypto material
+    let (salt, token) = s
+        .db
+        .get_meta()
+        .await?
+        .ok_or("vault_meta missing")?;
+
+    // Read all raw (already-encrypted) item rows
+    let raw_items = s.db.list_items().await?;
+    let items: Vec<BackupItem> = raw_items
+        .iter()
+        .map(|(id, item_type, data, created)| BackupItem {
+            id: *id,
+            item_type: item_type.clone(),
+            data: data.clone(),
+            created: created.clone(),
+        })
+        .collect();
+    let item_count = items.len();
+
+    // Read categories as generic JSON values
+    let db_cats = s.db.list_categories().await?;
+    let categories: Vec<serde_json::Value> = db_cats
+        .iter()
+        .map(|c| serde_json::json!({ "id": c.cid, "name": c.name, "color": c.color }))
+        .collect();
+
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let backup = BackupFile {
+        version: 1,
+        created_at,
+        salt,
+        token,
+        items,
+        categories,
+    };
+
+    let json = serde_json::to_string_pretty(&backup)
+        .map_err(|e| format!("serialize backup: {e}"))?;
+
+    std::fs::write(&path, json).map_err(|e| format!("write backup: {e}"))?;
+
+    Ok(item_count)
+}
+
+/// Import a `.cenvbak` file by filesystem path.
+///
+/// - `merge = false`: wipes the current vault and restores the backup exactly,
+///   keeping the original crypto material so the same master password applies.
+/// - `merge = true`: re-encrypts each imported item with the *current* vault key
+///   and upserts into the live vault. Categories are merged (no duplicates by id).
+///
+/// Returns the number of items restored.
+#[tauri::command]
+pub async fn vault_import_backup(
+    path: String,
+    master_password: String,
+    merge: bool,
+    state: State<'_, SharedState>,
+) -> Result<usize, String> {
+    let json = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read backup: {e}"))?;
+    do_restore_backup(&json, &master_password, merge, &state).await
+}
+
+/// Import a `.cenvbak` by passing its JSON content directly.
+/// Used by the frontend file picker where only file content (not the path) is accessible.
+#[tauri::command]
+pub async fn vault_import_backup_data(
+    data: String,
+    master_password: String,
+    merge: bool,
+    state: State<'_, SharedState>,
+) -> Result<usize, String> {
+    do_restore_backup(&data, &master_password, merge, &state).await
+}
+
+async fn do_restore_backup(
+    json: &str,
+    master_password: &str,
+    merge: bool,
+    state: &State<'_, SharedState>,
+) -> Result<usize, String> {
+    let backup: BackupFile = serde_json::from_str(json)
+        .map_err(|e| format!("parse backup: {e}"))?;
+
+    if backup.version != 1 {
+        return Err(format!("unsupported backup version: {}", backup.version));
+    }
+
+    // Verify the master password against the backup's crypto material.
+    let backup_key = crypto::unlock_vault_crypto(
+        master_password.as_bytes(),
+        &backup.salt,
+        &backup.token,
+    )
+    .map_err(|_| "incorrect master password for this backup".to_string())?;
+
+    let mut s = state.lock().await;
+
+    if !merge {
+        // Wipe the current vault and restore the backup's crypto material verbatim.
+        // After init_vault the in-memory key equals the backup key.
+        s.key = None;
+        s.db.wipe_and_reset().await?;
+        s.db.init_vault(&backup.salt, &backup.token).await?;
+        s.key = Some(Zeroizing::new(backup_key));
+
+        // Insert items using their original encrypted blobs (already keyed with backup_key).
+        for item in &backup.items {
+            s.db
+                .upsert_item(0, &item.item_type, &item.data, &item.created)
+                .await?;
+        }
+
+        // Restore categories wholesale.
+        let db_cats: Vec<DbCategory> = backup
+            .categories
+            .iter()
+            .filter_map(|v| {
+                Some(DbCategory {
+                    cid: v.get("id")?.as_str()?.to_string(),
+                    name: v.get("name")?.as_str()?.to_string(),
+                    color: v.get("color")?.as_str()?.to_string(),
+                })
+            })
+            .collect();
+        s.db.save_categories(&db_cats).await?;
+    } else {
+        // Merge: re-encrypt each item from backup_key → current vault key.
+        let current_key = *s.key.as_ref().ok_or("vault is locked")?;
+
+        for item in &backup.items {
+            let plaintext = crypto::decrypt(&backup_key, &item.data)
+                .map_err(|e| format!("decrypt backup item {}: {e}", item.id))?;
+            let new_data = crypto::encrypt(&current_key, &plaintext)
+                .map_err(|e| format!("re-encrypt item {}: {e}", item.id))?;
+            s.db
+                .upsert_item(0, &item.item_type, &new_data, &item.created)
+                .await?;
+        }
+
+        // Merge categories: keep existing, append any new ids from the backup.
+        let existing_cats = s.db.list_categories().await?;
+        let existing_ids: std::collections::HashSet<String> =
+            existing_cats.iter().map(|c| c.cid.clone()).collect();
+
+        let mut merged = existing_cats;
+        for v in &backup.categories {
+            let cid = match v.get("id").and_then(|x| x.as_str()) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            if !existing_ids.contains(&cid) {
+                merged.push(DbCategory {
+                    cid,
+                    name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    color: v.get("color").and_then(|x| x.as_str()).unwrap_or("#888").to_string(),
+                });
+            }
+        }
+        s.db.save_categories(&merged).await?;
+    }
+
+    Ok(backup.items.len())
+}
+
+// ─── Import from password managers ───────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct ImportItem {
+    pub name: String,
+    pub value: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub url: Option<String>,
+    pub notes: Option<String>,
+    pub item_type: String,
+}
+
+#[derive(Deserialize)]
+pub struct ParseImportArgs {
+    pub content: String,
+    pub format: String,
+}
+
+/// Parse file content into a preview list of ImportItems without touching vault state.
+#[tauri::command]
+pub async fn vault_parse_import(args: ParseImportArgs) -> Result<Vec<ImportItem>, String> {
+    let items = match args.format.as_str() {
+        "env"       => import::parse_env_file(&args.content),
+        "bitwarden" => import::parse_bitwarden_csv(&args.content),
+        "1password" => import::parse_1password_csv(&args.content),
+        "csv"       => import::parse_csv_generic(&args.content),
+        other       => return Err(format!("unknown import format: {other}")),
+    };
+    Ok(items)
+}
+
+/// Import a list of items into the vault, skipping any whose name already exists.
+/// Returns the count of items actually inserted.
+#[tauri::command]
+pub async fn vault_import_items(
+    items: Vec<ImportItem>,
+    state: State<'_, SharedState>,
+) -> Result<usize, String> {
+    let s = state.lock().await;
+    let key = s.key.as_ref().ok_or("vault is locked")?;
+
+    // Build the set of existing item names to detect duplicates.
+    let raw = s.db.list_items().await?;
+    let existing_names: std::collections::HashSet<String> = raw
+        .iter()
+        .filter_map(|(id, _, data, _)| {
+            decrypt_item(key, *id, data).ok().and_then(|v| v.name)
+        })
+        .collect();
+
+    // Epoch-seconds timestamp shared by all items in this import batch.
+    let epoch_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let now = epoch_to_iso8601(epoch_secs);
+
+    let mut inserted = 0usize;
+
+    for imp in items {
+        if existing_names.contains(&imp.name) {
+            continue;
+        }
+
+        let vault_item = VaultItem {
+            id: 0,
+            item_type: imp.item_type.clone(),
+            name: Some(imp.name),
+            value: imp.value,
+            username: imp.username,
+            password: imp.password,
+            url: imp.url,
+            notes: imp.notes,
+            title: None,
+            description: None,
+            command: None,
+            shell: None,
+            content: None,
+            categories: Vec::new(),
+            created: now.clone(),
+        };
+
+        let encrypted = encrypt_item(key, &vault_item)?;
+        s.db
+            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created)
+            .await?;
+        inserted += 1;
+    }
+
+    Ok(inserted)
+}
+
+/// Format Unix epoch seconds as an ISO-8601 UTC string: "2006-01-02T15:04:05Z".
+fn epoch_to_iso8601(secs: u64) -> String {
+    let sec  = secs % 60;
+    let min  = (secs / 60) % 60;
+    let hour = (secs / 3600) % 24;
+    let days = secs / 86400;
+    let (year, month, day) = days_since_epoch_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
+/// Convert days-since-Unix-epoch (1970-01-01) to (year, month, day).
+/// Uses the algorithm from http://howardhinnant.github.io/date_algorithms.html.
+fn days_since_epoch_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    days += 719468;
+    let era = days / 146097;
+    let doe = days % 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y   = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp  = (5 * doy + 2) / 153;
+    let d   = doy - (153 * mp + 2) / 5 + 1;
+    let m   = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y   = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }

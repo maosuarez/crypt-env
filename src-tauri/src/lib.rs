@@ -19,6 +19,11 @@ use vault::{
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Multiple crates in the dependency tree enable different rustls crypto
+    // providers (ring + aws-lc-rs), so rustls cannot auto-select one.
+    // Install ring explicitly before any TLS code runs.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())

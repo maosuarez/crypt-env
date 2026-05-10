@@ -109,12 +109,26 @@ pub fn read_token() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Writes `content` to `path` and restricts permissions to owner-only on Unix.
+///
+/// On Windows, `%APPDATA%` inherits user-only NTFS ACLs from the OS, so no
+/// additional ACL manipulation is needed via std. The write itself is best-effort.
+fn write_token_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    std::fs::write(path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 pub fn save_token(token: &str) {
     if let Some(path) = token_path() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&path, token);
+        let _ = write_token_file(&path, token);
     }
 }
 

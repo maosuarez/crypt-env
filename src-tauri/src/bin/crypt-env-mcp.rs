@@ -976,7 +976,19 @@ fn tool_run_command(args: &serde_json::Value, token: &str) -> serde_json::Value 
         None => return tool_err("command has no template"),
     };
 
-    // Sustituir placeholders {{VAR}} con valores de params
+    // NOTE: The current command system does not resolve vault secret values at
+    // this layer — secrets are managed separately. The {{VAR}} placeholders here
+    // are substituted with caller-supplied params, not vault values. However, to
+    // avoid echoing any resolved command string (which could contain sensitive
+    // caller-supplied data or reveal template structure) back to the LLM host,
+    // we execute the command directly and return only exit metadata.
+    //
+    // Secrets should be passed to the child process as environment variables
+    // (set by the vault before execution), not substituted inline into the
+    // command string, so they never appear as literal text in this process or
+    // its return value.
+
+    // Build the resolved command string for execution only — never returned.
     let mut resolved = template.clone();
     if let Some(params_map) = args.get("params").and_then(|v| v.as_object()) {
         for (var, val) in params_map {
@@ -987,7 +999,65 @@ fn tool_run_command(args: &serde_json::Value, token: &str) -> serde_json::Value 
         }
     }
 
-    tool_ok(resolved)
+    // Execute the resolved command via the platform shell.
+    // On Windows: cmd /C <resolved>
+    // On Unix:    sh -c <resolved>
+    // The resolved string is never included in the return value.
+    #[cfg(target_os = "windows")]
+    let child_result = std::process::Command::new("cmd")
+        .args(["/C", &resolved])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+
+    #[cfg(not(target_os = "windows"))]
+    let child_result = std::process::Command::new("sh")
+        .args(["-c", &resolved])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+
+    let child = match child_result {
+        Ok(c) => c,
+        Err(e) => {
+            // Do not include the resolved command in the error message.
+            return tool_err(format!("failed to start command '{cmd_name}': {e}"));
+        }
+    };
+
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return tool_err(format!("error waiting for command '{cmd_name}': {e}")),
+    };
+
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    // Truncate stdout/stderr to 2000 chars each to limit accidental secret leakage
+    // through command output. The resolved command itself is never returned.
+    const MAX_OUTPUT: usize = 2000;
+    let stdout_raw = String::from_utf8_lossy(&output.stdout);
+    let stderr_raw = String::from_utf8_lossy(&output.stderr);
+
+    let stdout_str = if stdout_raw.len() > MAX_OUTPUT {
+        format!("{}... (truncated)", &stdout_raw[..MAX_OUTPUT])
+    } else {
+        stdout_raw.into_owned()
+    };
+
+    let stderr_str = if stderr_raw.len() > MAX_OUTPUT {
+        format!("{}... (truncated)", &stderr_raw[..MAX_OUTPUT])
+    } else {
+        stderr_raw.into_owned()
+    };
+
+    tool_ok(
+        serde_json::to_string_pretty(&serde_json::json!({
+            "exit_code": exit_code,
+            "stdout": stdout_str,
+            "stderr": stderr_str
+        }))
+        .unwrap_or_else(|_| r#"{"exit_code":-1,"stdout":"","stderr":"serialization error"}"#.to_string()),
+    )
 }
 
 // ─── Dispatch ─────────────────────────────────────────────────────────────────

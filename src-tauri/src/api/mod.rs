@@ -1001,8 +1001,25 @@ struct TempEnvFile {
 
 impl TempEnvFile {
     /// Write `content` to `path` and return a guard that will clean up on drop.
+    ///
+    /// On Unix the file is created with mode 0o600 (owner read/write only),
+    /// preventing other users on the same system from reading the secrets.
+    ///
+    /// On Windows, `%APPDATA%` and other per-user directories already inherit
+    /// restrictive NTFS ACLs from their parent — only the owning user account
+    /// and SYSTEM have access. The standard library provides no portable API
+    /// for setting Windows ACLs from Rust, so no additional permission change
+    /// is needed or applied here.
     fn create(path: std::path::PathBuf, content: &str) -> Result<Self, std::io::Error> {
         std::fs::write(&path, content.as_bytes())?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&path, perms)?;
+        }
+
         Ok(Self {
             path,
             content_len: content.len(),

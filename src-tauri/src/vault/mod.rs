@@ -342,12 +342,20 @@ pub async fn vault_generate_mcp_token(
     // Guardar en DB
     s.db.set_setting("mcp_token", &token).await?;
 
-    // Escribir a archivo para el binario MCP
+    // Write token file for the MCP binary.
+    // On Windows, %APPDATA% inherits user-only NTFS ACLs; no further ACL work needed.
+    // On Unix, restrict to 0o600 (owner read/write only) after the write.
     let app_dir = app.path().app_data_dir()
         .map_err(|e| format!("path error: {e}"))?;
     let token_path = app_dir.join("mcp_token");
     std::fs::write(&token_path, &token)
         .map_err(|e| format!("write mcp token file: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("set mcp token file permissions: {e}"))?;
+    }
 
     Ok(token)
 }

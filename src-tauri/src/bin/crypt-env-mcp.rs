@@ -18,20 +18,55 @@ const MCP_VERSION: &str = "2024-11-05";
 
 // ─── Token ────────────────────────────────────────────────────────────────────
 
-fn read_mcp_token() -> Result<String, String> {
-    let path = std::env::var("APPDATA")
-        .map(|d| std::path::PathBuf::from(d).join("com.maosuarez.cryptenv").join("mcp_token"))
-        .or_else(|_| {
-            std::env::var("HOME").map(|d| {
+/// Returns the platform-specific path to the MCP token file.
+///
+/// - Windows: %APPDATA%\com.maosuarez.cryptenv\mcp_token
+/// - macOS:   ~/Library/Application Support/com.maosuarez.cryptenv/mcp_token
+/// - Linux:   ~/.local/share/com.maosuarez.cryptenv/mcp_token
+fn mcp_token_path() -> Result<std::path::PathBuf, String> {
+    // Windows: %APPDATA% is always set when the GUI app runs.
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("APPDATA")
+            .map(|d| {
+                std::path::PathBuf::from(d)
+                    .join("com.maosuarez.cryptenv")
+                    .join("mcp_token")
+            })
+            .map_err(|_| "APPDATA environment variable not set".to_string())
+    }
+
+    // macOS: ~/Library/Application Support/
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var("HOME")
+            .map(|d| {
+                std::path::PathBuf::from(d)
+                    .join("Library")
+                    .join("Application Support")
+                    .join("com.maosuarez.cryptenv")
+                    .join("mcp_token")
+            })
+            .map_err(|_| "HOME environment variable not set".to_string())
+    }
+
+    // Linux: ~/.local/share/
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::env::var("HOME")
+            .map(|d| {
                 std::path::PathBuf::from(d)
                     .join(".local")
                     .join("share")
                     .join("com.maosuarez.cryptenv")
                     .join("mcp_token")
             })
-        })
-        .map_err(|_| "cannot determine token path".to_string())?;
+            .map_err(|_| "HOME environment variable not set".to_string())
+    }
+}
 
+fn read_mcp_token() -> Result<String, String> {
+    let path = mcp_token_path()?;
     std::fs::read_to_string(&path)
         .map(|s| s.trim().to_string())
         .map_err(|_| {
@@ -777,21 +812,7 @@ fn tool_doctor(_args: &serde_json::Value, _token: &str) -> serde_json::Value {
     };
 
     // Add MCP token file status
-    let mcp_token_file_ok = std::env::var("APPDATA")
-        .map(|d| {
-            std::path::PathBuf::from(d)
-                .join("com.maosuarez.cryptenv")
-                .join("mcp_token")
-        })
-        .or_else(|_| {
-            std::env::var("HOME").map(|d| {
-                std::path::PathBuf::from(d)
-                    .join(".local")
-                    .join("share")
-                    .join("com.maosuarez.cryptenv")
-                    .join("mcp_token")
-            })
-        })
+    let mcp_token_file_ok = mcp_token_path()
         .map(|p| p.exists())
         .unwrap_or(false);
 

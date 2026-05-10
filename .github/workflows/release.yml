@@ -9,6 +9,7 @@ permissions:
   contents: write
 
 jobs:
+  # ─── Windows ──────────────────────────────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
 
@@ -47,6 +48,153 @@ jobs:
       - name: Build Tauri app
         run: pnpm tauri build
 
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: |
+            src-tauri/target/release/bundle/nsis/CryptEnv_${{ steps.version.outputs.VERSION }}_x64-setup.exe
+            src-tauri/target/release/crypt-env-mcp.exe
+            src-tauri/target/release/crypt-env.exe
+
+  # ─── macOS ────────────────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Tauri app
+        run: pnpm tauri build
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: |
+            src-tauri/target/release/bundle/dmg/CryptEnv_${{ steps.version.outputs.VERSION }}_x64.dmg
+            src-tauri/target/release/crypt-env-mcp
+            src-tauri/target/release/crypt-env
+
+  # ─── Linux ────────────────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Tauri app
+        run: pnpm tauri build
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: |
+            src-tauri/target/release/bundle/deb/crypt-env_${{ steps.version.outputs.VERSION }}_amd64.deb
+            src-tauri/target/release/crypt-env-mcp
+            src-tauri/target/release/crypt-env
+
+  # ─── GitHub Release ───────────────────────────────────────────────────────────
+  release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-artifacts
+          path: dist/windows
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-artifacts
+          path: dist/macos
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-artifacts
+          path: dist/linux
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -55,11 +203,23 @@ jobs:
           body: |
             ## Installation
 
-            1. Download `Vault_${{ steps.version.outputs.VERSION }}_x64-setup.exe` and run the installer.
-            2. *(Optional)* Copy `crypt-env.exe` and `crypt-env-mcp.exe` to a directory on your `PATH` for CLI and MCP integration.
+            ### Windows
+            Download `CryptEnv_${{ steps.version.outputs.VERSION }}_x64-setup.exe` and run the installer.
+
+            ### macOS
+            Download `CryptEnv_${{ steps.version.outputs.VERSION }}_x64.dmg`, open it, and drag CryptEnv to Applications.
+
+            ### Linux
+            Download `crypt-env_${{ steps.version.outputs.VERSION }}_amd64.deb` and install with:
+            ```
+            sudo dpkg -i crypt-env_${{ steps.version.outputs.VERSION }}_amd64.deb
+            ```
+
+            ### CLI and MCP binaries
+            Copy `crypt-env` (or `crypt-env.exe` on Windows) and `crypt-env-mcp` (or `crypt-env-mcp.exe`) to a directory on your `PATH`.
 
             ### MCP Integration (Claude Code / Claude Desktop)
-            After copying `crypt-env-mcp.exe` to your PATH, add this to your agent config:
+            After copying `crypt-env-mcp` to your PATH, add this to your agent config:
             ```json
             {
               "mcpServers": {
@@ -75,8 +235,14 @@ jobs:
             ---
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for full details.
           files: |
-            src-tauri/target/release/bundle/nsis/Vault_${{ steps.version.outputs.VERSION }}_x64-setup.exe
-            src-tauri/target/release/crypt-env-mcp.exe
-            src-tauri/target/release/crypt-env.exe
+            dist/windows/CryptEnv_${{ steps.version.outputs.VERSION }}_x64-setup.exe
+            dist/windows/crypt-env-mcp.exe
+            dist/windows/crypt-env.exe
+            dist/macos/CryptEnv_${{ steps.version.outputs.VERSION }}_x64.dmg
+            dist/macos/crypt-env-mcp
+            dist/macos/crypt-env
+            dist/linux/crypt-env_${{ steps.version.outputs.VERSION }}_amd64.deb
+            dist/linux/crypt-env-mcp
+            dist/linux/crypt-env
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}

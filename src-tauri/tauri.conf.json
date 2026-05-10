@@ -28,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "dmg", "deb"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -49,6 +49,16 @@
       },
       "wix": {
         "language": "en-US"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": null,
+      "providerShortName": null
+    },
+    "linux": {
+      "deb": {
+        "depends": []
       }
     }
   }

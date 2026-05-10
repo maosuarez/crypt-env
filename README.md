@@ -297,7 +297,7 @@ src-tauri\target\release\crypt-env-mcp.exe
 | `crypt_env_fill_env` | `template_path`, `output_path` | File path confirmation | Fill a `.env.example` template with vault secrets and save to `.env` |
 | `crypt_env_update_settings` | `timeout`, `theme`, etc. | Updated settings | Modify app settings (not master password) |
 | `crypt_env_list_commands` | — | Command list with placeholders | List all saved commands in the vault |
-| `crypt_env_run_command` | `command_name`, `variables: {VAR=value, ...}` | Resolved command string | Resolve `{{placeholder}}` variables in a saved command |
+| `crypt_env_run_command` | `command_name`, `variables: {VAR=value, ...}` | `{ exit_code, stdout, stderr }` | Execute command with resolved `{{placeholder}}` variables; returns exit status and output (secrets never in response) |
 
 ### Typical MCP Workflow
 

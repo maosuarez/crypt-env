@@ -830,6 +830,197 @@ async fn handle_put_settings(
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
+// ─── /health ─────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct HealthResponse {
+    version: &'static str,
+    status: &'static str,
+    vault_locked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_count: Option<usize>,
+    mcp_token_configured: bool,
+}
+
+async fn handle_health(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let vault = state.vault.lock().await;
+    let vault_locked = vault.key.is_none();
+    let item_count: Option<usize> = if !vault_locked {
+        vault.db.list_items().await.ok().map(|items| items.len())
+    } else {
+        None
+    };
+    let mcp_token_configured = vault
+        .db
+        .get_setting("mcp_token")
+        .await
+        .ok()
+        .flatten()
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+    drop(vault);
+
+    (
+        StatusCode::OK,
+        Json(HealthResponse {
+            version: env!("CARGO_PKG_VERSION"),
+            status: "running",
+            vault_locked,
+            item_count,
+            mcp_token_configured,
+        }),
+    )
+        .into_response()
+}
+
+// ─── /fill ────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct FillBody {
+    template: String,
+    /// When provided, write the filled .env directly to this path.
+    /// The response will contain stats but not the secret content.
+    output_path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FillResponse {
+    /// Only present when output_path is not specified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    /// Only present when output_path is specified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    injected: usize,
+    not_found: usize,
+    missing_keys: Vec<String>,
+}
+
+async fn handle_fill(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<FillBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let items = match decrypt_all_items(&state).await {
+        Ok(i) => i,
+        Err(StatusCode::FORBIDDEN) => {
+            return err_json(StatusCode::FORBIDDEN, "vault locked", "VAULT_LOCKED")
+                .into_response()
+        }
+        Err(_) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error",
+                "INTERNAL_ERROR",
+            )
+            .into_response()
+        }
+    };
+
+    let mut new_lines: Vec<String> = Vec::new();
+    let mut injected = 0usize;
+    let mut not_found = 0usize;
+    let mut missing_keys: Vec<String> = Vec::new();
+
+    for line in body.template.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            new_lines.push(line.to_string());
+            continue;
+        }
+        if let Some(eq_pos) = trimmed.find('=') {
+            let key = &trimmed[..eq_pos];
+            if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                let key_lower = key.to_lowercase();
+                let found = items.iter().find(|item| {
+                    item.name
+                        .as_deref()
+                        .map(|n| n.to_lowercase() == key_lower)
+                        .unwrap_or(false)
+                });
+                if let Some(item) = found {
+                    let value = item
+                        .value
+                        .as_deref()
+                        .or(item.password.as_deref())
+                        .or(item.content.as_deref())
+                        .unwrap_or("");
+                    new_lines.push(format!("{key}={value}"));
+                    injected += 1;
+                    continue;
+                } else {
+                    missing_keys.push(key.to_string());
+                    not_found += 1;
+                    new_lines.push(format!("{key}="));
+                    continue;
+                }
+            }
+        }
+        new_lines.push(line.to_string());
+    }
+
+    let mut filled = new_lines.join("\n");
+    if body.template.ends_with('\n') {
+        filled.push('\n');
+    }
+
+    // When output_path is given: write to disk, return stats only (no secret content).
+    if let Some(ref out) = body.output_path {
+        let path = std::path::PathBuf::from(out);
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("cannot create directory: {e}"),
+                    "INTERNAL_ERROR",
+                )
+                .into_response();
+            }
+        }
+        if let Err(e) = std::fs::write(&path, &filled) {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("cannot write file: {e}"),
+                "INTERNAL_ERROR",
+            )
+            .into_response();
+        }
+        return (
+            StatusCode::OK,
+            Json(FillResponse {
+                content: None,
+                path: Some(out.clone()),
+                injected,
+                not_found,
+                missing_keys,
+            }),
+        )
+            .into_response();
+    }
+
+    // Without output_path: return the content inline (CLI / programmatic use).
+    (
+        StatusCode::OK,
+        Json(FillResponse {
+            content: Some(filled),
+            path: None,
+            injected,
+            not_found,
+            missing_keys,
+        }),
+    )
+        .into_response()
+}
+
 // ─── Función pública de arranque ──────────────────────────────────────────────
 
 pub async fn start_server(vault: SharedState) {
@@ -844,7 +1035,9 @@ pub async fn start_server(vault: SharedState) {
     });
 
     let app = Router::new()
+        .route("/health", get(handle_health))
         .route("/unlock", post(handle_unlock))
+        .route("/fill", post(handle_fill))
         .route("/items", get(handle_list_items))
         .route("/items", post(handle_create_item))
         .route("/items/:id", get(handle_get_item))

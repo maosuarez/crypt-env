@@ -53,12 +53,20 @@ CryptEnv's MCP server integrates with AI coding agents (Claude Code, Claude Desk
 
 ## 🚀 Getting Started
 
+### Platform Support
+
+- **Windows 10/11** — fully supported and tested
+- **macOS** — in progress (UI/backend functional, installer/signing in development)
+- **Linux** — in progress (UI/backend functional, installer in development)
+
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) (MSVC toolchain on Windows)
 - [Node.js](https://nodejs.org/) LTS
 - [pnpm](https://pnpm.io/)
-- Windows: Microsoft C++ Build Tools + WebView2 Runtime
+- **Windows**: Microsoft C++ Build Tools + WebView2 Runtime
+- **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+- **Linux**: `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`
 
 ### Install & Run
 
@@ -69,7 +77,7 @@ pnpm install
 pnpm tauri dev
 ```
 
-First Rust build takes 3–8 minutes. Subsequent builds are fast.
+First Rust build takes 3–8 minutes. Subsequent builds are fast. For detailed build instructions and distribution guides, see [docs/building.md](docs/building.md).
 
 ### Build for Production
 
@@ -77,29 +85,169 @@ First Rust build takes 3–8 minutes. Subsequent builds are fast.
 pnpm tauri build
 ```
 
+This produces platform-specific installers:
+- **Windows**: `.msi` and `.exe` installers
+- **macOS**: `.dmg` disk image
+- **Linux**: `.deb`, `.rpm`, and `.AppImage` packages
+
+See [docs/building.md](docs/building.md) for distribution instructions.
+
 ---
 
 ## 🖱️ CLI Usage
 
+The `crypt-env` CLI binary connects to the running desktop app (via REST API on `127.0.0.1:47821`) and provides terminal access to your vault. Make sure the CryptEnv app is running and unlocked before using these commands.
+
+### Command Reference
+
+#### `crypt-env add [KEY=value] | [--file .env] | [$VARNAME]`
+
+Add a new secret to the vault. Choose one input method:
+
 ```bash
-# Fill a .env file with secrets from the vault
-crypt-env --fill .env
+# Add a key-value secret (quoted for safety)
+crypt-env add "OPENAI_API_KEY=sk-..."
 
-# Set a secret as an environment variable in the current shell
-eval $(crypt-env set OPENAI_API_KEY)          # bash/zsh
-crypt-env set OPENAI_API_KEY | Invoke-Expression  # PowerShell
+# Add from .env file (reads KEY=value lines)
+crypt-env add --file .env.local
 
-# List saved commands
-crypt-env cmd --list
+# Add by referencing an existing environment variable
+crypt-env add $DATABASE_URL
+```
 
-# Get help for a specific command
+#### `crypt-env set KEY [KEY2 ...]`
+
+Print a shell assignment to set the secret as an environment variable. Does not expose the secret value in the terminal output—only prints the assignment syntax.
+
+```bash
+# bash/zsh: eval to set the variable in current shell
+eval $(crypt-env set OPENAI_API_KEY)
+
+# PowerShell: pipe to Invoke-Expression
+crypt-env set OPENAI_API_KEY | Invoke-Expression
+
+# Output example: export OPENAI_API_KEY='[REDACTED]'
+# (actual value is injected directly, not displayed)
+```
+
+#### `crypt-env inject KEY [KEY2 ...]`
+
+Print a shell assignment suitable for direct injection (alternative to `set`).
+
+```bash
+crypt-env inject MY_API_KEY
+# Output: $env:MY_API_KEY = "[REDACTED]"
+```
+
+#### `crypt-env fill TEMPLATE [-o OUTPUT]`
+
+Fill a `.env.example` template with secrets from your vault, creating a `.env` file.
+
+```bash
+# Fill .env.example and output to .env
+crypt-env fill .env.example -o .env
+
+# Fill and print to stdout (no file written)
+crypt-env fill .env.example
+```
+
+Each `KEY=` placeholder is replaced with the corresponding secret value from the vault.
+
+#### `crypt-env search TERM [--type TYPE] [--category CATEGORY]`
+
+Search your vault without exposing secret values. Results show item name, type, and category—not the secret itself.
+
+```bash
+# Search for items matching "api"
+crypt-env search api
+
+# Filter by type (key, credential, link, command, note)
+crypt-env search github --type credential
+
+# Filter by category
+crypt-env search --category "work" api
+```
+
+#### `crypt-env list`
+
+List all saved commands in your vault (without their contents).
+
+```bash
+crypt-env list
+```
+
+Output shows command name, description, and placeholder variables.
+
+#### `crypt-env exec NAME [--VAR=value ...]`
+
+Execute a saved command, resolving `{{placeholder}}` variables.
+
+```bash
+# Run a saved command named "deploy"
+crypt-env exec deploy --HOST=production --PORT=8080
+
+# The placeholders are replaced and command is returned
+# (does not execute the command, just resolves it)
+```
+
+#### `crypt-env cmd [SUBCOMMAND]`
+
+Manage saved commands.
+
+```bash
+# List all commands
+crypt-env cmd list
+
+# Get help for a command
 crypt-env cmd deploy --help
 
-# Run a command resolving its placeholders
-crypt-env cmd deploy --HOST=production --PORT=8080
+# View details of a command
+crypt-env cmd show deploy
+```
 
-# Search items without exposing values
-crypt-env search openai
+#### `crypt-env memory [--name NAME] [--description DESC] [--command CMD]`
+
+Save a new command interactively to your vault.
+
+```bash
+# Interactive mode: prompts for name, description, and command
+crypt-env memory
+
+# Non-interactive mode: create command with all fields
+crypt-env memory --name "deploy" \
+  --description "Deploy to production" \
+  --command "cd ~/project && git push && docker-compose up -d"
+```
+
+#### `crypt-env doctor`
+
+Check app health and connectivity. Verifies the REST API is running and accessible.
+
+```bash
+crypt-env doctor
+# Output: API is running ✓
+#         Vault is unlocked ✓
+#         All systems nominal
+```
+
+### Examples
+
+```bash
+# Add a secret and immediately use it
+crypt-env add "GITHUB_TOKEN=ghp_..."
+eval $(crypt-env set GITHUB_TOKEN)
+
+# Fill a template before running a script
+crypt-env fill .env.example -o .env
+source .env
+./deploy.sh
+
+# Search for database credentials (shows match, not the password)
+crypt-env search database
+# Output: Found: prod_db_password (credential, category: databases)
+
+# Run a deployment command with parameters
+crypt-env exec deploy --ENV=staging --REGION=us-west-2
 ```
 
 ---
@@ -135,18 +283,229 @@ src-tauri\target\release\crypt-env-mcp.exe
 2. Start the CryptEnv app and unlock the vault — `crypt-env-mcp` connects to the local REST API at `127.0.0.1:47821`
 3. Restart Claude Desktop after editing the config
 
-### Available MCP tools
+### Available MCP Tools
 
-| Tool | Description |
-|------|-------------|
-| `vault_list_items` | List items filtered by type/category — no secrets exposed |
-| `vault_get_item` | Get item metadata without the secret value |
-| `vault_generate_env` | Generate a `.env` file for a list of keys — values never in response |
-| `vault_inject_env` | Inject a secret directly as an env var in the client process |
-| `vault_add_item` | Add a new item to the vault |
-| `vault_update_settings` | Update app settings (not master password) |
-| `vault_list_commands` | List available commands with their placeholders |
-| `vault_run_command` | Resolve a command's placeholders and return it |
+| Tool | Input | Output | Description |
+|------|-------|--------|-------------|
+| `crypt_env_doctor` | — | Health status | Check app connectivity and vault state |
+| `crypt_env_list_items` | `type`, `category` (optional) | Item metadata (no values) | List secrets filtered by type and/or category |
+| `crypt_env_get_item` | `item_id` | Item name, type, category | Get item details without exposing the secret value |
+| `crypt_env_search_items` | `query`, `type`, `category` (optional) | Matching item metadata | Search vault without revealing secret contents |
+| `crypt_env_add_item` | `name`, `type`, `value`, `category`, `notes` | Confirmation | Add a new secret to the vault |
+| `crypt_env_generate_env` | `items: [KEY, ...]` | Shell export statements | Generate `.env` syntax for a list of keys (secret values injected inline, not exposed in response) |
+| `crypt_env_inject_env` | `items: [KEY, ...]` | Shell assignment code | Inject secrets directly as environment variables in the current process |
+| `crypt_env_fill_env` | `template_path`, `output_path` | File path confirmation | Fill a `.env.example` template with vault secrets and save to `.env` |
+| `crypt_env_update_settings` | `timeout`, `theme`, etc. | Updated settings | Modify app settings (not master password) |
+| `crypt_env_list_commands` | — | Command list with placeholders | List all saved commands in the vault |
+| `crypt_env_run_command` | `command_name`, `variables: {VAR=value, ...}` | Resolved command string | Resolve `{{placeholder}}` variables in a saved command |
+
+### Typical MCP Workflow
+
+1. **Health check** — `crypt_env_doctor` to verify API is running
+2. **List & search** — `crypt_env_list_items` or `crypt_env_search_items` to find the secret you need
+3. **Inject secrets** — `crypt_env_inject_env` or `crypt_env_generate_env` to set environment variables for a subprocess
+4. **Execute tasks** — Run your subprocess with the injected environment (secret values never appear in Claude's context)
+
+Example Claude workflow:
+```
+Claude: "I'll help you deploy. Let me check what secrets are available..."
+→ Calls: crypt_env_list_items(type="credential", category="deployment")
+← Returns: [prod_db_password (credential), aws_access_key (credential), ...]
+
+Claude: "I found your deployment credentials. Injecting them now..."
+→ Calls: crypt_env_inject_env(items=["prod_db_password", "aws_access_key"])
+← Returns: export statements that set environment variables
+
+Claude: "Now executing deployment with secrets safely in environment..."
+→ Subprocess runs with DATABASE_PASSWORD and AWS_ACCESS_KEY in env
+← Claude never sees the actual secret values
+```
+
+---
+
+## 🔌 REST API
+
+CryptEnv runs a local HTTP API at `127.0.0.1:47821` (encrypted in transit). This is useful for custom integrations, scripts, or tools that want to interact with your vault without using the CLI or GUI.
+
+**Authentication**: All endpoints (except `/health`) require the `X-MCP-Token` header with your MCP token. Generate this in CryptEnv → Settings → Integrations → Generate MCP Token.
+
+### Endpoints
+
+#### `GET /health`
+
+Health check — no authentication required.
+
+```bash
+curl http://127.0.0.1:47821/health
+# Response: { "status": "ok", "version": "0.2.0" }
+```
+
+#### `POST /unlock`
+
+Unlock the vault with the master password. Rate-limited to 5 attempts per 60 seconds.
+
+```bash
+curl -X POST http://127.0.0.1:47821/unlock \
+  -H "Content-Type: application/json" \
+  -d '{"password": "your_master_password"}'
+# Response: { "success": true, "token": "session_token..." }
+```
+
+**Rate Limit Headers**:
+- `Retry-After: 45` — seconds until next attempt allowed (on 429 response)
+
+#### `POST /fill`
+
+Fill a `.env.example` template with secrets from the vault.
+
+```bash
+curl -X POST http://127.0.0.1:47821/fill \
+  -H "X-MCP-Token: your_mcp_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "template": "API_KEY=\nDATABASE_URL=",
+    "output_path": ".env"
+  }'
+# Response: { "success": true, "path": ".env" }
+```
+
+#### `GET /items`
+
+List all items in the vault (no secret values exposed).
+
+```bash
+curl http://127.0.0.1:47821/items \
+  -H "X-MCP-Token: your_mcp_token"
+# Response: [
+#   { "id": "uuid1", "name": "OPENAI_API_KEY", "type": "key", "category": "api" },
+#   { "id": "uuid2", "name": "prod_db", "type": "credential", "category": "database" },
+#   ...
+# ]
+```
+
+Query parameters:
+- `type=key` — filter by item type (key, credential, link, command, note)
+- `category=api` — filter by category
+- `search=openai` — search by name
+
+#### `POST /items`
+
+Create a new item in the vault.
+
+```bash
+curl -X POST http://127.0.0.1:47821/items \
+  -H "X-MCP-Token: your_mcp_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "STRIPE_API_KEY",
+    "type": "key",
+    "value": "sk_live_...",
+    "category": "payment",
+    "notes": "Stripe production key"
+  }'
+# Response: { "id": "new_uuid", "created_at": "2026-05-10T..." }
+```
+
+#### `GET /items/:id`
+
+Get a specific item's metadata (not the secret value).
+
+```bash
+curl http://127.0.0.1:47821/items/uuid1 \
+  -H "X-MCP-Token: your_mcp_token"
+# Response: {
+#   "id": "uuid1",
+#   "name": "OPENAI_API_KEY",
+#   "type": "key",
+#   "category": "api",
+#   "notes": "OpenAI production key",
+#   "created_at": "2026-04-15T..."
+# }
+```
+
+#### `GET /items/:id/reveal`
+
+Reveal the secret value of an item (use with caution — logs this action).
+
+```bash
+curl http://127.0.0.1:47821/items/uuid1/reveal \
+  -H "X-MCP-Token: your_mcp_token"
+# Response: { "value": "sk_live_..." }
+```
+
+#### `PUT /items/:id`
+
+Update an item.
+
+```bash
+curl -X PUT http://127.0.0.1:47821/items/uuid1 \
+  -H "X-MCP-Token: your_mcp_token" \
+  -H "Content-Type: application/json" \
+  -d '{ "value": "new_value", "category": "new_category" }'
+# Response: { "updated_at": "2026-05-10T..." }
+```
+
+#### `DELETE /items/:id`
+
+Delete an item from the vault.
+
+```bash
+curl -X DELETE http://127.0.0.1:47821/items/uuid1 \
+  -H "X-MCP-Token: your_mcp_token"
+# Response: { "deleted": true }
+```
+
+#### `GET /categories`
+
+List all categories in use.
+
+```bash
+curl http://127.0.0.1:47821/categories \
+  -H "X-MCP-Token: your_mcp_token"
+# Response: ["api", "database", "deployment", "personal"]
+```
+
+#### `POST /commands`
+
+Execute a saved command with placeholder resolution.
+
+```bash
+curl -X POST http://127.0.0.1:47821/commands \
+  -H "X-MCP-Token: your_mcp_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "deploy",
+    "variables": { "ENV": "production", "REGION": "us-west-2" }
+  }'
+# Response: { "resolved": "cd ~/project && deploy.sh --env=production --region=us-west-2" }
+```
+
+#### `GET /settings`
+
+Get current app settings.
+
+```bash
+curl http://127.0.0.1:47821/settings \
+  -H "X-MCP-Token: your_mcp_token"
+# Response: {
+#   "timeout_minutes": 5,
+#   "hotkey": "Ctrl+Alt+Z",
+#   "auto_lock": true,
+#   "theme": "dark"
+# }
+```
+
+#### `PUT /settings`
+
+Update app settings.
+
+```bash
+curl -X PUT http://127.0.0.1:47821/settings \
+  -H "X-MCP-Token: your_mcp_token" \
+  -H "Content-Type: application/json" \
+  -d '{ "timeout_minutes": 10, "theme": "light" }'
+# Response: { "updated_at": "2026-05-10T..." }
+```
 
 ---
 
@@ -223,13 +582,13 @@ Contributions are welcome! CryptEnv is actively developed and there's a lot of g
 - [x] Export to `.env` / shell formats
 - [x] Editable categories
 - [x] Auto-lock timeout
-- [x] CLI (`vault` binary)
+- [x] CLI (`crypt-env` binary)
 - [x] Local REST API (Axum, port 47821)
 - [x] MCP server (JSON-RPC 2.0 over stdio)
-- [ ] Rate limiting on `/unlock` endpoint
-- [ ] macOS & Linux support
-- [ ] Import from password managers
-- [ ] Encrypted backup
+- [x] Rate limiting on `/unlock` endpoint (5 attempts per 60s)
+- [ ] macOS & Linux support (in progress)
+- [ ] Import from password managers (ENV, Bitwarden CSV, 1Password CSV)
+- [ ] Encrypted backup (`.cenvbak` format)
 
 ---
 

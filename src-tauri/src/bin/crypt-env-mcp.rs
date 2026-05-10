@@ -1,5 +1,6 @@
 // crypt-env-mcp.rs — Standalone MCP server over stdio.
 // Does not import from the project lib — uses only serde, serde_json, reqwest::blocking.
+// All user-facing strings are in English to match the CLI.
 
 use std::io::BufRead;
 use std::io::Write;
@@ -34,7 +35,7 @@ fn read_mcp_token() -> Result<String, String> {
     std::fs::read_to_string(&path)
         .map(|s| s.trim().to_string())
         .map_err(|_| {
-            "MCP token not found. Generate one in vault Settings → INTEGRATIONS.".to_string()
+            "MCP token not found. Generate one in crypt-env Settings → INTEGRATIONS.".to_string()
         })
 }
 
@@ -87,58 +88,69 @@ fn tool_err(text: impl Into<String>) -> serde_json::Value {
 fn tool_definitions() -> serde_json::Value {
     serde_json::json!([
         {
-            "name": "vault_list_items",
-            "description": "Lista ítems de la bóveda. Nunca incluye campos secretos (value, password).",
+            "name": "crypt_env_list_items",
+            "description": "List available secrets by name (no values). Use this first to discover which API keys and credentials are stored — so you know what tools and services you can configure before writing a .env.example.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "type": { "type": "string", "description": "Filtrar por tipo: secret, credential, link, command, note" },
-                    "category": { "type": "string", "description": "Filtrar por categoría" }
+                    "type": { "type": "string", "description": "Filter by type: secret, credential, link, command, note" },
+                    "category": { "type": "string", "description": "Filter by category name" }
                 }
             }
         },
         {
-            "name": "vault_get_item",
-            "description": "Retorna metadata de un ítem sin el valor secreto.",
+            "name": "crypt_env_get_item",
+            "description": "Returns item metadata without the secret value.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "id": { "type": "integer", "description": "ID del ítem" }
+                    "id": { "type": "integer", "description": "Item ID" }
                 },
                 "required": ["id"]
             }
         },
         {
-            "name": "vault_generate_env",
-            "description": "Genera un archivo .env con los valores reales de los secretos indicados. Retorna la ruta del archivo — los valores nunca aparecen en el resultado.",
+            "name": "crypt_env_search_items",
+            "description": "Search items by name (no secret values exposed). Returns matching items metadata.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "keys": { "type": "array", "items": { "type": "string" }, "description": "Nombres de los secretos a incluir" }
+                    "query": { "type": "string", "description": "Search term to match against item names" }
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "crypt_env_generate_env",
+            "description": "Writes a .env file with the real values of the specified secrets. Returns the file path — values never appear in the response.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "keys": { "type": "array", "items": { "type": "string" }, "description": "Names of the secrets to include" }
                 },
                 "required": ["keys"]
             }
         },
         {
-            "name": "vault_inject_env",
-            "description": "Inyecta un secreto como variable de entorno en el proceso MCP. No retorna el valor.",
+            "name": "crypt_env_inject_env",
+            "description": "Injects a secret as an environment variable into the MCP process. Does not return the value.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "key": { "type": "string", "description": "Nombre del secreto" }
+                    "key": { "type": "string", "description": "Secret name" }
                 },
                 "required": ["key"]
             }
         },
         {
-            "name": "vault_add_item",
-            "description": "Agrega un nuevo ítem a la bóveda.",
+            "name": "crypt_env_add_item",
+            "description": "Adds a new item to the vault.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "type": { "type": "string", "description": "Tipo: secret, credential, link, command, note" },
+                    "type": { "type": "string", "description": "Item type: secret, credential, link, command, note" },
                     "name": { "type": "string" },
-                    "value": { "type": "string", "description": "Valor secreto (para secret/credential)" },
+                    "value": { "type": "string", "description": "Secret value (for secret/credential types)" },
                     "category": { "type": "string" },
                     "notes": { "type": "string" },
                     "url": { "type": "string" },
@@ -148,31 +160,48 @@ fn tool_definitions() -> serde_json::Value {
             }
         },
         {
-            "name": "vault_update_settings",
-            "description": "Modifica configuración: auto_lock_timeout (minutos) y hotkey. No permite cambiar master_password.",
+            "name": "crypt_env_update_settings",
+            "description": "Updates settings: auto_lock_timeout (minutes) and hotkey. Changing master_password is not allowed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "auto_lock_timeout": { "type": "integer", "description": "Minutos hasta auto-lock (0 = nunca)" },
-                    "hotkey": { "type": "string", "description": "Atajo global, ej: Ctrl+Alt+Z" }
+                    "auto_lock_timeout": { "type": "integer", "description": "Minutes until auto-lock (0 = never)" },
+                    "hotkey": { "type": "string", "description": "Global shortcut, e.g. Ctrl+Alt+Z" }
                 }
             }
         },
         {
-            "name": "vault_list_commands",
-            "description": "Lista commands disponibles con nombre, descripción y placeholders requeridos.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "vault_run_command",
-            "description": "Retorna un Command resuelto sustituyendo los placeholders {{VAR}}. No lo ejecuta.",
+            "name": "crypt_env_fill_env",
+            "description": "Fills a .env.example template with real secret values and writes the result directly to output_path on disk. Secret values never appear in the response — use crypt_env_list_items first to discover available keys, then write a .env.example, then call this to produce the final .env the service will read.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Nombre del command" },
+                    "template": { "type": "string", "description": "Content of the .env.example (lines like KEY= or KEY=description)" },
+                    "output_path": { "type": "string", "description": "Absolute path where the filled .env should be written, e.g. /home/user/my-project/.env" }
+                },
+                "required": ["template", "output_path"]
+            }
+        },
+        {
+            "name": "crypt_env_doctor",
+            "description": "Checks the health of the crypt-env installation: app status, vault lock state, item count, MCP token configuration, and version.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "crypt_env_list_commands",
+            "description": "Lists saved commands with name, description, and required placeholders.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "crypt_env_run_command",
+            "description": "Returns a command string with {{VAR}} placeholders resolved. Does not execute it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Command name" },
                     "params": {
                         "type": "object",
-                        "description": "Mapa de VAR → valor para resolver placeholders",
+                        "description": "Map of VAR → value to resolve placeholders",
                         "additionalProperties": { "type": "string" }
                     }
                 },
@@ -191,7 +220,7 @@ fn vault_get(path: &str, token: &str) -> Result<reqwest::blocking::Response, Str
         .send()
         .map_err(|e| {
             if e.is_connect() {
-                "vault no está en ejecución".to_string()
+                "Error: crypt-env app is not running. Open the application and try again.".to_string()
             } else {
                 e.to_string()
             }
@@ -210,7 +239,7 @@ fn vault_post(
         .send()
         .map_err(|e| {
             if e.is_connect() {
-                "vault no está en ejecución".to_string()
+                "Error: crypt-env app is not running. Open the application and try again.".to_string()
             } else {
                 e.to_string()
             }
@@ -229,7 +258,7 @@ fn vault_put(
         .send()
         .map_err(|e| {
             if e.is_connect() {
-                "vault no está en ejecución".to_string()
+                "Error: crypt-env app is not running. Open the application and try again.".to_string()
             } else {
                 e.to_string()
             }
@@ -320,18 +349,43 @@ fn tool_list_items(args: &serde_json::Value, token: &str) -> serde_json::Value {
     };
 
     if resp.status().as_u16() == 403 {
-        return tool_err("vault_locked: desbloquea la bóveda primero");
+        return tool_err("vault_locked: unlock the vault first");
     }
 
     let text = match resp.text() {
         Ok(t) => t,
-        Err(e) => return tool_err(format!("error leyendo respuesta: {e}")),
+        Err(e) => return tool_err(format!("error reading response: {e}")),
     };
 
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => tool_ok(
-            serde_json::to_string_pretty(&v).unwrap_or(text),
-        ),
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_search_items(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let query = match args.get("query").and_then(|v| v.as_str()) {
+        Some(q) => q.to_string(),
+        None => return tool_err("required parameter: 'query'"),
+    };
+
+    let url = format!("/items?search={}", urlencod(&query));
+    let resp = match vault_get(&url, token) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    if resp.status().as_u16() == 403 {
+        return tool_err("vault_locked: unlock the vault first");
+    }
+
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
         Err(_) => tool_ok(text),
     }
 }
@@ -339,7 +393,7 @@ fn tool_list_items(args: &serde_json::Value, token: &str) -> serde_json::Value {
 fn tool_get_item(args: &serde_json::Value, token: &str) -> serde_json::Value {
     let id = match args.get("id").and_then(|v| v.as_i64()) {
         Some(i) => i,
-        None => return tool_err("parámetro 'id' requerido"),
+        None => return tool_err("required parameter: 'id'"),
     };
 
     let resp = match vault_get(&format!("/items/{id}"), token) {
@@ -350,14 +404,14 @@ fn tool_get_item(args: &serde_json::Value, token: &str) -> serde_json::Value {
     let status = resp.status().as_u16();
     let text = match resp.text() {
         Ok(t) => t,
-        Err(e) => return tool_err(format!("error leyendo respuesta: {e}")),
+        Err(e) => return tool_err(format!("error reading response: {e}")),
     };
 
     if status == 404 {
-        return tool_err("ítem no encontrado");
+        return tool_err("item not found");
     }
     if status == 403 {
-        return tool_err("vault_locked: desbloquea la bóveda primero");
+        return tool_err("vault_locked: unlock the vault first");
     }
 
     match serde_json::from_str::<serde_json::Value>(&text) {
@@ -375,7 +429,7 @@ fn tool_generate_env(args: &serde_json::Value, token: &str) -> serde_json::Value
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect(),
-        None => return tool_err("parámetro 'keys' requerido (array de strings)"),
+        None => return tool_err("required parameter: 'keys' (array of strings)"),
     };
 
     let mut env_lines: Vec<String> = Vec::new();
@@ -383,11 +437,10 @@ fn tool_generate_env(args: &serde_json::Value, token: &str) -> serde_json::Value
 
     for key in &keys {
         if !is_safe_env_key(key) {
-            env_lines.push(format!("# {key}: nombre inválido o bloqueado, omitido"));
+            env_lines.push(format!("# {key}: invalid or blocked name, skipped"));
             continue;
         }
 
-        // Buscar ítem por nombre exacto (case-insensitive via search)
         let search_url = format!("/items?search={}", urlencod(key));
         let items_resp = match vault_get(&search_url, token) {
             Ok(r) => r,
@@ -395,23 +448,22 @@ fn tool_generate_env(args: &serde_json::Value, token: &str) -> serde_json::Value
         };
 
         if items_resp.status().as_u16() == 403 {
-            return tool_err("vault_locked: desbloquea la bóveda primero");
+            return tool_err("vault_locked: unlock the vault first");
         }
 
         let items_text = match items_resp.text() {
             Ok(t) => t,
-            Err(e) => return tool_err(format!("error leyendo items: {e}")),
+            Err(e) => return tool_err(format!("error reading items: {e}")),
         };
 
         let items_val: serde_json::Value = match serde_json::from_str(&items_text) {
             Ok(v) => v,
             Err(_) => {
-                env_lines.push(format!("# {key}: error parseando respuesta"));
+                env_lines.push(format!("# {key}: error parsing response"));
                 continue;
             }
         };
 
-        // Buscar ítem con nombre exacto (case-insensitive)
         let key_lower = key.to_lowercase();
         let found_id = items_val
             .as_array()
@@ -428,12 +480,11 @@ fn tool_generate_env(args: &serde_json::Value, token: &str) -> serde_json::Value
         let item_id = match found_id {
             Some(id) => id,
             None => {
-                env_lines.push(format!("# {key}: no encontrado en bóveda"));
+                env_lines.push(format!("# {key}: not found in vault"));
                 continue;
             }
         };
 
-        // Revelar valor
         let reveal_resp = match vault_post(
             &format!("/items/{item_id}/reveal"),
             token,
@@ -445,13 +496,13 @@ fn tool_generate_env(args: &serde_json::Value, token: &str) -> serde_json::Value
 
         let reveal_text = match reveal_resp.text() {
             Ok(t) => t,
-            Err(e) => return tool_err(format!("error leyendo reveal: {e}")),
+            Err(e) => return tool_err(format!("error reading reveal: {e}")),
         };
 
         let reveal_val: serde_json::Value = match serde_json::from_str(&reveal_text) {
             Ok(v) => v,
             Err(_) => {
-                env_lines.push(format!("# {key}: error parseando valor"));
+                env_lines.push(format!("# {key}: error parsing value"));
                 continue;
             }
         };
@@ -466,14 +517,13 @@ fn tool_generate_env(args: &serde_json::Value, token: &str) -> serde_json::Value
     }
 
     let content = env_lines.join("\n");
-    let filename = format!("vault_{}.env", random_hex(8));
+    let filename = format!("crypt_env_{}.env", random_hex(8));
     let path = std::env::temp_dir().join(&filename);
 
     if let Err(e) = std::fs::write(&path, &content) {
-        return tool_err(format!("error escribiendo archivo .env: {e}"));
+        return tool_err(format!("error writing .env file: {e}"));
     }
 
-    // Registrar para limpieza en la próxima llamada
     track_temp_file(path.clone());
 
     let path_str = path.to_string_lossy().to_string();
@@ -481,7 +531,7 @@ fn tool_generate_env(args: &serde_json::Value, token: &str) -> serde_json::Value
         serde_json::to_string_pretty(&serde_json::json!({
             "path": path_str,
             "count": n_found,
-            "note": "Este archivo contiene secretos en texto claro. Cárgalo y elimínalo inmediatamente."
+            "note": "This file contains secrets in plaintext. Load it and delete it immediately."
         }))
         .unwrap_or_default(),
     )
@@ -490,17 +540,16 @@ fn tool_generate_env(args: &serde_json::Value, token: &str) -> serde_json::Value
 fn tool_inject_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
     let key = match args.get("key").and_then(|v| v.as_str()) {
         Some(k) => k.to_string(),
-        None => return tool_err("parámetro 'key' requerido"),
+        None => return tool_err("required parameter: 'key'"),
     };
 
     if !is_safe_env_key(&key) {
         return tool_err(format!(
-            "nombre de variable inválido o bloqueado: '{key}'. \
-             Debe ser [A-Z][A-Z0-9_]* y no puede ser una variable de sistema crítica."
+            "invalid or blocked variable name: '{key}'. \
+             Must match [A-Z][A-Z0-9_]* and cannot be a critical system variable."
         ));
     }
 
-    // Buscar ítem por nombre
     let search_url = format!("/items?search={}", urlencod(&key));
     let items_resp = match vault_get(&search_url, token) {
         Ok(r) => r,
@@ -508,17 +557,17 @@ fn tool_inject_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
     };
 
     if items_resp.status().as_u16() == 403 {
-        return tool_err("vault_locked: desbloquea la bóveda primero");
+        return tool_err("vault_locked: unlock the vault first");
     }
 
     let items_text = match items_resp.text() {
         Ok(t) => t,
-        Err(e) => return tool_err(format!("error leyendo items: {e}")),
+        Err(e) => return tool_err(format!("error reading items: {e}")),
     };
 
     let items_val: serde_json::Value = match serde_json::from_str(&items_text) {
         Ok(v) => v,
-        Err(_) => return tool_err("error parseando lista de items"),
+        Err(_) => return tool_err("error parsing item list"),
     };
 
     let key_lower = key.to_lowercase();
@@ -536,10 +585,9 @@ fn tool_inject_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
 
     let item_id = match found_id {
         Some(id) => id,
-        None => return tool_err(format!("secreto '{key}' no encontrado en bóveda")),
+        None => return tool_err(format!("secret '{key}' not found in vault")),
     };
 
-    // Revelar valor
     let reveal_resp = match vault_post(
         &format!("/items/{item_id}/reveal"),
         token,
@@ -551,17 +599,17 @@ fn tool_inject_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
 
     let reveal_text = match reveal_resp.text() {
         Ok(t) => t,
-        Err(e) => return tool_err(format!("error leyendo reveal: {e}")),
+        Err(e) => return tool_err(format!("error reading reveal: {e}")),
     };
 
     let reveal_val: serde_json::Value = match serde_json::from_str(&reveal_text) {
         Ok(v) => v,
-        Err(_) => return tool_err("error parseando valor revelado"),
+        Err(_) => return tool_err("error parsing revealed value"),
     };
 
     let value = match reveal_val.get("value").and_then(|v| v.as_str()) {
         Some(v) => v.to_string(),
-        None => return tool_err("el ítem no tiene valor secreto"),
+        None => return tool_err("item has no secret value"),
     };
 
     // Inyectar como variable de entorno
@@ -582,11 +630,11 @@ fn tool_inject_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
 fn tool_add_item(args: &serde_json::Value, token: &str) -> serde_json::Value {
     let item_type = match args.get("type").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
-        None => return tool_err("parámetro 'type' requerido"),
+        None => return tool_err("required parameter: 'type'"),
     };
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
-        None => return tool_err("parámetro 'name' requerido"),
+        None => return tool_err("required parameter: 'name'"),
     };
 
     let now_ts = std::time::SystemTime::now()
@@ -628,10 +676,10 @@ fn tool_add_item(args: &serde_json::Value, token: &str) -> serde_json::Value {
     };
 
     if status == 403 {
-        return tool_err("vault_locked: desbloquea la bóveda primero");
+        return tool_err("vault_locked: unlock the vault first");
     }
     if status >= 400 {
-        return tool_err(format!("error creando ítem (HTTP {status}): {text}"));
+        return tool_err(format!("error creating item (HTTP {status}): {text}"));
     }
 
     match serde_json::from_str::<serde_json::Value>(&text) {
@@ -648,16 +696,109 @@ fn tool_update_settings(args: &serde_json::Value, token: &str) -> serde_json::Va
 
     let status = resp.status().as_u16();
     if status == 403 {
-        return tool_err("vault_locked: desbloquea la bóveda primero");
+        return tool_err("vault_locked: unlock the vault first");
     }
     if status >= 400 {
         let text = resp.text().unwrap_or_default();
-        return tool_err(format!("error actualizando settings (HTTP {status}): {text}"));
+        return tool_err(format!("error updating settings (HTTP {status}): {text}"));
     }
 
     tool_ok(
         serde_json::to_string_pretty(&serde_json::json!({ "ok": true })).unwrap_or_default(),
     )
+}
+
+fn tool_fill_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let template = match args.get("template").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => return tool_err("required parameter: 'template'"),
+    };
+    let output_path = match args.get("output_path").and_then(|v| v.as_str()) {
+        Some(p) => std::path::PathBuf::from(p),
+        None => return tool_err("required parameter: 'output_path'"),
+    };
+
+    let resp = match vault_post(
+        "/fill",
+        token,
+        &serde_json::json!({ "template": template, "output_path": output_path.to_string_lossy() }),
+    ) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 {
+        return tool_err("vault_locked: unlock the vault first");
+    }
+    if status >= 400 {
+        return tool_err(format!("fill failed (HTTP {status}): {text}"));
+    }
+
+    // The API already wrote the file to output_path — just surface the stats.
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_doctor(_args: &serde_json::Value, _token: &str) -> serde_json::Value {
+    let resp = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .and_then(|c| c.get(format!("{API_BASE}/health")).send())
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return tool_ok(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "not_running",
+                    "error": "crypt-env app is not running. Open the application and try again.",
+                    "detail": e.to_string()
+                }))
+                .unwrap_or_default(),
+            )
+        }
+    };
+
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading health response: {e}")),
+    };
+
+    let mut health: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return tool_ok(text),
+    };
+
+    // Add MCP token file status
+    let mcp_token_file_ok = std::env::var("APPDATA")
+        .map(|d| {
+            std::path::PathBuf::from(d)
+                .join("com.maosuarez.cryptenv")
+                .join("mcp_token")
+        })
+        .or_else(|_| {
+            std::env::var("HOME").map(|d| {
+                std::path::PathBuf::from(d)
+                    .join(".local")
+                    .join("share")
+                    .join("com.maosuarez.cryptenv")
+                    .join("mcp_token")
+            })
+        })
+        .map(|p| p.exists())
+        .unwrap_or(false);
+
+    health["mcp_server"] = serde_json::json!("running");
+    health["mcp_token_file_present"] = serde_json::json!(mcp_token_file_ok);
+
+    tool_ok(serde_json::to_string_pretty(&health).unwrap_or(text))
 }
 
 fn tool_list_commands(token: &str) -> serde_json::Value {
@@ -667,12 +808,12 @@ fn tool_list_commands(token: &str) -> serde_json::Value {
     };
 
     if resp.status().as_u16() == 403 {
-        return tool_err("vault_locked: desbloquea la bóveda primero");
+        return tool_err("vault_locked: unlock the vault first");
     }
 
     let text = match resp.text() {
         Ok(t) => t,
-        Err(e) => return tool_err(format!("error leyendo respuesta: {e}")),
+        Err(e) => return tool_err(format!("error reading response: {e}")),
     };
 
     match serde_json::from_str::<serde_json::Value>(&text) {
@@ -684,27 +825,26 @@ fn tool_list_commands(token: &str) -> serde_json::Value {
 fn tool_run_command(args: &serde_json::Value, token: &str) -> serde_json::Value {
     let cmd_name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
-        None => return tool_err("parámetro 'name' requerido"),
+        None => return tool_err("required parameter: 'name'"),
     };
 
-    // Obtener lista de commands
     let list_resp = match vault_get("/commands", token) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
     };
 
     if list_resp.status().as_u16() == 403 {
-        return tool_err("vault_locked: desbloquea la bóveda primero");
+        return tool_err("vault_locked: unlock the vault first");
     }
 
     let list_text = match list_resp.text() {
         Ok(t) => t,
-        Err(e) => return tool_err(format!("error leyendo commands: {e}")),
+        Err(e) => return tool_err(format!("error reading commands: {e}")),
     };
 
     let list_val: serde_json::Value = match serde_json::from_str(&list_text) {
         Ok(v) => v,
-        Err(_) => return tool_err("error parseando lista de commands"),
+        Err(_) => return tool_err("error parsing command list"),
     };
 
     let name_lower = cmd_name.to_lowercase();
@@ -722,10 +862,9 @@ fn tool_run_command(args: &serde_json::Value, token: &str) -> serde_json::Value 
 
     let cmd_id = match found {
         Some(id) => id,
-        None => return tool_err(format!("comando '{cmd_name}' no encontrado")),
+        None => return tool_err(format!("command '{cmd_name}' not found")),
     };
 
-    // Obtener detalle del command
     let detail_resp = match vault_get(&format!("/commands/{cmd_id}"), token) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
@@ -733,17 +872,17 @@ fn tool_run_command(args: &serde_json::Value, token: &str) -> serde_json::Value 
 
     let detail_text = match detail_resp.text() {
         Ok(t) => t,
-        Err(e) => return tool_err(format!("error leyendo detalle: {e}")),
+        Err(e) => return tool_err(format!("error reading command detail: {e}")),
     };
 
     let detail_val: serde_json::Value = match serde_json::from_str(&detail_text) {
         Ok(v) => v,
-        Err(_) => return tool_err("error parseando detalle del command"),
+        Err(_) => return tool_err("error parsing command detail"),
     };
 
     let template = match detail_val.get("command").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
-        None => return tool_err("el command no tiene template"),
+        None => return tool_err("command has no template"),
     };
 
     // Sustituir placeholders {{VAR}} con valores de params
@@ -771,7 +910,7 @@ fn dispatch(
         "initialize" => Ok(serde_json::json!({
             "protocolVersion": MCP_VERSION,
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "crypt-env-mcp", "version": "0.1.0" }
+            "serverInfo": { "name": "crypt-env", "version": "0.1.0" }
         })),
         "ping" => Ok(serde_json::json!({})),
         "tools/list" => Ok(serde_json::json!({ "tools": tool_definitions() })),
@@ -795,14 +934,17 @@ fn dispatch(
 
 fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_json::Value {
     match name {
-        "vault_list_items" => tool_list_items(args, token),
-        "vault_get_item" => tool_get_item(args, token),
-        "vault_generate_env" => tool_generate_env(args, token),
-        "vault_inject_env" => tool_inject_env(args, token),
-        "vault_add_item" => tool_add_item(args, token),
-        "vault_update_settings" => tool_update_settings(args, token),
-        "vault_list_commands" => tool_list_commands(token),
-        "vault_run_command" => tool_run_command(args, token),
+        "crypt_env_list_items" => tool_list_items(args, token),
+        "crypt_env_get_item" => tool_get_item(args, token),
+        "crypt_env_search_items" => tool_search_items(args, token),
+        "crypt_env_fill_env" => tool_fill_env(args, token),
+        "crypt_env_generate_env" => tool_generate_env(args, token),
+        "crypt_env_inject_env" => tool_inject_env(args, token),
+        "crypt_env_add_item" => tool_add_item(args, token),
+        "crypt_env_update_settings" => tool_update_settings(args, token),
+        "crypt_env_doctor" => tool_doctor(args, token),
+        "crypt_env_list_commands" => tool_list_commands(token),
+        "crypt_env_run_command" => tool_run_command(args, token),
         _ => tool_err(format!("unknown tool: {name}")),
     }
 }

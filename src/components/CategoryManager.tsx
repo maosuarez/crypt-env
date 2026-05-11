@@ -68,7 +68,7 @@ export function CategoryManager() {
             key={cat.id}
             className="flex items-center gap-[10px] px-3.5 py-2 border-b border-bd hover:bg-raised transition-colors duration-100"
           >
-            <Icon name="drag" size={12} color="#4a5268" />
+            <Icon name="drag" size={12} color="#6b7899" />
 
             {/* Color picker */}
             <div className="relative shrink-0">
@@ -113,7 +113,7 @@ export function CategoryManager() {
               <span className="flex-1 text-[12px] font-medium text-tx">{cat.name}</span>
             )}
 
-            <span className="text-[10px] text-tx3 font-mono min-w-5 text-right">{catCount(cat.name)}</span>
+            <span className="text-[11px] text-tx2 font-mono min-w-5 text-right">{catCount(cat.name)}</span>
 
             <button
               onClick={() => setEditing(editing === cat.id ? null : cat.id)}
@@ -174,7 +174,7 @@ export function CategoryManager() {
         <div className="absolute inset-0 bg-[rgba(10,11,14,.85)] flex items-center justify-center p-6 z-[100] backdrop-blur-[4px]">
           <div className="bg-surface border border-danger rounded-[4px] p-[22px] w-full">
             <div className="text-[13px] font-bold mb-1.5 text-tx">Delete "{confirmDel.name}"?</div>
-            <div className="text-[12px] text-tx3 mb-[18px] leading-[1.5]">
+            <div className="text-[12px] text-tx2 mb-[18px] leading-[1.5]">
               This tag will be removed from all {catCount(confirmDel.name)} items that use it.
             </div>
             <div className="flex gap-2">

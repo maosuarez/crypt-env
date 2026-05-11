@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Icon } from './ui/Icon';
 import { useVaultStore } from '../store';
 import type { VaultItem, Category } from '../types';
@@ -50,8 +51,10 @@ export function LockScreen() {
     setBioError('');
     try {
       const payload = await invoke<{ items: VaultItem[]; categories: Category[] }>('biometric_unlock');
+      await getCurrentWindow().setFocus();
       await unlockWithPayload(payload);
     } catch (e: unknown) {
+      await getCurrentWindow().setFocus();
       setBioError(e instanceof Error ? e.message : String(e));
       setTimeout(() => setBioError(''), 3000);
     } finally {

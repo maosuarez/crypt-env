@@ -30,7 +30,6 @@ mod windows_impl {
     use zeroize::Zeroizing;
 
     pub async fn check_availability() -> BiometricStatus {
-        // IAsyncOperation::get() blocks; run it on the blocking thread pool.
         let result = tokio::task::spawn_blocking(|| {
             UserConsentVerifier::CheckAvailabilityAsync()
                 .and_then(|op| op.get())
@@ -44,7 +43,7 @@ mod windows_impl {
 
         match availability {
             UserConsentVerifierAvailability::Available => BiometricStatus::Available,
-            // DeviceBusy means biometrics exist but are temporarily occupied; treat as available.
+            // DeviceBusy means the sensor is temporarily busy; treat as available.
             UserConsentVerifierAvailability::DeviceBusy => BiometricStatus::Available,
             UserConsentVerifierAvailability::DisabledByPolicy => BiometricStatus::DisabledByPolicy,
             UserConsentVerifierAvailability::NotConfiguredForUser => {
@@ -66,10 +65,10 @@ mod windows_impl {
 
         match result {
             UserConsentVerificationResult::Verified => Ok(true),
-            // DeviceBusy or Canceled → caller can retry; not a hard error.
+            // DeviceBusy or Canceled → not a hard error; caller can retry.
             UserConsentVerificationResult::DeviceBusy
             | UserConsentVerificationResult::Canceled => Ok(false),
-            other => Err(format!("biometric verification failed with code {}", other.0)),
+            other => Err(format!("biometric verification failed: code {}", other.0)),
         }
     }
 
@@ -96,11 +95,10 @@ mod windows_impl {
             .map_err(|e| format!("DPAPI protect failed: {e}"))?;
         }
 
-        // Safety: CryptProtectData succeeded; output.pbData is valid for output.cbData bytes.
         let blob =
             unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
 
-        // LocalFree frees the OS-allocated buffer (not the Rust allocator).
+        // LocalFree frees the OS-allocated buffer — do NOT use the Rust allocator here.
         unsafe { LocalFree(HLOCAL(output.pbData.cast())) };
 
         Ok(blob)
@@ -132,7 +130,7 @@ mod windows_impl {
         let plaintext =
             unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
 
-        // Zeroize the OS buffer before freeing so the plaintext doesn't linger.
+        // Zeroize the OS buffer before freeing so the plaintext doesn't linger in memory.
         unsafe {
             std::ptr::write_bytes(output.pbData, 0, output.cbData as usize);
             LocalFree(HLOCAL(output.pbData.cast()));

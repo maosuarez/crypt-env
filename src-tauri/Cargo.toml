@@ -75,8 +75,10 @@ shlex = "1"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls-native-roots"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+windows-core = "0.58"
 windows = { version = "0.58", features = [
     "Security_Credentials_UI",
+    "Foundation",
     "Win32_Security_Cryptography",
     "Win32_Foundation",
     "Win32_System_Memory",

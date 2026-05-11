@@ -57,6 +57,14 @@ impl VaultDb {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             )",
+            "CREATE TABLE IF NOT EXISTS share_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                mode       TEXT NOT NULL,
+                direction  TEXT NOT NULL,
+                item_ids   TEXT NOT NULL,
+                peer_fp    TEXT,
+                timestamp  TEXT NOT NULL
+            )",
         ];
         for stmt in &stmts {
             sqlx::query(stmt)
@@ -197,6 +205,35 @@ impl VaultDb {
                 .await
                 .map_err(|e| e.to_string())?;
         Ok(val)
+    }
+
+    /// Record a share event to the audit log.
+    pub async fn log_share(
+        &self,
+        mode: &str,
+        direction: &str,
+        item_ids: &[i64],
+        peer_fp: Option<&str>,
+    ) -> Result<(), String> {
+        let ids_str: String = item_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let ts = now_ts();
+        sqlx::query(
+            "INSERT INTO share_log (mode, direction, item_ids, peer_fp, timestamp) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(mode)
+        .bind(direction)
+        .bind(ids_str)
+        .bind(peer_fp)
+        .bind(ts)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub async fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {

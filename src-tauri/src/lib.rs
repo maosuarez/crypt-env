@@ -19,6 +19,10 @@ use vault::{
     vault_is_setup, vault_lock, vault_parse_import, vault_save_categories, vault_save_item,
     vault_save_settings, vault_unlock, vault_wipe, SharedState, VaultState,
 };
+use vault::share_commands::{
+    share_cancel, share_confirm_fingerprint, share_export_file, share_import_file,
+    share_poll_status, share_start_receive, share_start_send, SharedShareState,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -47,6 +51,10 @@ pub fn run() {
             let state: SharedState =
                 std::sync::Arc::new(tokio::sync::Mutex::new(VaultState::new(db)));
             app.manage(state.clone());
+
+            let share_state: SharedShareState =
+                std::sync::Arc::new(share::ShareState::new());
+            app.manage(share_state);
 
             let api_state = state.clone();
             let api_app_dir = app_dir.clone();
@@ -143,6 +151,13 @@ pub fn run() {
             biometric_enroll,
             biometric_unlock,
             biometric_disable,
+            share_start_send,
+            share_start_receive,
+            share_poll_status,
+            share_confirm_fingerprint,
+            share_cancel,
+            share_export_file,
+            share_import_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

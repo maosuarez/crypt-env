@@ -11,6 +11,7 @@ use crate::crypto::{self, CryptoKey};
 use crate::db::{DbCategory, VaultDb};
 
 pub mod import;
+pub mod share_commands;
 
 // ─── Serializable types (shared with frontend) ────────────────────────────────
 

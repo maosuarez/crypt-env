@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::crypto;
+use crate::share::{ShareState, ShareSessionState};
 use crate::tls;
 use crate::vault::{SharedState, VaultItem};
 
@@ -28,6 +29,7 @@ pub struct ApiState {
     session_token: Arc<Mutex<Option<String>>>,
     token_expires: Arc<Mutex<Option<Instant>>>,
     unlock_rate: Mutex<RateLimitState>,
+    share: Arc<ShareState>,
 }
 
 // ─── Tipos de respuesta ───────────────────────────────────────────────────────
@@ -1208,6 +1210,355 @@ async fn handle_fill(
         .into_response()
 }
 
+// ─── Share handlers ───────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ShareListenBody {
+    items: Vec<i64>,
+}
+
+#[derive(Serialize)]
+struct ShareListenResponse {
+    pairing_code: String,
+    fingerprint: Option<String>,
+    expires_in: u64,
+    status: &'static str,
+}
+
+async fn handle_share_listen(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<ShareListenBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    if body.items.is_empty() {
+        return err_json(StatusCode::UNPROCESSABLE_ENTITY, "items list must not be empty", "VALIDATION_ERROR").into_response();
+    }
+
+    // Extract vault key
+    let vault_key: [u8; 32] = {
+        let guard = state.vault.lock().await;
+        match guard.key.as_ref() {
+            Some(k) => **k,
+            None => return err_json(StatusCode::FORBIDDEN, "vault locked", "VAULT_LOCKED").into_response(),
+        }
+    };
+
+    let pairing_code = match crate::share::start_listen_session(
+        state.share.clone(),
+        body.items,
+        vault_key,
+        state.vault.clone(),
+    )
+    .await
+    {
+        Ok(code) => code,
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+                "INTERNAL_ERROR",
+            )
+            .into_response()
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(ShareListenResponse {
+            pairing_code,
+            fingerprint: None,
+            expires_in: 300,
+            status: "listening",
+        }),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct ShareConnectBody {
+    pairing_code: String,
+}
+
+#[derive(Serialize)]
+struct ShareConnectResponse {
+    fingerprint: String,
+    status: &'static str,
+}
+
+async fn handle_share_connect(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<ShareConnectBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let vault_key: [u8; 32] = {
+        let guard = state.vault.lock().await;
+        match guard.key.as_ref() {
+            Some(k) => **k,
+            None => return err_json(StatusCode::FORBIDDEN, "vault locked", "VAULT_LOCKED").into_response(),
+        }
+    };
+
+    let fingerprint = match crate::share::connect_to_peer(
+        state.share.clone(),
+        body.pairing_code,
+        vault_key,
+        state.vault.clone(),
+    )
+    .await
+    {
+        Ok(fp) => fp,
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+                "INTERNAL_ERROR",
+            )
+            .into_response()
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(ShareConnectResponse {
+            fingerprint,
+            status: "awaiting_confirmation",
+        }),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct ShareConfirmBody {
+    confirmed: bool,
+}
+
+#[derive(Serialize)]
+struct ShareConfirmResponse {
+    status: String,
+}
+
+async fn handle_share_confirm(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<ShareConfirmBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    match crate::share::confirm_fingerprint(&state.share, body.confirmed).await {
+        Ok(()) => {
+            let status = if body.confirmed { "active" } else { "cancelled" };
+            (StatusCode::OK, Json(ShareConfirmResponse { status: status.to_string() })).into_response()
+        }
+        Err(e) => err_json(StatusCode::BAD_REQUEST, &e.to_string(), "BAD_REQUEST").into_response(),
+    }
+}
+
+#[derive(Serialize)]
+struct ShareStatusResponse {
+    state: String,
+    fingerprint: Option<String>,
+    direction: Option<String>,
+    received_names: Option<Vec<String>>,
+}
+
+async fn handle_share_status(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let guard = state.share.session.lock().await;
+    match guard.as_ref() {
+        None => (
+            StatusCode::OK,
+            Json(ShareStatusResponse {
+                state: "none".to_string(),
+                fingerprint: None,
+                direction: None,
+                received_names: None,
+            }),
+        )
+            .into_response(),
+        Some(s) => {
+            let state_str = match &s.state {
+                ShareSessionState::Failed(msg) => format!("failed: {msg}"),
+                other => other.as_str().to_string(),
+            };
+            let received = if s.state == ShareSessionState::Done && s.direction == crate::share::ShareDirection::Receiving {
+                Some(s.received_names.clone())
+            } else {
+                None
+            };
+            (
+                StatusCode::OK,
+                Json(ShareStatusResponse {
+                    state: state_str,
+                    fingerprint: s.fingerprint.clone(),
+                    direction: Some(s.direction.as_str().to_string()),
+                    received_names: received,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ShareCancelResponse {
+    cancelled: bool,
+}
+
+async fn handle_share_cancel(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    match crate::share::cancel_session(&state.share).await {
+        Ok(()) => (StatusCode::OK, Json(ShareCancelResponse { cancelled: true })).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, &e.to_string(), "BAD_REQUEST").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ShareExportBody {
+    items: Vec<i64>,
+    output_path: String,
+}
+
+#[derive(Serialize)]
+struct ShareExportResponse {
+    passphrase: String,
+    path: String,
+}
+
+async fn handle_share_export(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<ShareExportBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    if body.items.is_empty() {
+        return err_json(StatusCode::UNPROCESSABLE_ENTITY, "items list must not be empty", "VALIDATION_ERROR").into_response();
+    }
+
+    let output_path = std::path::PathBuf::from(&body.output_path);
+    if let Some(parent) = output_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("cannot create output directory: {e}"),
+                "INTERNAL_ERROR",
+            )
+            .into_response();
+        }
+    }
+
+    match crate::share::export_package(&body.items, &output_path, &state.vault).await {
+        Ok(passphrase) => (
+            StatusCode::OK,
+            Json(ShareExportResponse {
+                passphrase,
+                path: body.output_path,
+            }),
+        )
+            .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), "INTERNAL_ERROR")
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ShareImportBody {
+    path: String,
+    passphrase: String,
+}
+
+#[derive(Serialize)]
+struct ShareImportResponse {
+    imported: usize,
+    item_names: Vec<String>,
+}
+
+async fn handle_share_import(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<ShareImportBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let path = std::path::PathBuf::from(&body.path);
+    match crate::share::import_package(&path, &body.passphrase, &state.vault).await {
+        Ok(names) => {
+            let count = names.len();
+            (
+                StatusCode::OK,
+                Json(ShareImportResponse {
+                    imported: count,
+                    item_names: names,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), "INTERNAL_ERROR")
+            .into_response(),
+    }
+}
+
 // ─── Función pública de arranque ──────────────────────────────────────────────
 
 pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
@@ -1219,6 +1570,7 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
             attempts: 0,
             window_start: Instant::now(),
         }),
+        share: Arc::new(ShareState::new()),
     });
 
     let app = Router::new()
@@ -1236,6 +1588,13 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         .route("/commands/:id", get(handle_get_command))
         .route("/settings", get(handle_get_settings))
         .route("/settings", put(handle_put_settings))
+        .route("/share/listen", post(handle_share_listen))
+        .route("/share/connect", post(handle_share_connect))
+        .route("/share/confirm", post(handle_share_confirm))
+        .route("/share/status", get(handle_share_status))
+        .route("/share/session", delete(handle_share_cancel))
+        .route("/share/export", post(handle_share_export))
+        .route("/share/import", post(handle_share_import))
         .with_state(api_state)
         .layer(middleware::from_fn(cors_guard));
 

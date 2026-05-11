@@ -85,6 +85,13 @@ export function Settings() {
   const [pwError,      setPwError]      = useState('');
   const [pwChanging,   setPwChanging]   = useState(false);
 
+  // Biometric state
+  const [bioAvailable, setBioAvailable] = useState(false);
+  const [bioEnrolled,  setBioEnrolled]  = useState(false);
+  const [bioPw,        setBioPw]        = useState('');
+  const [showBioPw,    setShowBioPw]    = useState(false);
+  const [bioWorking,   setBioWorking]   = useState(false);
+
   const openChangePw = () => {
     setCurrentPw(''); setNewPw(''); setConfirmPw('');
     setShowCurrent(false); setShowNew(false); setShowConfirm(false);
@@ -123,6 +130,13 @@ export function Settings() {
     invoke<string | null>('vault_get_mcp_token')
       .then((t) => setMcpToken(t))
       .catch(() => {});
+
+    invoke<string>('biometric_check').then((status) => {
+      if (status === 'available') {
+        setBioAvailable(true);
+        invoke<boolean>('biometric_is_enrolled').then(setBioEnrolled).catch(() => {});
+      }
+    }).catch(() => {});
   }, []);
 
   const handleSave = async () => {
@@ -164,6 +178,34 @@ export function Settings() {
     }
   };
 
+  const handleBioEnable = async () => {
+    if (!bioPw) return;
+    setBioWorking(true);
+    try {
+      await invoke('biometric_enroll', { password: bioPw });
+      setBioEnrolled(true);
+      setBioPw('');
+      showToast('Biometric unlock enabled');
+    } catch (e: unknown) {
+      showToast(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBioWorking(false);
+    }
+  };
+
+  const handleBioDisable = async () => {
+    setBioWorking(true);
+    try {
+      await invoke('biometric_disable');
+      setBioEnrolled(false);
+      showToast('Biometric unlock disabled');
+    } catch {
+      showToast('Failed to disable biometric unlock');
+    } finally {
+      setBioWorking(false);
+    }
+  };
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden animate-fade-in relative">
       {/* Header */}
@@ -189,6 +231,51 @@ export function Settings() {
             CHANGE
           </button>
         </Row>
+        {bioAvailable && (
+          <Row icon="fingerprint" label="Biometric Unlock">
+            {bioEnrolled ? (
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-mono text-accent bg-accent-b border border-accent-d rounded-[3px] px-2 py-[3px]">ENABLED</span>
+                <button
+                  onClick={handleBioDisable}
+                  disabled={bioWorking}
+                  className="bg-transparent border border-bd2 rounded-[3px] text-tx2 px-[11px] py-[5px] text-[11px] cursor-pointer font-ui font-medium tracking-[0.04em] hover:text-tx transition-colors disabled:opacity-40"
+                >
+                  {bioWorking ? 'DISABLING…' : 'DISABLE'}
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <div className="relative">
+                  <input
+                    type={showBioPw ? 'text' : 'password'}
+                    value={bioPw}
+                    onChange={(e) => setBioPw(e.target.value)}
+                    placeholder="Master password…"
+                    autoComplete="off"
+                    className="bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-2 py-[5px] pr-7 outline-none focus:border-accent-d transition-colors w-[160px]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowBioPw((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-tx3 hover:text-tx transition-colors"
+                  >
+                    <Icon name={showBioPw ? 'eyeOff' : 'eye'} size={12} />
+                  </button>
+                </div>
+                <button
+                  onClick={handleBioEnable}
+                  disabled={bioWorking || !bioPw}
+                  className="bg-transparent border border-bd2 rounded-[3px] text-tx2 px-[11px] py-[5px] text-[11px] cursor-pointer font-ui font-medium tracking-[0.04em] hover:text-tx transition-colors disabled:opacity-40 flex items-center gap-1"
+                >
+                  {bioWorking
+                    ? <><div className="w-2.5 h-2.5 rounded-full border-2 border-transparent border-t-current animate-spin-fast" />ENABLING…</>
+                    : 'ENABLE'}
+                </button>
+              </div>
+            )}
+          </Row>
+        )}
         <Row icon="timer" label="Auto-lock Timeout">
           <select
             value={timeoutDraft}

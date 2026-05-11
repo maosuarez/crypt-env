@@ -27,8 +27,9 @@ interface VaultStore {
   setPlaceholder: (item: VaultItem | null) => void;
   setLockTimeout: (mins: number) => void;
   setHotkey:      (key: string) => void;
-  unlock:         (password: string) => Promise<void>;
-  lock:           () => Promise<void>;
+  unlock:              (password: string) => Promise<void>;
+  unlockWithPayload:   (payload: { items: VaultItem[]; categories: Category[] }) => Promise<void>;
+  lock:                () => Promise<void>;
   wipe:           () => Promise<void>;
   saveItem:       (form: Omit<VaultItem, 'id' | 'created'>) => Promise<void>;
   deleteItem:     (id: number) => Promise<void>;
@@ -76,6 +77,18 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     set({
       items:       result.items,
       cats:        result.categories,
+      screen:      'vault',
+      editTarget:  null,
+      lockTimeout: settings.autoLockTimeout,
+      hotkey:      settings.hotkey,
+    });
+  },
+
+  unlockWithPayload: async (payload) => {
+    const settings = await invoke<{ autoLockTimeout: number; hotkey: string }>('vault_get_settings');
+    set({
+      items:       payload.items,
+      cats:        payload.categories,
       screen:      'vault',
       editTarget:  null,
       lockTimeout: settings.autoLockTimeout,

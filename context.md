@@ -447,6 +447,68 @@ CREATE TABLE settings (
 
 ---
 
+### 12. Windows Hello Biometric Unlock
+**Context**: Users on Windows need fast, convenient vault unlock without entering master password every time. Windows Hello (fingerprint, facial recognition) is available on most modern Windows devices.
+
+**Decision**: Implement biometric unlock via Windows Hello with DPAPI-encrypted master password storage:
+
+1. **Biometric module** (`src-tauri/src/biometric/mod.rs`):
+   - `check_availability()` → returns `BiometricAvailable | NotAvailable`
+   - `request_verification(message: &str)` → prompts Windows Hello dialog, returns `VerificationOk | VerificationCancelled | Error`
+   - `dpapi_protect(data: &[u8])` → encrypts data with DPAPI (tied to Windows user account), returns hex-encoded blob
+   - `dpapi_unprotect(blob_hex: &str)` → decrypts DPAPI blob, returns plaintext bytes
+
+2. **Enrollment flow**:
+   - User enters master password in Settings
+   - Calls `dpapi_protect(password_bytes)` → generates DPAPI-encrypted blob
+   - Stores blob in `settings` table as key `biometric_blob` (plaintext hex in DB)
+   - DPAPI ties the blob to the Windows user account; blob cannot be decrypted on a different account
+
+3. **Unlock flow**:
+   - Frontend detects biometric availability and enrollment status
+   - User clicks "Unlock with Windows Hello"
+   - Calls `biometric_unlock` command → retrieves `biometric_blob` from DB → `dpapi_unprotect()` → Windows Hello prompt → recovers password bytes
+   - Vault unlocks normally with recovered password (no special unlock path)
+   - Session token issued as usual
+
+4. **Disable biometric**:
+   - User enters master password in Settings
+   - Calls `biometric_disable` command → deletes `biometric_blob` from settings table
+   - DPAPI blob discarded; biometric unlock unavailable until re-enrolled
+
+5. **New Tauri commands**:
+   - `biometric_check() → "available" | "not_available"` — Detects if Windows Hello is available
+   - `biometric_is_enrolled() → bool` — Checks if user has enrolled (`biometric_blob` exists in DB)
+   - `biometric_enroll(password: &str) → bool` — Encrypts password with DPAPI, stores blob, returns success
+   - `biometric_unlock() → String` — Decrypts blob, prompts Windows Hello, returns session token on success
+   - `biometric_disable(password: &str) → bool` — Verifies password, deletes blob, returns success
+
+6. **Implementation notes**:
+   - Windows WinRT calls (`UserConsentVerifier::CheckAvailabilityAsync()`, `UserConsentVerifier::RequestVerificationAsync()`) are blocking; use `tokio::task::spawn_blocking()` in Tauri commands
+   - DPAPI output uses `LocalFree()` to deallocate WinRT-allocated memory; prevents memory leak
+   - Secret password bytes are in `Zeroizing<Vec<u8>>` after decryption and before unlock
+   - Non-Windows platforms: all functions compile but return `NotAvailable` at runtime (feature disabled)
+
+7. **Dependencies**:
+   - `windows` crate v0.58 with features: `Security_Credentials_UI`, `Win32_Security_Cryptography`, `Win32_Foundation`, `Win32_System_Memory`
+   - `zeroize` (already in dependencies) for password bytes cleanup
+
+**Rationale**:
+- Biometric does NOT replace master password; it protects an encrypted copy (remains secure even if DPAPI is compromised)
+- DPAPI is Windows user-account bound; blob cannot be decrypted by a different user or after password change
+- Windows Hello is hardware-backed on devices with TPM/biometric sensors (strong second factor)
+- Enrollment still requires master password (prevents stealing the phone and unlocking the vault)
+- Pairing biometrics with DPAPI provides defense-in-depth: attacker needs both DPAPI blob AND Windows Hello verification
+
+**Consequences**:
+- Feature only works on Windows with Hello hardware; silent no-op on other platforms
+- If Windows user password changes, DPAPI blob becomes unusable (user must re-enroll with new password)
+- If user loses biometric enrollment (e.g., resets fingerprints), `biometric_blob` persists in DB but cannot be used (safe fallback: use master password)
+- DPAPI blob in plaintext hex in DB is acceptable because blob is useless without Windows user privileges and Hello verification
+- Unlock latency: ~100-200ms for WinRT call + ~500ms for Windows Hello UI = ~700ms total (slower than master password alone, but negligible for user experience)
+
+---
+
 ## Security Status (post-review 2026-04-24)
 
 A **comprehensive security review** was performed that identified **19 findings** (7 HIGH, 8 MEDIUM, 4 LOW). **All findings have been addressed**.

@@ -6,6 +6,7 @@ use tauri::{Manager, State};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
+use crate::biometric;
 use crate::crypto::{self, CryptoKey};
 use crate::db::{DbCategory, VaultDb};
 
@@ -107,14 +108,13 @@ pub async fn vault_is_setup(state: State<'_, SharedState>) -> Result<bool, Strin
     s.db.is_initialized().await
 }
 
-#[tauri::command]
-pub async fn vault_unlock(
-    password: String,
-    state: State<'_, SharedState>,
+/// Shared unlock logic: derives key from password bytes, loads items + categories.
+/// The caller is responsible for verifying the password is correct before calling this
+/// (either via `unlock_vault_crypto` or by knowing it came from a trusted DPAPI blob).
+async fn do_unlock(
+    password_bytes: &[u8],
+    s: &mut VaultState,
 ) -> Result<UnlockPayload, String> {
-    let mut s = state.lock().await;
-
-    // Derive or create the encryption key
     let key = {
         let db = &s.db;
         if db.is_initialized().await? {
@@ -122,9 +122,9 @@ pub async fn vault_unlock(
                 .get_meta()
                 .await?
                 .ok_or_else(|| "vault_meta row missing".to_string())?;
-            crypto::unlock_vault_crypto(password.as_bytes(), &salt, &token)?
+            crypto::unlock_vault_crypto(password_bytes, &salt, &token)?
         } else {
-            let (salt, token, k) = crypto::init_vault_crypto(password.as_bytes())?;
+            let (salt, token, k) = crypto::init_vault_crypto(password_bytes)?;
             db.init_vault(&salt, &token).await?;
             k
         }
@@ -133,14 +133,12 @@ pub async fn vault_unlock(
     s.key = Some(Zeroizing::new(key));
     s.touch();
 
-    // Decrypt all items
     let raw = s.db.list_items().await?;
     let items: Vec<VaultItem> = raw
         .into_iter()
         .filter_map(|(id, _, data, _)| decrypt_item(&key, id, &data).ok())
         .collect();
 
-    // Load categories
     let cats = s
         .db
         .list_categories()
@@ -157,6 +155,15 @@ pub async fn vault_unlock(
         items,
         categories: cats,
     })
+}
+
+#[tauri::command]
+pub async fn vault_unlock(
+    password: String,
+    state: State<'_, SharedState>,
+) -> Result<UnlockPayload, String> {
+    let mut s = state.lock().await;
+    do_unlock(password.as_bytes(), &mut s).await
 }
 
 /// Internal lock used by both the Tauri command and the background auto-lock task.
@@ -700,4 +707,110 @@ fn days_since_epoch_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let m   = if mp < 10 { mp + 3 } else { mp - 9 };
     let y   = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+// ─── Biometric commands ───────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn biometric_check(state: State<'_, SharedState>) -> Result<String, String> {
+    let _ = state; // state not needed; availability is system-wide
+    let status = biometric::check_availability().await;
+    Ok(status.as_str().to_string())
+}
+
+#[tauri::command]
+pub async fn biometric_is_enrolled(state: State<'_, SharedState>) -> Result<bool, String> {
+    let s = state.lock().await;
+    let blob = s.db.get_setting("biometric_blob").await?;
+    Ok(blob.map(|v| !v.is_empty()).unwrap_or(false))
+}
+
+#[tauri::command]
+pub async fn biometric_enroll(
+    password: String,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    // 1. Verify the supplied password against the stored vault meta.
+    {
+        let s = state.lock().await;
+        let (salt, token) = s
+            .db
+            .get_meta()
+            .await?
+            .ok_or_else(|| "vault not initialized".to_string())?;
+        crypto::unlock_vault_crypto(password.as_bytes(), &salt, &token)?;
+    }
+
+    // 2. Request Windows Hello consent before storing anything.
+    let verified = biometric::request_verification("Enroll CryptEnv biometric unlock").await?;
+    if !verified {
+        return Err("Windows Hello verification was not completed".to_string());
+    }
+
+    // 3. DPAPI-protect the password bytes, then hex-encode for DB storage.
+    #[cfg(target_os = "windows")]
+    let hex_blob = {
+        use zeroize::Zeroizing;
+        let pw_bytes = Zeroizing::new(password.into_bytes());
+        let blob = biometric::dpapi_protect(&pw_bytes)?;
+        crypto::hex_encode(&blob)
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let hex_blob: String = {
+        return Err("biometric unlock is not available on this platform".to_string());
+        #[allow(unreachable_code)]
+        String::new()
+    };
+
+    let s = state.lock().await;
+    s.db.set_setting("biometric_blob", &hex_blob).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn biometric_unlock(state: State<'_, SharedState>) -> Result<UnlockPayload, String> {
+    // 1. Retrieve the stored DPAPI blob.
+    let hex_blob = {
+        let s = state.lock().await;
+        s.db
+            .get_setting("biometric_blob")
+            .await?
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| "biometric unlock is not enrolled".to_string())?
+    };
+
+    // 2. Request Windows Hello consent.
+    let verified = biometric::request_verification("Unlock CryptEnv vault").await?;
+    if !verified {
+        return Err("Windows Hello verification was not completed".to_string());
+    }
+
+    // 3. Decode + DPAPI-unprotect to recover the master password bytes.
+    #[cfg(target_os = "windows")]
+    let password_bytes = {
+        let raw = crypto::hex_decode(&hex_blob)
+            .map_err(|_| "biometric blob is corrupt".to_string())?;
+        biometric::dpapi_unprotect(&raw)?
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hex_blob;
+        return Err("biometric unlock is not available on this platform".to_string());
+    }
+
+    // 4. Unlock using the recovered password, same path as vault_unlock.
+    #[cfg(target_os = "windows")]
+    {
+        let mut s = state.lock().await;
+        do_unlock(&password_bytes, &mut s).await
+    }
+}
+
+#[tauri::command]
+pub async fn biometric_disable(state: State<'_, SharedState>) -> Result<(), String> {
+    let s = state.lock().await;
+    s.db.set_setting("biometric_blob", "").await?;
+    Ok(())
 }

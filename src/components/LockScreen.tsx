@@ -2,20 +2,33 @@ import { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './ui/Icon';
 import { useVaultStore } from '../store';
+import type { VaultItem, Category } from '../types';
 
 export function LockScreen() {
-  const unlock = useVaultStore((s) => s.unlock);
+  const unlock             = useVaultStore((s) => s.unlock);
+  const unlockWithPayload  = useVaultStore((s) => s.unlockWithPayload);
 
-  const [pw,      setPw]      = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState(false);
-  const [show,    setShow]    = useState(false);
-  const [isSetup, setIsSetup] = useState<boolean | null>(null);
+  const [pw,           setPw]           = useState('');
+  const [loading,      setLoading]      = useState(false);
+  const [error,        setError]        = useState(false);
+  const [show,         setShow]         = useState(false);
+  const [isSetup,      setIsSetup]      = useState<boolean | null>(null);
+  const [bioAvailable, setBioAvailable] = useState(false);
+  const [bioLoading,   setBioLoading]   = useState(false);
+  const [bioError,     setBioError]     = useState('');
   const ref = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     ref.current?.focus();
     invoke<boolean>('vault_is_setup').then(setIsSetup).catch(() => setIsSetup(false));
+
+    invoke<string>('biometric_check').then((status) => {
+      if (status === 'available') {
+        invoke<boolean>('biometric_is_enrolled').then((enrolled) => {
+          setBioAvailable(enrolled);
+        }).catch(() => {});
+      }
+    }).catch(() => {});
   }, []);
 
   const handle = async () => {
@@ -29,6 +42,20 @@ export function LockScreen() {
       setTimeout(() => setError(false), 600);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleBiometric = async () => {
+    setBioLoading(true);
+    setBioError('');
+    try {
+      const payload = await invoke<{ items: VaultItem[]; categories: Category[] }>('biometric_unlock');
+      await unlockWithPayload(payload);
+    } catch (e: unknown) {
+      setBioError(e instanceof Error ? e.message : String(e));
+      setTimeout(() => setBioError(''), 3000);
+    } finally {
+      setBioLoading(false);
     }
   };
 
@@ -114,6 +141,38 @@ export function LockScreen() {
               </>
             )}
           </button>
+
+          {/* Windows Hello button — only shown when biometric is enrolled */}
+          {bioAvailable && (
+            <div className="flex flex-col gap-1">
+              <button
+                onClick={handleBiometric}
+                disabled={bioLoading}
+                className={[
+                  'w-full h-[44px] rounded-[3px] border',
+                  'text-[13px] font-semibold tracking-[0.05em] font-ui',
+                  'flex items-center justify-center gap-2 transition-all duration-150 cursor-pointer',
+                  'bg-raised border-bd2 text-tx2 hover:border-accent-d hover:text-tx',
+                  bioLoading ? 'opacity-70' : '',
+                ].join(' ')}
+              >
+                {bioLoading ? (
+                  <>
+                    <div className="w-3 h-3 rounded-full border-2 border-transparent border-t-current animate-spin-fast" />
+                    VERIFYING…
+                  </>
+                ) : (
+                  <>
+                    <Icon name="fingerprint" size={15} />
+                    UNLOCK WITH WINDOWS HELLO
+                  </>
+                )}
+              </button>
+              {bioError && (
+                <div className="text-[11px] text-danger font-mono">// {bioError}</div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* ── SECTION 3: Footer ── */}

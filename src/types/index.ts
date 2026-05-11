@@ -69,8 +69,8 @@ export interface MenuState {
 }
 
 export type IconName =
-  | 'lock'  | 'unlock'   | 'eye'      | 'eyeOff'  | 'copy'    | 'check'
-  | 'plus'  | 'search'   | 'settings' | 'trash'   | 'edit'    | 'close'
-  | 'back'  | 'shield'   | 'key'      | 'kbd'     | 'timer'   | 'person'
-  | 'globe' | 'terminal' | 'more'     | 'tag'     | 'drag'    | 'external'
-  | 'export'| 'rename'   | 'note';
+  | 'lock'        | 'unlock'   | 'eye'      | 'eyeOff'  | 'copy'    | 'check'
+  | 'plus'        | 'search'   | 'settings' | 'trash'   | 'edit'    | 'close'
+  | 'back'        | 'shield'   | 'key'      | 'kbd'     | 'timer'   | 'person'
+  | 'globe'       | 'terminal' | 'more'     | 'tag'     | 'drag'    | 'external'
+  | 'export'      | 'rename'   | 'note'     | 'fingerprint';

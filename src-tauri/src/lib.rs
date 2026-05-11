@@ -2,6 +2,7 @@ use tauri::Manager;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 pub mod api;
+pub mod biometric;
 pub mod cli;
 pub mod crypto;
 pub mod db;
@@ -11,6 +12,7 @@ pub mod tls;
 pub mod vault;
 
 use vault::{
+    biometric_check, biometric_disable, biometric_enroll, biometric_is_enrolled, biometric_unlock,
     lock_vault, vault_change_password, vault_delete_item, vault_export_backup,
     vault_generate_mcp_token, vault_get_categories, vault_get_items, vault_get_mcp_token,
     vault_get_settings, vault_import_backup, vault_import_backup_data, vault_import_items,
@@ -136,6 +138,11 @@ pub fn run() {
             vault_import_backup_data,
             vault_parse_import,
             vault_import_items,
+            biometric_check,
+            biometric_is_enrolled,
+            biometric_enroll,
+            biometric_unlock,
+            biometric_disable,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

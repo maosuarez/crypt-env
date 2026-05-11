@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './ui/Icon';
 import { ImportModal } from './ImportModal';
 import { BackupModal } from './BackupModal';
-import { ShareModal } from './ShareModal';
+import { ReceiveModal } from './ReceiveModal';
 import { useVaultStore } from '../store';
 import type { IconName } from '../types';
 
@@ -535,12 +535,10 @@ export function Settings() {
         <BackupModal onClose={() => setBackupOpen(false)} />
       )}
 
-      {/* Share Modal */}
+      {/* Receive Modal */}
       {shareOpen && (
-        <ShareModal
-          selectedIds={[]}
+        <ReceiveModal
           onClose={() => setShareOpen(false)}
-          onImportDone={() => { setShareOpen(false); go('vault'); }}
         />
       )}
     </div>

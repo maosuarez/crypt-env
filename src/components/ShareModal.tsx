@@ -242,10 +242,10 @@ function PairingCodeInput({
           onKeyDown={(e) => handleKey(i, e)}
           onPaste={handlePaste}
           className={[
-            'w-9 h-11 bg-raised border rounded-[3px] text-center text-[24px] font-mono text-accent',
+            'w-10 h-12 bg-surface border-2 rounded-[3px] text-center text-[24px] font-mono text-accent',
             'outline-none transition-colors duration-100',
-            d !== ' ' && d !== '' ? 'border-accent-d' : 'border-bd2',
-            'focus:border-accent',
+            d !== ' ' && d !== '' ? 'border-accent-d bg-accent-b' : 'border-bd2',
+            'focus:border-accent focus:bg-accent-b',
           ].join(' ')}
         />
       ))}
@@ -403,12 +403,6 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
     }
   };
 
-  const handleLanReceive = () => {
-    setLanRole('receive');
-    setStep('lan-receive');
-    setInputCode('');
-    setReceiveStatus('idle');
-  };
 
   const handleReceiveSubmit = async () => {
     if (inputCode.length < 6) return;
@@ -499,8 +493,6 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
   // Render helpers
   // ------------------------------------------------------------------
 
-  const hasItems = selectedIds.length > 0;
-
   // ------------------------------------------------------------------
   // Step renderers
   // ------------------------------------------------------------------
@@ -551,50 +543,27 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
         </div>
 
         {/* Item badge */}
-        {hasItems ? (
-          <div className="flex items-center gap-2 mb-4">
-            <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
-            <span className="text-[11px] text-tx2 font-mono">
-              Sharing <span className="text-accent font-bold">{selectedIds.length}</span> item{selectedIds.length !== 1 ? 's' : ''}
-            </span>
-          </div>
-        ) : (
-          <div className="flex items-start gap-2 mb-4 bg-raised border border-bd rounded-[3px] px-3 py-2.5">
-            <span className="text-warn shrink-0 mt-0.5">
-              <Icon name="note" size={12} color="oklch(0.72 0.16 68)" />
-            </span>
-            <span className="text-[11px] text-tx3 leading-[1.5]">
-              No items selected. Send and Export require a selection. Receive and Import are always available.
-            </span>
-          </div>
-        )}
+        <div className="flex items-center gap-2 mb-4">
+          <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
+          <span className="text-[11px] text-tx2 font-mono">
+            Sharing <span className="text-accent font-bold">{selectedIds.length}</span> item{selectedIds.length !== 1 ? 's' : ''}
+          </span>
+        </div>
 
         {/* LAN sub-actions */}
         {method === 'lan' && (
-          <div className="flex gap-2">
-            <BtnPrimary onClick={handleLanSend} disabled={!hasItems} className="flex-1">
-              <Icon name="export" size={12} color="#020504" />
-              SEND
-            </BtnPrimary>
-            <BtnSecondary onClick={handleLanReceive} className="flex-1">
-              <Icon name="back" size={12} />
-              RECEIVE
-            </BtnSecondary>
-          </div>
+          <BtnPrimary onClick={handleLanSend} className="w-full">
+            <Icon name="export" size={12} color="#020504" />
+            SEND VIA LAN
+          </BtnPrimary>
         )}
 
         {/* FILE sub-actions */}
         {method === 'file' && (
-          <div className="flex gap-2">
-            <BtnPrimary onClick={() => setStep('file-export')} disabled={!hasItems} className="flex-1">
-              <Icon name="export" size={12} color="#020504" />
-              EXPORT
-            </BtnPrimary>
-            <BtnSecondary onClick={() => setStep('file-import')} className="flex-1">
-              <Icon name="external" size={12} />
-              IMPORT
-            </BtnSecondary>
-          </div>
+          <BtnPrimary onClick={() => setStep('file-export')} className="w-full">
+            <Icon name="export" size={12} color="#020504" />
+            EXPORT FILE
+          </BtnPrimary>
         )}
 
         {error && <div className="mt-3"><InlineError msg={error} /></div>}

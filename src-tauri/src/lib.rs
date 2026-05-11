@@ -16,7 +16,7 @@ use vault::{
     lock_vault, vault_change_password, vault_delete_item, vault_export_backup,
     vault_generate_mcp_token, vault_get_categories, vault_get_items, vault_get_mcp_token,
     vault_get_settings, vault_import_backup, vault_import_backup_data, vault_import_items,
-    vault_is_setup, vault_lock, vault_parse_import, vault_save_categories, vault_save_item,
+    vault_is_setup, vault_list, vault_lock, vault_parse_import, vault_save_categories, vault_save_item,
     vault_save_settings, vault_unlock, vault_wipe, SharedState, VaultState,
 };
 use vault::share_commands::{
@@ -130,6 +130,7 @@ pub fn run() {
             vault_is_setup,
             vault_unlock,
             vault_lock,
+            vault_list,
             vault_get_items,
             vault_save_item,
             vault_delete_item,

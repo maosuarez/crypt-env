@@ -16,8 +16,13 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
     return () => { clearTimeout(t); window.removeEventListener('click', h); };
   }, [onClose]);
 
-  const ax = Math.min(x - 160, window.innerWidth - 175);
-  const ay = Math.min(y + 4,   window.innerHeight - items.filter((i) => !i.divider).length * 33 - 16);
+  const menuWidth = 170;
+  const itemHeight = 33;
+  const menuHeight = items.filter((i) => !i.divider).length * itemHeight + 16;
+  const padding = 8;
+
+  const ax = Math.max(padding, Math.min(x - 160, window.innerWidth - menuWidth - padding));
+  const ay = Math.max(padding, Math.min(y + 4, window.innerHeight - menuHeight - padding));
 
   return (
     <div

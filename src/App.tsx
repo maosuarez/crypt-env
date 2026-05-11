@@ -51,7 +51,7 @@ export default function App() {
 
       {/* Global overlays */}
       {menu && <ContextMenu {...menu} onClose={closeMenu} />}
-      {toast && <Toast msg={`✓ ${toast}`} />}
+      {toast && <Toast msg={toast.type === 'error' ? toast.msg : `✓ ${toast.msg}`} type={toast.type} />}
       {placeholder && placeholder.type === 'command' && (
         <PlaceholderModal
           command={(placeholder as any).command}

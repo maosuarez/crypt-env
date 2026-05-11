@@ -236,6 +236,34 @@ pub async fn vault_get_categories(
 }
 
 #[tauri::command]
+pub async fn vault_list(
+    state: State<'_, SharedState>,
+) -> Result<serde_json::Value, String> {
+    let mut s = state.lock().await;
+    let key = s.key.as_ref().ok_or("vault is locked")?.clone();
+    s.touch();
+
+    let items: Vec<VaultItem> = s.db.list_items().await?
+        .into_iter()
+        .filter_map(|(id, _, data, _)| decrypt_item(&key, id, &data).ok())
+        .collect();
+
+    let categories: Vec<Category> = s.db.list_categories().await?
+        .into_iter()
+        .map(|c| Category {
+            id: c.cid,
+            name: c.name,
+            color: c.color,
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "items": items,
+        "categories": categories,
+    }))
+}
+
+#[tauri::command]
 pub async fn vault_save_categories(
     cats: Vec<Category>,
     state: State<'_, SharedState>,

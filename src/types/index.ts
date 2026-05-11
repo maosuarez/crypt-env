@@ -73,4 +73,4 @@ export type IconName =
   | 'plus'        | 'search'   | 'settings' | 'trash'   | 'edit'    | 'close'
   | 'back'        | 'shield'   | 'key'      | 'kbd'     | 'timer'   | 'person'
   | 'globe'       | 'terminal' | 'more'     | 'tag'     | 'drag'    | 'external'
-  | 'export'      | 'rename'   | 'note'     | 'fingerprint';
+  | 'export'      | 'rename'   | 'note'     | 'fingerprint' | 'refresh';

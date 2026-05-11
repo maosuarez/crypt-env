@@ -8,13 +8,18 @@ export const CAT_COLORS_PRESET = [
   'oklch(0.70 0.17 220)', 'oklch(0.62 0.20 22)',
 ];
 
+interface ToastState {
+  msg: string;
+  type: 'success' | 'error';
+}
+
 interface VaultStore {
   screen:      Screen;
   items:       VaultItem[];
   cats:        Category[];
   editTarget:  VaultItem | null;
   menu:        MenuState | null;
-  toast:       string | null;
+  toast:       ToastState | null;
   placeholder: VaultItem | null;
   lockTimeout: number;   // minutes; 0 = never
   hotkey:      string;
@@ -23,7 +28,7 @@ interface VaultStore {
   setEditTarget:  (item: VaultItem | null) => void;
   openMenu:       (menu: MenuState) => void;
   closeMenu:      () => void;
-  showToast:      (msg: string) => void;
+  showToast:      (msg: string, type?: 'success' | 'error') => void;
   setPlaceholder: (item: VaultItem | null) => void;
   setLockTimeout: (mins: number) => void;
   setHotkey:      (key: string) => void;
@@ -57,8 +62,8 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
   closeMenu: () => set({ menu: null }),
 
-  showToast: (msg) => {
-    set({ toast: msg });
+  showToast: (msg, type = 'success') => {
+    set({ toast: { msg, type } });
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => set({ toast: null }), 2200);
   },

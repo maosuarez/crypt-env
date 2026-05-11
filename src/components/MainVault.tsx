@@ -1,4 +1,5 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './ui/Icon';
 import { SecretRow } from './rows/SecretRow';
 import { CredentialRow } from './rows/CredentialRow';
@@ -7,7 +8,7 @@ import { CommandRow } from './rows/CommandRow';
 import { NoteRow } from './rows/NoteRow';
 import { ShareModal } from './ShareModal';
 import { useVaultStore } from '../store';
-import type { ItemType } from '../types';
+import type { ItemType, VaultItem, Category } from '../types';
 
 type TypeFilter = 'all' | ItemType;
 
@@ -32,6 +33,7 @@ export function MainVault() {
   const [shareMode,  setShareMode]  = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [showShareModal, setShowShareModal] = useState(false);
+  const [reloading,  setReloading]  = useState(false);
   const ref = useRef<HTMLInputElement>(null);
 
   const toggleItem = useCallback((id: number) => {
@@ -46,6 +48,19 @@ export function MainVault() {
   const exitShareMode = useCallback(() => {
     setShareMode(false);
     setSelectedIds(new Set());
+  }, []);
+
+  const handleReload = useCallback(async () => {
+    setReloading(true);
+    try {
+      const result = await invoke<{ items: VaultItem[]; categories: Category[] }>('vault_list');
+      const store = useVaultStore.getState();
+      store.unlockWithPayload(result);
+    } catch (e) {
+      console.error('Reload failed:', e);
+    } finally {
+      setReloading(false);
+    }
   }, []);
 
   const handleShareItem = useCallback((id: number) => {
@@ -106,6 +121,14 @@ export function MainVault() {
             <Icon name="close" size={14} />
           </button>
         )}
+        <button
+          onClick={handleReload}
+          disabled={reloading}
+          title="Reload vault"
+          className="flex items-center justify-center w-6 h-6 rounded-md text-tx3 hover:text-tx hover:bg-raised transition disabled:opacity-50"
+        >
+          <Icon name="refresh" size={14} />
+        </button>
         <span className="text-[11px] text-tx2 font-mono min-w-[24px] text-right">
           {filtered.length}
         </span>

@@ -1,6 +1,6 @@
 [package]
 name = "tauri-crypt-env"
-version = "0.1.0"
+version = "0.2.0"
 description = "Secure local secrets manager with AES-256-GCM encryption"
 authors = ["maosuarez"]
 edition = "2021"
@@ -69,6 +69,9 @@ dialoguer = "0.11"
 dotenvy = "0.15"
 shell-escape = "0.1"
 shlex = "1"
+
+# Native file dialogs for share export/import
+rfd = "0.14"
 
 # HTTP client — only for the crypt-env CLI binary
 # rustls-tls-native-roots: use the OS trust store PLUS our custom cert addition

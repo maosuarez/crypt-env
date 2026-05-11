@@ -313,6 +313,81 @@ fn tool_definitions() -> serde_json::Value {
                 },
                 "required": ["name"]
             }
+        },
+        {
+            "name": "crypt_env_share_listen",
+            "description": "Start a share session as sender (LAN bridge). Registers mDNS and waits for a peer to connect using the returned pairing code.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": { "type": "integer" },
+                        "description": "IDs of vault items to share"
+                    }
+                },
+                "required": ["items"]
+            }
+        },
+        {
+            "name": "crypt_env_share_connect",
+            "description": "Connect to a sender as receiver using the pairing code. Returns a fingerprint that both sides must verify before data flows.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pairing_code": { "type": "string", "description": "6-digit pairing code from the sender" }
+                },
+                "required": ["pairing_code"]
+            }
+        },
+        {
+            "name": "crypt_env_share_confirm",
+            "description": "Confirm (or reject) the fingerprint shown after ECDH. Both sides must call this. Pass confirmed=true only when the fingerprints match.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "confirmed": { "type": "boolean", "description": "true to confirm, false to cancel" }
+                },
+                "required": ["confirmed"]
+            }
+        },
+        {
+            "name": "crypt_env_share_cancel",
+            "description": "Cancel the active share session immediately.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "crypt_env_share_status",
+            "description": "Get the current share session status: state, fingerprint, direction.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "crypt_env_share_export",
+            "description": "Export selected vault items as an AES-256-GCM encrypted .vault package file. IMPORTANT: Show the passphrase to the user immediately. It will not be stored.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": { "type": "integer" },
+                        "description": "IDs of vault items to export"
+                    },
+                    "output_path": { "type": "string", "description": "Absolute path for the output .vault file" }
+                },
+                "required": ["items", "output_path"]
+            }
+        },
+        {
+            "name": "crypt_env_share_import",
+            "description": "Import items from an encrypted .vault package file into the local vault.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to the .vault package file" },
+                    "passphrase": { "type": "string", "description": "12-character passphrase provided by the sender" }
+                },
+                "required": ["path", "passphrase"]
+            }
         }
     ])
 }
@@ -1060,6 +1135,195 @@ fn tool_run_command(args: &serde_json::Value, token: &str) -> serde_json::Value 
     )
 }
 
+// ─── Share tool implementations ───────────────────────────────────────────────
+
+fn tool_share_listen(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let items = match args.get("items").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_i64()).collect::<Vec<_>>(),
+        None => return tool_err("required parameter: 'items' (array of integers)"),
+    };
+
+    if items.is_empty() {
+        return tool_err("items list must not be empty");
+    }
+
+    let resp = match vault_post("/share/listen", token, &serde_json::json!({ "items": items })) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status >= 400 { return tool_err(format!("share listen failed (HTTP {status}): {text}")); }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_share_connect(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let pairing_code = match args.get("pairing_code").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => return tool_err("required parameter: 'pairing_code'"),
+    };
+
+    let resp = match vault_post("/share/connect", token, &serde_json::json!({ "pairing_code": pairing_code })) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status >= 400 { return tool_err(format!("share connect failed (HTTP {status}): {text}")); }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_share_confirm(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let confirmed = match args.get("confirmed").and_then(|v| v.as_bool()) {
+        Some(c) => c,
+        None => return tool_err("required parameter: 'confirmed' (boolean)"),
+    };
+
+    let resp = match vault_post("/share/confirm", token, &serde_json::json!({ "confirmed": confirmed })) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status >= 400 { return tool_err(format!("confirm failed (HTTP {status}): {text}")); }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_share_cancel(token: &str) -> serde_json::Value {
+    let resp = match mcp_http_client()
+        .delete(format!("{API_BASE}/share/session"))
+        .header("X-Vault-Token", token)
+        .send()
+        .map_err(|e| e.to_string())
+    {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status >= 400 { return tool_err(format!("cancel failed (HTTP {status}): {text}")); }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_share_status(token: &str) -> serde_json::Value {
+    let resp = match vault_get("/share/status", token) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_share_export(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let items = match args.get("items").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_i64()).collect::<Vec<_>>(),
+        None => return tool_err("required parameter: 'items' (array of integers)"),
+    };
+    let output_path = match args.get("output_path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return tool_err("required parameter: 'output_path'"),
+    };
+
+    let body = serde_json::json!({ "items": items, "output_path": output_path });
+    let resp = match vault_post("/share/export", token, &body) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status >= 400 { return tool_err(format!("export failed (HTTP {status}): {text}")); }
+
+    // Surface the response including the passphrase — the tool description
+    // instructs the model to show it to the user immediately.
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_share_import(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return tool_err("required parameter: 'path'"),
+    };
+    let passphrase = match args.get("passphrase").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return tool_err("required parameter: 'passphrase'"),
+    };
+
+    let body = serde_json::json!({ "path": path, "passphrase": passphrase });
+    let resp = match vault_post("/share/import", token, &body) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status >= 400 { return tool_err(format!("import failed (HTTP {status}): {text}")); }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
 
 fn dispatch(
@@ -1106,6 +1370,13 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_
         "crypt_env_doctor" => tool_doctor(args, token),
         "crypt_env_list_commands" => tool_list_commands(token),
         "crypt_env_run_command" => tool_run_command(args, token),
+        "crypt_env_share_listen" => tool_share_listen(args, token),
+        "crypt_env_share_connect" => tool_share_connect(args, token),
+        "crypt_env_share_confirm" => tool_share_confirm(args, token),
+        "crypt_env_share_cancel" => tool_share_cancel(token),
+        "crypt_env_share_status" => tool_share_status(token),
+        "crypt_env_share_export" => tool_share_export(args, token),
+        "crypt_env_share_import" => tool_share_import(args, token),
         _ => tool_err(format!("unknown tool: {name}")),
     }
 }

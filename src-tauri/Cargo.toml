@@ -54,6 +54,12 @@ pem = "3"
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Secret sharing — LAN bridge + encrypted packages
+x25519-dalek = { version = "2", features = ["static_secrets", "reusable_secrets"] }
+mdns-sd = "0.11"
+sha2 = "0.10"
+hkdf = "0.12"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"

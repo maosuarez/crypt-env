@@ -729,7 +729,6 @@ pub async fn biometric_is_enrolled(state: State<'_, SharedState>) -> Result<bool
 pub async fn biometric_enroll(
     password: String,
     state: State<'_, SharedState>,
-    app: tauri::AppHandle,
 ) -> Result<(), String> {
     // 1. Verify the supplied password against the stored vault meta.
     {
@@ -746,11 +745,6 @@ pub async fn biometric_enroll(
     let verified = biometric::request_verification("Enroll CryptEnv biometric unlock").await?;
     if !verified {
         return Err("Windows Hello verification was not completed".to_string());
-    }
-
-    // Restore focus to the app window after the Windows Hello dialog closes.
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_focus();
     }
 
     // 3. DPAPI-protect the password bytes, then hex-encode for DB storage.
@@ -775,10 +769,7 @@ pub async fn biometric_enroll(
 }
 
 #[tauri::command]
-pub async fn biometric_unlock(
-    state: State<'_, SharedState>,
-    app: tauri::AppHandle,
-) -> Result<UnlockPayload, String> {
+pub async fn biometric_unlock(state: State<'_, SharedState>) -> Result<UnlockPayload, String> {
     // 1. Retrieve the stored DPAPI blob.
     let hex_blob = {
         let s = state.lock().await;
@@ -793,11 +784,6 @@ pub async fn biometric_unlock(
     let verified = biometric::request_verification("Unlock CryptEnv vault").await?;
     if !verified {
         return Err("Windows Hello verification was not completed".to_string());
-    }
-
-    // Restore focus to the app window after the Windows Hello dialog closes.
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.set_focus();
     }
 
     // 3. Decode + DPAPI-unprotect to recover the master password bytes.

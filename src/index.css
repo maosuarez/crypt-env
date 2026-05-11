@@ -8,11 +8,12 @@
   --color-bg:      #0a0b0e;
   --color-surface: #111318;
   --color-raised:  #181b22;
-  --color-bd:      #1e2230;
-  --color-bd2:     #252a3a;
+  --color-bd:      #252a3a;
+  --color-bd2:     #323850;
   --color-tx:      #e4e8f0;
-  --color-tx2:     #8892a4;
-  --color-tx3:     #4a5268;
+  --color-tx2:     #9ba6ba;
+  --color-tx3:     #6b7899;
+  --color-tx4:     #3d4558;
 
   --color-accent:   oklch(0.70 0.17 162);
   --color-accent-d: oklch(0.38 0.10 162);
@@ -72,7 +73,7 @@ body {
 
 ::-webkit-scrollbar       { width: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #1e2230; border-radius: 2px; }
+::-webkit-scrollbar-thumb { background: #252a3a; border-radius: 2px; }
 
 input::-ms-reveal,
 input::-ms-clear { display: none; }

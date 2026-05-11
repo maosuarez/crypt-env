@@ -230,6 +230,60 @@ crypt-env doctor
 #         All systems nominal
 ```
 
+#### `crypt-env share send <ITEM_IDS>...`
+
+Start a secure LAN sharing session as sender. Generates a 6-digit pairing code.
+
+```bash
+# Share multiple items via LAN bridge
+crypt-env share send api_key_1 api_key_2
+
+# Output:
+# Pairing code: 123456 (expires in 5 minutes)
+# Waiting for peer to connect...
+# Peer fingerprint: a1b2c3d4
+# Confirm match? (y/n)
+```
+
+#### `crypt-env share receive`
+
+Start a secure LAN sharing session as receiver. Requires pairing code from sender.
+
+```bash
+crypt-env share receive 123456
+
+# Output:
+# Connecting to peer...
+# Peer fingerprint: a1b2c3d4
+# Confirm match? (y/n)
+# Receiving items...
+# Imported 2 items successfully
+```
+
+#### `crypt-env share export [ITEM_IDS] -o file`
+
+Export items as an encrypted, self-contained `.vault` package with a random passphrase.
+
+```bash
+# Export specific items
+crypt-env share export api_key_1 api_key_2 -o secrets.vault
+
+# Output:
+# Exported 2 items to secrets.vault
+# Passphrase: xK9pL2mN (save this and share separately!)
+```
+
+#### `crypt-env share import -f file`
+
+Import items from an encrypted `.vault` package.
+
+```bash
+crypt-env share import -f secrets.vault
+
+# Prompts for passphrase (will not echo to terminal)
+# Output: Imported 2 items successfully
+```
+
 ### Examples
 
 ```bash
@@ -249,6 +303,69 @@ crypt-env search database
 # Run a deployment command with parameters
 crypt-env exec deploy --ENV=staging --REGION=us-west-2
 ```
+
+---
+
+## 🔗 Secret Sharing
+
+CryptEnv supports **two secure methods** for sharing secrets with teammates:
+
+### LAN Bridge (Local Network, Real-Time)
+
+For users on the same network, CryptEnv uses encrypted mDNS discovery and X25519 ECDH key exchange to establish a secure channel. No passphrases to manage, just a 6-digit code.
+
+**Flow**:
+1. Sender runs: `crypt-env share send api_key_1 api_key_2`
+   - Generates pairing code (e.g., `123456`), valid for 5 minutes
+   - Displays peer fingerprint after receiver connects
+
+2. Receiver runs: `crypt-env share receive 123456`
+   - Discovers sender via mDNS
+   - Both parties exchange public keys and verify fingerprint
+   - Receiver confirms fingerprint match with sender's code
+   - Items are transferred encrypted over TCP
+
+3. Session auto-destroys after completion or inactivity
+
+**Security**:
+- X25519 ECDH for key exchange (industry-standard, post-quantum resistant)
+- Fingerprint (first 8 hex chars of SHA-256(sender_pub || receiver_pub)) prevents MITM attacks
+- AES-256-GCM encryption on all messages
+- 6-digit pairing code is short (brute-forceable in ~2 seconds if attacker has network access, but code expires in 5 minutes)
+
+### Encrypted Package (Offline, Portable)
+
+For scenarios where real-time sharing isn't possible (different networks, email transfer, USB drive), export items as a self-contained encrypted `.vault` file.
+
+**Flow**:
+1. Sender runs: `crypt-env share export api_key_1 api_key_2 -o secrets.vault`
+   - Generates random 12-character passphrase
+   - Encrypts items using Argon2id(m=32768, t=2, p=2) KDF from passphrase
+   - Shows passphrase once (save it!)
+   - Creates portable `.vault` file
+
+2. Sender shares the `.vault` file via any channel (email, Slack, USB, etc.)
+   - **Passphrase must be shared separately** (via phone call, signal, etc.)
+
+3. Receiver runs: `crypt-env share import -f secrets.vault`
+   - Prompts for passphrase (does not echo)
+   - Decrypts and imports items into vault
+   - Logs import in audit trail
+
+**Security**:
+- AES-256-GCM encryption (same as vault encryption)
+- Argon2id with high memory cost (32768 KiB) makes brute-forcing expensive
+- Passphrase never stored, only used during encryption/decryption
+- `.vault` file is self-contained and portable (can be stored offline)
+
+### Audit Trail
+
+All share operations (send, receive, import, export) are logged in the vault's `share_log` database table:
+- Mode (LAN bridge or encrypted package)
+- Direction (sent or received)
+- Item IDs shared
+- Peer fingerprint (LAN mode) or timestamp
+- Exact timestamp (ISO 8601)
 
 ---
 
@@ -298,6 +415,13 @@ src-tauri\target\release\crypt-env-mcp.exe
 | `crypt_env_update_settings` | `timeout`, `theme`, etc. | Updated settings | Modify app settings (not master password) |
 | `crypt_env_list_commands` | — | Command list with placeholders | List all saved commands in the vault |
 | `crypt_env_run_command` | `command_name`, `variables: {VAR=value, ...}` | `{ exit_code, stdout, stderr }` | Execute command with resolved `{{placeholder}}` variables; returns exit status and output (secrets never in response) |
+| `crypt_env_share_listen` | `item_ids: [...]` | `{ pairing_code, expires_in }` | Start LAN send session; returns pairing code for peer to connect |
+| `crypt_env_share_connect` | `pairing_code` | `{ fingerprint }` | Start LAN receive session; returns sender's fingerprint for verification |
+| `crypt_env_share_confirm` | `confirmed: bool` | `{ status }` | Confirm fingerprint match; session begins if true |
+| `crypt_env_share_cancel` | — | `{ cancelled }` | Cancel active share session |
+| `crypt_env_share_status` | — | `{ state, progress }` | Poll current share session status |
+| `crypt_env_share_export` | `item_ids: [...]` | `{ ciphertext, salt, nonce, passphrase }` | Export items as encrypted package; **passphrase must be shown to user, never logged** |
+| `crypt_env_share_import` | `package: { ... }, passphrase` | `{ imported_count }` | Import items from encrypted package |
 
 ### Typical MCP Workflow
 
@@ -319,6 +443,39 @@ Claude: "I found your deployment credentials. Injecting them now..."
 Claude: "Now executing deployment with secrets safely in environment..."
 → Subprocess runs with DATABASE_PASSWORD and AWS_ACCESS_KEY in env
 ← Claude never sees the actual secret values
+```
+
+### MCP Secret Sharing Workflow
+
+LLM agents can orchestrate secure secret sharing with teammates:
+
+```
+User: "Share my API keys with alice@example.com"
+
+Claude: "I'll initiate a secure sharing session..."
+→ Calls: crypt_env_share_listen(item_ids=["openai_api_key", "stripe_key"])
+← Returns: { pairing_code: "123456", expires_in: 300 }
+
+Claude: "I've generated pairing code 123456. Tell Alice to run: crypt-env share receive 123456"
+[Alice runs the command on her machine]
+
+Claude: "Now confirming fingerprint..."
+→ Calls: crypt_env_share_confirm(confirmed=true)
+← Returns: { status: "confirmed" }
+
+Claude: "Items transferred securely. Alice's vault now contains your shared keys."
+
+---
+
+User: "Create a portable share package for my team"
+
+Claude: "I'll export your secrets as an encrypted package..."
+→ Calls: crypt_env_share_export(item_ids=["api_key_1", "api_key_2"])
+← Returns: { ciphertext: "...", salt: "...", nonce: "...", passphrase: "xK9pL2mN" }
+
+Claude: "Exported successfully! Share the file and this passphrase separately:
+   File: share_package.vault (can email/upload to cloud)
+   Passphrase: xK9pL2mN (share via Slack/call/secure message)"
 ```
 
 ---

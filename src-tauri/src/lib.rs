@@ -6,6 +6,7 @@ pub mod cli;
 pub mod crypto;
 pub mod db;
 pub mod mcp;
+pub mod share;
 pub mod tls;
 pub mod vault;
 

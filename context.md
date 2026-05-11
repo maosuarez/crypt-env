@@ -30,6 +30,7 @@ crypt-env/
 │   │   ├── crypto/mod.rs         # Argon2id KDF + AES-256-GCM encrypt/decrypt
 │   │   ├── vault/mod.rs          # VaultState, 19 Tauri commands including backup/import
 │   │   ├── api/mod.rs            # Axum server on 127.0.0.1:47821, dual token auth
+│   │   ├── share/mod.rs          # Secure secret sharing (LAN bridge + encrypted packages)
 │   │   ├── cli/mod.rs            # CLI module (stub)
 │   │   ├── mcp/mod.rs            # MCP module (stub)
 │   │   └── bin/
@@ -78,7 +79,7 @@ crypt-env/
 - MCP is read-only — does not allow creating or modifying items
 
 ## Business Context
-Developer user currently sharing credentials insecurely over WhatsApp. Needs quick access (hotkey), ease of copying to clipboard, and ability to use secrets as environment variables without visual exposure. Strictly personal and local usage.
+Developer user needs quick access (hotkey), ease of copying to clipboard, and ability to use secrets as environment variables without visual exposure. Can now securely share secrets with teammates via encrypted LAN bridge (mDNS discovery + ECDH key exchange) or encrypted packages for offline scenarios, eliminating insecure communication channels like WhatsApp.
 
 ---
 
@@ -361,6 +362,88 @@ CREATE TABLE settings (
 **Consequences**:
 - If user account is compromised, tokens are also compromised
 - Encryption at OS level (NTFS EFS) optional but not implemented
+
+---
+
+### 11. Secure Secret Sharing (LAN Bridge + Encrypted Packages)
+**Context**: Users need to securely share secrets with teammates without exposing plaintext in WhatsApp, email, or other channels. Two scenarios exist: (1) both users on same LAN with ability to perform real-time key exchange, and (2) offline scenario requiring a self-contained encrypted file.
+
+**Decision**: Implement two complementary sharing modes:
+
+1. **LAN Bridge Mode** (for local network):
+   - Sender initiates session with `POST /share/listen` → returns 6-digit pairing code (5-minute expiration)
+   - Receiver initiates session with `POST /share/connect <pairing_code>` → gets sender's public key and fingerprint (first 8 hex chars of SHA-256(sender_pub || receiver_pub))
+   - Both sides confirm fingerprint match via `POST /share/confirm`
+   - Sender selects items and sends via `POST /share/items` encrypted with HKDF-SHA256 derived key (X25519 ECDH shared secret + info=`b"cryptenv-share-v1"`)
+   - Session auto-destroys on completion, cancellation, or 30-second inactivity
+   - All encryption uses AES-256-GCM on length-prefixed JSON messages over TCP
+
+2. **Encrypted Package Mode** (for offline/non-LAN):
+   - Sender exports items via `POST /share/export <item_ids>` with Argon2id(m=32768, t=2, p=2) KDF from random 12-char passphrase
+   - Returns `.vault` JSON package: `{ version, salt, nonce, ciphertext }` + plaintext passphrase (shown once to sender)
+   - Receiver imports via `POST /share/import` with passphrase (entered manually from sender)
+   - Passphrase never stored, encrypted package is self-contained and portable
+
+3. **Shared module structure** (`src-tauri/src/share/`):
+   - `crypto.rs`: X25519 keypair generation, HKDF-SHA256 shared key derivation, AES-256-GCM channel encryption, 12-char passphrase generation, fingerprint computation
+   - `lan.rs`: mDNS service discovery (`_cryptenv._tcp.local.`), TCP listener, ECDH handshake with pairing code verification
+   - `package.rs`: `.vault` package format (JSON), PlainItem struct for export, Argon2id KDF for package encryption
+   - `protocol.rs`: Length-prefixed JSON messages, ShareMessage enum (Hello, Confirm, Items, Ack, Error)
+   - `mod.rs`: ShareState, ShareSession, ShareSessionState, ShareDirection state machine
+
+4. **Database audit** (`share_log` table):
+   ```sql
+   CREATE TABLE share_log (
+       id        INTEGER PRIMARY KEY AUTOINCREMENT,
+       mode      TEXT NOT NULL,  -- 'lan' or 'package'
+       direction TEXT NOT NULL,  -- 'sent' or 'received'
+       item_ids  TEXT NOT NULL,  -- JSON array of shared item IDs
+       peer_fp   TEXT,           -- Peer fingerprint (LAN mode only)
+       timestamp TEXT NOT NULL   -- ISO 8601 timestamp
+   );
+   ```
+
+5. **New REST endpoints** (all require auth except noted):
+   - `POST /share/listen` → `{ pairing_code, expires_in }`
+   - `POST /share/connect` → `{ fingerprint }`
+   - `POST /share/confirm` → `{ status }`
+   - `GET /share/status` → `{ state, progress }`
+   - `DELETE /share/session` → `{ cancelled }`
+   - `POST /share/export` → `{ ciphertext, salt, nonce, passphrase }`
+   - `POST /share/import` → `{ imported_count }`
+
+6. **New CLI commands**:
+   - `crypt-env share send <ITEM_IDS>...` — Start LAN send session
+   - `crypt-env share receive` — Start LAN receive session
+   - `crypt-env share export [IDS] -o file` — Create encrypted package
+   - `crypt-env share import -f file` — Import from package
+
+7. **New MCP tools** (all prefixed `crypt_env_share_`):
+   - `crypt_env_share_listen` — Start LAN send session
+   - `crypt_env_share_connect` — Start LAN receive session
+   - `crypt_env_share_confirm` — Confirm fingerprint
+   - `crypt_env_share_cancel` — Cancel session
+   - `crypt_env_share_status` — Poll session status
+   - `crypt_env_share_export` — Export encrypted package (returns passphrase)
+   - `crypt_env_share_import` — Import encrypted package
+
+**Rationale**:
+- LAN bridge mode provides real-time, interactive sharing with cryptographic proof (fingerprint confirmation) that both parties are communicating with the correct peer
+- Encrypted package mode is a fallback for scenarios where real-time communication is impossible (different networks, offline transfers via USB)
+- Pairing code (6 digits, 5-min expiration) is a human-verifiable authentication mechanism — prevents MITM if both users can confirm the same code
+- X25519 ECDH is industry-standard, post-quantum resistant key exchange primitive
+- Argon2id with high memory cost (32768 KiB) makes brute-forcing a random passphrase computationally expensive
+- Audit log allows traceability of who shared what and when (useful for security incident response)
+- Sender explicitly selects items to share (not a bulk "share all" which could leak unintended secrets)
+- Session auto-destruction prevents reuse if the connection is compromised mid-transfer
+- Fingerprint verification prevents MITM attacks where attacker intercepts pairing code
+
+**Consequences**:
+- LAN bridge requires mDNS discovery to work (must be available on the network)
+- Pairing code is short (6 digits) to be human-readable; increases brute-force window to ~2 seconds if attacker has network access (acceptable because code expires in 5 minutes)
+- Encrypted package passphrase is shown once and not stored; user must securely communicate it out-of-band (no built-in passphrase recovery)
+- Argon2id KDF on package import is slow (~1-2 seconds per import); acceptable for infrequent use but not suitable for bulk imports
+- MCP tools return passphrase only in `crypt_env_share_export` response (LLM must display to user via UI, not in logs)
 
 ---
 

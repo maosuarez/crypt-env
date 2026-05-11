@@ -78,14 +78,14 @@ export function LockScreen() {
             <div className="absolute inset-[-1px] rounded-[4px] pointer-events-none shadow-[0_0_20px_-4px_color-mix(in_oklch,oklch(0.70_0.17_162)_40%,transparent)]" />
           </div>
           <div className="text-[22px] font-bold tracking-[-0.01em] text-tx">CryptEnv</div>
-          <div className="text-[11px] text-tx3 font-mono tracking-[0.06em]">ENCRYPTED LOCAL STORE</div>
+          <div className="text-[11px] text-tx2 font-mono tracking-[0.06em]">ENCRYPTED LOCAL STORE</div>
         </div>
 
         {/* ── SECTION 2: Form ── */}
         <div className="flex flex-col gap-5 w-full" style={{ marginTop: '64px' }}>
           {/* Label + Input */}
           <div className="flex flex-col gap-2">
-            <div className={`text-[11px] font-medium tracking-[0.07em] ${error ? 'text-danger' : 'text-tx3'}`}>
+            <div className={`text-[11px] font-medium tracking-[0.07em] ${error ? 'text-danger' : 'text-tx2'}`}>
               {isSetup === false ? 'SET MASTER PASSWORD' : 'MASTER PASSWORD'}
             </div>
             <div
@@ -176,7 +176,7 @@ export function LockScreen() {
         </div>
 
         {/* ── SECTION 3: Footer ── */}
-        <div className="text-[11px] text-tx3 text-center leading-[2]" style={{ marginTop: '56px' }}>
+        <div className="text-[11px] text-tx2 text-center leading-[2]" style={{ marginTop: '56px' }}>
           AES-256-GCM · Argon2id key derivation
           <br />
           <span className="font-mono text-[10px]">vault v2.0.0 · local only</span>

@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './ui/Icon';
 import { ImportModal } from './ImportModal';
 import { BackupModal } from './BackupModal';
+import { ShareModal } from './ShareModal';
 import { useVaultStore } from '../store';
 import type { IconName } from '../types';
 
@@ -18,7 +19,7 @@ function Row({ icon, label, children }: { icon: IconName; label: string; childre
 
 function Sec({ title }: { title: string }) {
   return (
-    <div className="text-[10px] font-semibold text-tx3 tracking-[0.09em] mt-4 pb-1.5 border-b border-bd font-mono">
+    <div className="text-[11px] font-semibold text-tx2 tracking-[0.12em] mt-4 pb-1.5 border-b border-bd font-mono">
       {title}
     </div>
   );
@@ -68,6 +69,7 @@ export function Settings() {
   const [wiping,       setWiping]       = useState(false);
   const [importOpen,   setImportOpen]   = useState(false);
   const [backupOpen,   setBackupOpen]   = useState(false);
+  const [shareOpen,    setShareOpen]    = useState(false);
 
   // MCP token
   const [mcpToken,        setMcpToken]        = useState<string | null>(null);
@@ -353,6 +355,16 @@ export function Settings() {
           </button>
         </Row>
 
+        <Sec title="// SHARE" />
+        <Row icon="export" label="Receive / Import items">
+          <button
+            onClick={() => setShareOpen(true)}
+            className="bg-transparent border border-bd2 rounded-[3px] text-tx2 px-[11px] py-[5px] text-[11px] cursor-pointer font-ui font-medium tracking-[0.04em] hover:text-tx transition-colors"
+          >
+            OPEN
+          </button>
+        </Row>
+
         <Sec title="// INTEGRATIONS" />
         <Row icon="key" label="MCP Token">
           <button
@@ -521,6 +533,15 @@ export function Settings() {
       {/* Backup Modal */}
       {backupOpen && (
         <BackupModal onClose={() => setBackupOpen(false)} />
+      )}
+
+      {/* Share Modal */}
+      {shareOpen && (
+        <ShareModal
+          selectedIds={[]}
+          onClose={() => setShareOpen(false)}
+          onImportDone={() => { setShareOpen(false); go('vault'); }}
+        />
       )}
     </div>
   );

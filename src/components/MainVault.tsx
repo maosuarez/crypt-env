@@ -1,10 +1,11 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { Icon } from './ui/Icon';
 import { SecretRow } from './rows/SecretRow';
 import { CredentialRow } from './rows/CredentialRow';
 import { LinkRow } from './rows/LinkRow';
 import { CommandRow } from './rows/CommandRow';
 import { NoteRow } from './rows/NoteRow';
+import { ShareModal } from './ShareModal';
 import { useVaultStore } from '../store';
 import type { ItemType } from '../types';
 
@@ -25,10 +26,41 @@ export function MainVault() {
   const go    = useVaultStore((s) => s.go);
   const setEditTarget = useVaultStore((s) => s.setEditTarget);
 
-  const [query,   setQuery]   = useState('');
-  const [typeF,   setTypeF]   = useState<TypeFilter>('all');
-  const [loading, setLoading] = useState(true);
+  const [query,      setQuery]      = useState('');
+  const [typeF,      setTypeF]      = useState<TypeFilter>('all');
+  const [loading,    setLoading]    = useState(true);
+  const [shareMode,  setShareMode]  = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [showShareModal, setShowShareModal] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
+
+  const toggleItem = useCallback((id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const exitShareMode = useCallback(() => {
+    setShareMode(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  const handleShareItem = useCallback((id: number) => {
+    setSelectedIds(new Set([id]));
+    setShowShareModal(true);
+  }, []);
+
+  const handleSelectItem = useCallback((id: number) => {
+    setShareMode(true);
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     setTimeout(() => setLoading(false), 400);
@@ -74,51 +106,98 @@ export function MainVault() {
             <Icon name="close" size={14} />
           </button>
         )}
-        <span className="text-[11px] text-tx3 font-mono min-w-[24px] text-right">
+        <span className="text-[11px] text-tx2 font-mono min-w-[24px] text-right">
           {filtered.length}
         </span>
       </div>
 
-      {/* Type filter pills + NEW button */}
+      {/* Type filter pills + action buttons */}
       <div className="px-3 h-10 border-b border-bd bg-bg flex items-center gap-1.5 shrink-0">
-        {TYPE_PILLS.map(({ id, label, dot }) => {
-          const active = typeF === id;
-          const count  = (typeCounts as any)[id] ?? 0;
-          return (
+        {!shareMode ? (
+          <>
+            {TYPE_PILLS.map(({ id, label, dot }) => {
+              const active = typeF === id;
+              const count  = (typeCounts as any)[id] ?? 0;
+              return (
+                <button
+                  key={id}
+                  onClick={() => setTypeF(id)}
+                  className={[
+                    'flex items-center gap-1 rounded px-2.5 h-[28px]',
+                    'border text-[11px] font-medium tracking-[0.05em] font-ui cursor-pointer',
+                    'transition-all duration-150 shrink-0 whitespace-nowrap',
+                    active
+                      ? 'bg-accent-b border-accent-d text-accent'
+                      : 'bg-raised border-bd2 text-tx2 hover:border-accent-d hover:text-tx',
+                  ].join(' ')}
+                >
+                  {dot && !active && (
+                    <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dot }} />
+                  )}
+                  {label}
+                  <span className="text-[0.6rem] opacity-50">{count}</span>
+                </button>
+              );
+            })}
+
+            <div className="flex-1" />
+
             <button
-              key={id}
-              onClick={() => setTypeF(id)}
+              onClick={() => { setEditTarget(null); go('edit'); }}
               className={[
-                'flex items-center gap-1 rounded px-2.5 h-[28px]',
-                'border text-[10px] font-medium tracking-wide font-ui cursor-pointer',
-                'transition-all duration-150 shrink-0 whitespace-nowrap',
-                active
-                  ? 'bg-accent-b border-accent-d text-accent'
-                  : 'bg-transparent border-bd text-tx3 hover:border-bd2 hover:text-tx2',
+                'flex items-center gap-1 bg-accent border-none rounded',
+                'px-3 h-[28px] text-[10px] font-bold tracking-wider font-ui',
+                'text-[#020504] cursor-pointer shrink-0 hover:opacity-90 transition-opacity',
               ].join(' ')}
             >
-              {dot && !active && (
-                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: dot }} />
-              )}
-              {label}
-              <span className="text-[0.6rem] opacity-50">{count}</span>
+              <Icon name="plus" size={11} color="#020504" />
+              NEW
             </button>
-          );
-        })}
+          </>
+        ) : (
+          /* Share mode bar */
+          <>
+            <span className="text-[10px] font-mono text-accent tracking-[0.08em] shrink-0">
+              SELECT ITEMS TO SHARE
+            </span>
 
-        <div className="flex-1" />
+            <div className="flex-1" />
 
-        <button
-          onClick={() => { setEditTarget(null); go('edit'); }}
-          className={[
-            'flex items-center gap-1 bg-accent border-none rounded',
-            'px-3 h-[28px] text-[10px] font-bold tracking-wider font-ui',
-            'text-[#020504] cursor-pointer shrink-0 hover:opacity-90 transition-opacity',
-          ].join(' ')}
-        >
-          <Icon name="plus" size={11} color="#020504" />
-          NEW
-        </button>
+            {selectedIds.size > 0 && (
+              <span className="text-[10px] font-mono text-tx3 shrink-0">
+                {selectedIds.size} selected
+              </span>
+            )}
+
+            <button
+              onClick={exitShareMode}
+              className={[
+                'flex items-center gap-1 border rounded',
+                'px-2.5 h-[28px] text-[10px] font-medium tracking-wider font-ui',
+                'border-bd2 text-tx2 bg-transparent cursor-pointer shrink-0',
+                'hover:border-tx3 hover:text-tx transition-all duration-150',
+              ].join(' ')}
+            >
+              CANCEL
+            </button>
+
+            <button
+              onClick={() => setShowShareModal(true)}
+              className={[
+                'flex items-center gap-1 border-none rounded',
+                'px-2.5 h-[28px] text-[10px] font-bold tracking-wider font-ui',
+                'cursor-pointer shrink-0 transition-opacity',
+                selectedIds.size > 0
+                  ? 'bg-accent text-[#020504] hover:opacity-90'
+                  : 'bg-raised text-tx3 opacity-60 cursor-not-allowed',
+              ].join(' ')}
+              disabled={selectedIds.size === 0}
+            >
+              <Icon name="export" size={11} color={selectedIds.size > 0 ? '#020504' : 'currentColor'} />
+              {selectedIds.size > 0 ? `SHARE (${selectedIds.size})` : 'SHARE'}
+            </button>
+          </>
+        )}
       </div>
 
       {/* Item list */}
@@ -132,7 +211,13 @@ export function MainVault() {
           <div className="py-16 text-center text-tx3 text-sm font-mono">// no items match</div>
         ) : (
           filtered.map((it) => {
-            const props = { key: it.id, cats };
+            const selProps = {
+              selected: shareMode ? selectedIds.has(it.id) : undefined,
+              onToggle: shareMode ? toggleItem : undefined,
+              onShare: handleShareItem,
+              onSelect: handleSelectItem,
+            };
+            const props = { key: it.id, cats, ...selProps };
             if (it.type === 'secret')     return <SecretRow     {...props} item={it} />;
             if (it.type === 'credential') return <CredentialRow {...props} item={it} />;
             if (it.type === 'link')       return <LinkRow       {...props} item={it} />;
@@ -145,22 +230,32 @@ export function MainVault() {
 
       {/* Status bar */}
       <div className="flex items-center justify-between px-5 h-10 border-t border-bd bg-bg shrink-0">
-        <div className="text-xs text-tx3 font-mono">{items.length} items · AES-256-GCM</div>
+        <div className="text-[12px] text-tx2 font-mono">{items.length} items · AES-256-GCM</div>
         <div className="flex gap-3">
           <button
             onClick={() => go('categories')}
-            className="flex items-center gap-1.5 text-xs font-mono text-tx3 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
+            className="flex items-center gap-1.5 text-[13px] font-mono text-tx2 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
           >
             <Icon name="tag" size={13} />categories
           </button>
           <button
             onClick={() => go('settings')}
-            className="flex items-center gap-1.5 text-xs font-mono text-tx3 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
+            className="flex items-center gap-1.5 text-[13px] font-mono text-tx2 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
           >
             <Icon name="settings" size={13} />settings
           </button>
         </div>
       </div>
+
+      {/* Share modal overlay */}
+      {showShareModal && (
+        <ShareModal
+          selectedIds={Array.from(selectedIds)}
+          onClose={() => setShowShareModal(false)}
+          onImportDone={() => { setShowShareModal(false); exitShareMode(); }}
+          onSendDone={() => exitShareMode()}
+        />
+      )}
     </div>
   );
 }

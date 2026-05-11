@@ -16,7 +16,7 @@ const SHELLS: Shell[] = ['bash', 'zsh', 'fish', 'PowerShell', 'cmd'];
 
 function Label({ label, err }: { label: string; err?: string }) {
   return (
-    <div className={`text-[10px] font-medium tracking-[0.07em] mb-[5px] ${err ? 'text-danger' : 'text-tx3'}`}>
+    <div className={`text-[11px] font-semibold tracking-[0.07em] mb-[5px] ${err ? 'text-danger' : 'text-tx'}`}>
       {label}
       {err && <span className="ml-2 normal-case font-mono">// {err}</span>}
     </div>
@@ -98,7 +98,7 @@ export function EditItem() {
   const iBase = (err?: string) =>
     [
       'w-full px-[10px] py-2 text-[12px] font-ui bg-raised border rounded-[3px]',
-      'text-tx transition-[border-color] duration-150 outline-none',
+      'text-tx placeholder:text-tx3 transition-[border-color] duration-150 outline-none',
       'focus:border-accent-d',
       err ? 'border-danger' : 'border-bd2',
     ].join(' ');
@@ -225,9 +225,9 @@ export function EditItem() {
                 <textarea value={form.command}
                   onChange={(e) => { set('command', e.target.value); setErrors((r) => ({ ...r, command: '' })); }}
                   placeholder={'ssh ubuntu@{{HOST}}\npg_dump … > {{OUT}}.sql'} rows={3}
-                  className="w-full resize-none text-[11px] font-mono text-tx leading-[1.6] bg-transparent border-none outline-none" />
+                  className="w-full resize-none text-[11px] font-mono text-tx placeholder:text-tx3 leading-[1.6] bg-transparent border-none outline-none" />
               </div>
-              <div className="mt-1 text-[10px] text-tx3">
+              <div className="mt-1 text-[11px] text-tx2">
                 Use <span className="font-mono text-warn">{'{{PLACEHOLDER}}'}</span> for fillable variables
               </div>
             </F>
@@ -238,7 +238,7 @@ export function EditItem() {
                   <button key={s} onClick={() => set('shell', s)}
                     className={[
                       'flex-1 py-[5px] px-1 rounded-[3px] border cursor-pointer text-[10px] font-mono transition-all duration-100',
-                      form.shell === s ? 'bg-accent-b border-accent-d text-accent' : 'bg-raised border-bd2 text-tx3 hover:text-tx',
+                      form.shell === s ? 'bg-accent-b border-accent-d text-accent' : 'bg-raised border-bd2 text-tx2 hover:text-tx',
                     ].join(' ')}>
                     {s}
                   </button>
@@ -263,7 +263,7 @@ export function EditItem() {
                 <textarea value={form.content}
                   onChange={(e) => { set('content', e.target.value); setErrors((r) => ({ ...r, content: '' })); }}
                   placeholder="Write anything here…" rows={6}
-                  className="w-full resize-none text-[12px] font-ui text-tx leading-[1.6] bg-transparent border-none outline-none" />
+                  className="w-full resize-none text-[12px] font-ui text-tx placeholder:text-tx3 leading-[1.6] bg-transparent border-none outline-none" />
               </div>
             </F>
           </>
@@ -278,7 +278,7 @@ export function EditItem() {
             className={`${iBase()} resize-none text-[11px] leading-[1.5]`} />
         </F>
         {!isNew && (
-          <div className="mt-2 text-[10px] text-tx3 font-mono">// created {editTarget!.created}</div>
+          <div className="mt-2 text-[11px] text-tx3 font-mono">// created {editTarget!.created}</div>
         )}
       </div>
 

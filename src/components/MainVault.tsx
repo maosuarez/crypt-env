@@ -54,8 +54,7 @@ export function MainVault() {
     setReloading(true);
     try {
       const result = await invoke<{ items: VaultItem[]; categories: Category[] }>('vault_list');
-      const store = useVaultStore.getState();
-      store.unlockWithPayload(result);
+      useVaultStore.setState({ items: result.items, cats: result.categories });
     } catch (e) {
       console.error('Reload failed:', e);
     } finally {
@@ -127,7 +126,9 @@ export function MainVault() {
           title="Reload vault"
           className="flex items-center justify-center w-6 h-6 rounded-md text-tx3 hover:text-tx hover:bg-raised transition disabled:opacity-50"
         >
-          <Icon name="refresh" size={14} />
+          <span className={reloading ? 'animate-spin inline-flex' : 'inline-flex'}>
+            <Icon name="refresh" size={14} />
+          </span>
         </button>
         <span className="text-[11px] text-tx2 font-mono min-w-[24px] text-right">
           {filtered.length}

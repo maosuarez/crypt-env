@@ -415,6 +415,12 @@ src-tauri\target\release\crypt-env-mcp.exe
 | `crypt_env_update_settings` | `timeout`, `theme`, etc. | Updated settings | Modify app settings (not master password) |
 | `crypt_env_list_commands` | — | Command list with placeholders | List all saved commands in the vault |
 | `crypt_env_run_command` | `command_name`, `variables: {VAR=value, ...}` | `{ exit_code, stdout, stderr }` | Execute command with resolved `{{placeholder}}` variables; returns exit status and output (secrets never in response) |
+| `crypt_env_list_categories` | — | Category list with metadata | List all categories (id, name, color, description) |
+| `crypt_env_create_category` | `name`, `color`, `description` (optional) | `{ id, name, color, description }` | Create a new category in the vault |
+| `crypt_env_update_category` | `id`, `name`, `color`, `description` (optional) | `{ id, name, color, description }` | Update an existing category; omitted fields keep their current values. Pass `description=""` to clear it |
+| `crypt_env_delete_category` | `id` | `{ deleted: true }` | Delete a category by id |
+| `crypt_env_update_item` | `id`, plus any fields to update (`name`, `value`, `url`, `username`, `password`, `title`, `description`, `notes`, `content`, `command`, `shell`, `categories`) | `{ updated_at }` | Update an existing vault item; only provided fields change, omitted fields (including secrets) are preserved |
+| `crypt_env_delete_item` | `id` | `{ deleted: true, id }` | Permanently delete an item from the vault |
 | `crypt_env_share_listen` | `item_ids: [...]` | `{ pairing_code, expires_in }` | Start LAN send session; returns pairing code for peer to connect |
 | `crypt_env_share_connect` | `pairing_code` | `{ fingerprint }` | Start LAN receive session; returns sender's fingerprint for verification |
 | `crypt_env_share_confirm` | `confirmed: bool` | `{ status }` | Confirm fingerprint match; session begins if true |
@@ -599,15 +605,20 @@ curl https://127.0.0.1:47821/items/uuid1/reveal \
 
 #### `PUT /items/:id`
 
-Update an item.
+Update an item. **Server-side partial merge**: only fields present in the request body are updated; omitted fields (including secret values) are preserved from the existing item.
 
 ```bash
 curl -X PUT https://127.0.0.1:47821/items/uuid1 \
   -H "X-Vault-Token: your_mcp_token" \
   -H "Content-Type: application/json" \
-  -d '{ "value": "new_value", "category": "new_category" }'
+  -d '{ "name": "new_name", "category": "new_category" }'
 # Response: { "updated_at": "2026-05-10T..." }
 ```
+
+**Field semantics**:
+- All fields (except `categories`) are optional; omitted fields keep their current values
+- `categories`: absent = keep existing, `[]` = clear all categories, `[...]` = replace with new list
+- Secret values (`value`, `password`, `content`, etc.) can be updated by including them; if omitted, existing encrypted values are preserved
 
 #### `DELETE /items/:id`
 
@@ -621,13 +632,47 @@ curl -X DELETE https://127.0.0.1:47821/items/uuid1 \
 
 #### `GET /categories`
 
-List all categories in use.
+List all categories with metadata (id, name, color, description).
 
 ```bash
 curl https://127.0.0.1:47821/categories \
   -H "X-Vault-Token: your_mcp_token"
-# Response: ["api", "database", "deployment", "personal"]
+# Response: [
+#   { "id": "api", "name": "API Keys", "color": "#FF5733", "description": "Third-party API credentials" },
+#   { "id": "db", "name": "Database", "color": "#33FF57", "description": "Database credentials" },
+#   ...
+# ]
 ```
+
+#### `POST /categories`
+
+Create a new category.
+
+```bash
+curl -X POST https://127.0.0.1:47821/categories \
+  -H "X-Vault-Token: your_mcp_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Cloud Providers",
+    "color": "#FF33FF",
+    "description": "AWS, GCP, Azure credentials"
+  }'
+# Response: { "id": "cloud", "name": "Cloud Providers", "color": "#FF33FF", "description": "AWS, GCP, Azure credentials" }
+```
+
+#### `PUT /categories/:id`
+
+Update an existing category. **Server-side partial merge**: only provided fields change.
+
+```bash
+curl -X PUT https://127.0.0.1:47821/categories/api \
+  -H "X-Vault-Token: your_mcp_token" \
+  -H "Content-Type: application/json" \
+  -d '{ "description": "Updated description" }'
+# Response: { "id": "api", "name": "API Keys", "color": "#FF5733", "description": "Updated description" }
+```
+
+Pass `description=""` (empty string) to clear the description field.
 
 #### `GET /commands/:id`
 

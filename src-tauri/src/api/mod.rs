@@ -51,6 +51,8 @@ struct CategoryResponse {
     id: String,
     name: String,
     color: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -248,7 +250,7 @@ fn validate_create(body: &VaultItem) -> Result<(), axum::response::Response> {
     }
 
     // categories: each entry max 100 chars
-    for cat in &body.categories {
+    for cat in body.categories.iter().flatten() {
         if cat.len() > 100 {
             return Err(err_validation("category", "each entry must be 100 characters or fewer"));
         }
@@ -289,7 +291,7 @@ fn validate_update(body: &VaultItem) -> Result<(), axum::response::Response> {
     }
 
     // categories: each entry max 100 chars
-    for cat in &body.categories {
+    for cat in body.categories.iter().flatten() {
         if cat.len() > 100 {
             return Err(err_validation("category", "each entry must be 100 characters or fewer"));
         }
@@ -440,6 +442,7 @@ async fn handle_list_items(
                 let found = item
                     .categories
                     .iter()
+                    .flatten()
                     .any(|c| c.to_lowercase() == *cat);
                 if !found {
                     return false;
@@ -582,7 +585,7 @@ async fn handle_update_item(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(mut body): Json<VaultItem>,
+    Json(body): Json<VaultItem>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
         let (msg, err_code) = match code {
@@ -597,7 +600,7 @@ async fn handle_update_item(
         return resp;
     }
 
-    // Verificar que el item existe
+    // Decrypt existing item so we can merge — secrets stay server-side
     let items = match decrypt_all_items(&state).await {
         Ok(i) => i,
         Err(StatusCode::FORBIDDEN) => {
@@ -610,11 +613,32 @@ async fn handle_update_item(
         }
     };
 
-    if items.iter().find(|item| item.id == id).is_none() {
-        return err_json(StatusCode::NOT_FOUND, "item no encontrado", "NOT_FOUND").into_response();
-    }
+    let existing = match items.into_iter().find(|item| item.id == id) {
+        Some(e) => e,
+        None => return err_json(StatusCode::NOT_FOUND, "item no encontrado", "NOT_FOUND").into_response(),
+    };
 
-    body.id = id;
+    // Merge: body fields override existing; None/empty keeps the existing value.
+    // Secret fields (value, password, content) are preserved from the encrypted
+    // store when the caller does not supply them — they never leave this process.
+    let merged = VaultItem {
+        id,
+        item_type: if body.item_type.is_empty() { existing.item_type } else { body.item_type },
+        name:        body.name.or(existing.name),
+        value:       body.value.or(existing.value),
+        url:         body.url.or(existing.url),
+        username:    body.username.or(existing.username),
+        password:    body.password.or(existing.password),
+        title:       body.title.or(existing.title),
+        description: body.description.or(existing.description),
+        command:     body.command.or(existing.command),
+        shell:       body.shell.or(existing.shell),
+        notes:       body.notes.or(existing.notes),
+        content:     body.content.or(existing.content),
+        // None = not sent → keep existing. Some([]) = explicitly clear. Some([...]) = replace.
+        categories: body.categories.or(existing.categories),
+        created: existing.created,
+    };
 
     let vault = state.vault.lock().await;
     let key = match vault.key.as_ref() {
@@ -625,7 +649,7 @@ async fn handle_update_item(
         }
     };
 
-    let json = match serde_json::to_vec(&body) {
+    let json = match serde_json::to_vec(&merged) {
         Ok(j) => j,
         Err(_) => {
             return err_json(
@@ -651,7 +675,7 @@ async fn handle_update_item(
 
     match vault
         .db
-        .upsert_item(id, &body.item_type, &encrypted, &body.created)
+        .upsert_item(id, &merged.item_type, &encrypted, &merged.created)
         .await
     {
         Ok(_) => {}
@@ -661,7 +685,7 @@ async fn handle_update_item(
         }
     }
 
-    (StatusCode::OK, Json(redact_item(body))).into_response()
+    (StatusCode::OK, Json(redact_item(merged))).into_response()
 }
 
 async fn handle_delete_item(
@@ -727,7 +751,7 @@ async fn handle_list_categories(
         Ok(cats) => {
             let response: Vec<CategoryResponse> = cats
                 .into_iter()
-                .map(|c| CategoryResponse { id: c.cid, name: c.name, color: c.color })
+                .map(|c| CategoryResponse { id: c.cid, name: c.name, color: c.color, description: c.description })
                 .collect();
             (StatusCode::OK, Json(response)).into_response()
         }
@@ -741,6 +765,7 @@ async fn handle_list_categories(
 struct CreateCategoryBody {
     name: String,
     color: String,
+    description: Option<String>,
 }
 
 async fn handle_create_category(
@@ -772,13 +797,13 @@ async fn handle_create_category(
     rand::thread_rng().fill_bytes(&mut id_bytes);
     let cid = id_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
-    let cat = DbCategory { cid: cid.clone(), name: body.name.clone(), color: body.color.clone() };
+    let cat = DbCategory { cid: cid.clone(), name: body.name.clone(), color: body.color.clone(), description: body.description.clone() };
 
     let vault = state.vault.lock().await;
     match vault.db.insert_category(&cat).await {
         Ok(()) => (
             StatusCode::CREATED,
-            Json(CategoryResponse { id: cid, name: body.name, color: body.color }),
+            Json(CategoryResponse { id: cid, name: body.name, color: body.color, description: body.description }),
         )
             .into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
@@ -789,6 +814,7 @@ async fn handle_create_category(
 struct UpdateCategoryBody {
     name: Option<String>,
     color: Option<String>,
+    description: Option<String>,
 }
 
 async fn handle_update_category(
@@ -826,6 +852,12 @@ async fn handle_update_category(
 
     let new_name = body.name.unwrap_or(existing.name);
     let new_color = body.color.unwrap_or(existing.color);
+    // None means "keep existing"; Some("") clears the description
+    let new_description = match body.description {
+        Some(d) if d.is_empty() => None,
+        Some(d) => Some(d),
+        None => existing.description,
+    };
 
     if new_name.is_empty() {
         return err_validation("name", "must not be empty");
@@ -834,11 +866,11 @@ async fn handle_update_category(
         return err_validation("name", "must be 100 characters or fewer");
     }
 
-    let updated = DbCategory { cid: id.clone(), name: new_name.clone(), color: new_color.clone() };
+    let updated = DbCategory { cid: id.clone(), name: new_name.clone(), color: new_color.clone(), description: new_description.clone() };
     match vault.db.update_category(&updated).await {
         Ok(true) => (
             StatusCode::OK,
-            Json(CategoryResponse { id, name: new_name, color: new_color }),
+            Json(CategoryResponse { id, name: new_name, color: new_color, description: new_description }),
         )
             .into_response(),
         Ok(false) => {

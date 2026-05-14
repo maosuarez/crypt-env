@@ -266,6 +266,44 @@ fn tool_definitions() -> serde_json::Value {
             }
         },
         {
+            "name": "crypt_env_update_item",
+            "description": "Update an existing vault item. Only the fields provided are changed; omitted fields keep their current values (including secret values). Use crypt_env_list_items to find the item id first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Item id (as returned by list_items or get_item)" },
+                    "name": { "type": "string", "description": "New item name" },
+                    "value": { "type": "string", "description": "New secret value (for type=secret)" },
+                    "url": { "type": "string", "description": "New URL (for type=link or credential)" },
+                    "username": { "type": "string", "description": "New username (for type=credential)" },
+                    "password": { "type": "string", "description": "New password (for type=credential)" },
+                    "title": { "type": "string", "description": "New title (for type=note or link)" },
+                    "description": { "type": "string", "description": "New description" },
+                    "notes": { "type": "string", "description": "New notes" },
+                    "content": { "type": "string", "description": "New content body (for type=note)" },
+                    "command": { "type": "string", "description": "New command template (for type=command)" },
+                    "shell": { "type": "string", "description": "New shell (for type=command), e.g. bash, powershell" },
+                    "categories": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "New list of category names. Replaces the current list."
+                    }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "crypt_env_delete_item",
+            "description": "Permanently delete an item from the vault by id. This action cannot be undone.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Item id to delete (as returned by list_items)" }
+                },
+                "required": ["id"]
+            }
+        },
+        {
             "name": "crypt_env_update_settings",
             "description": "Updates settings: auto_lock_timeout (minutes) and hotkey. Changing master_password is not allowed.",
             "inputSchema": {
@@ -401,20 +439,22 @@ fn tool_definitions() -> serde_json::Value {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Category name (max 100 characters)" },
-                    "color": { "type": "string", "description": "Category color, e.g. #FF5733" }
+                    "color": { "type": "string", "description": "Category color, e.g. #FF5733" },
+                    "description": { "type": "string", "description": "Optional description for the category" }
                 },
                 "required": ["name", "color"]
             }
         },
         {
             "name": "crypt_env_update_category",
-            "description": "Edit an existing category by id. Only the fields provided are changed.",
+            "description": "Edit an existing category by id. Only the fields provided are changed. Pass description as empty string to clear it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "Category id (as returned by list_categories)" },
                     "name": { "type": "string", "description": "New name" },
-                    "color": { "type": "string", "description": "New color" }
+                    "color": { "type": "string", "description": "New color" },
+                    "description": { "type": "string", "description": "New description (empty string to clear)" }
                 },
                 "required": ["id"]
             }
@@ -1379,6 +1419,73 @@ fn tool_share_import(args: &serde_json::Value, token: &str) -> serde_json::Value
     }
 }
 
+// ─── Item update / delete ─────────────────────────────────────────────────────
+
+fn tool_update_item(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let id = match args.get("id").and_then(|v| v.as_i64()) {
+        Some(i) => i,
+        None => return tool_err("required parameter: 'id' (integer)"),
+    };
+
+    // Send only the fields provided. The API merges them server-side with the
+    // existing encrypted item — secrets are never sent to or seen by the MCP.
+    let mut body = serde_json::json!({ "id": id, "type": "", "categories": [], "created": "" });
+    for field in &["name", "value", "url", "username", "password", "title",
+                   "description", "notes", "content", "command", "shell"] {
+        if let Some(v) = args.get(field).and_then(|v| v.as_str()) {
+            body[field] = serde_json::json!(v);
+        }
+    }
+    if let Some(cats) = args.get("categories").and_then(|v| v.as_array()) {
+        body["categories"] = serde_json::json!(cats);
+    }
+
+    let resp = match vault_put(&format!("/items/{id}"), token, &body) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status == 404 { return tool_err(format!("item not found: {id}")); }
+    if status == 422 { return tool_err(format!("validation error: {text}")); }
+    if status >= 400 { return tool_err(format!("error updating item (HTTP {status}): {text}")); }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_delete_item(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let id = match args.get("id").and_then(|v| v.as_i64()) {
+        Some(i) => i,
+        None => return tool_err("required parameter: 'id' (integer)"),
+    };
+
+    let resp = match vault_delete(&format!("/items/{id}"), token) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status == 404 { return tool_err(format!("item not found: {id}")); }
+    if status >= 400 {
+        let text = resp.text().unwrap_or_default();
+        return tool_err(format!("error deleting item (HTTP {status}): {text}"));
+    }
+
+    tool_ok(
+        serde_json::to_string_pretty(&serde_json::json!({ "deleted": true, "id": id }))
+            .unwrap_or_default(),
+    )
+}
+
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
 
 // ─── Category tool implementations ───────────────────────────────────────────
@@ -1418,7 +1525,10 @@ fn tool_create_category(args: &serde_json::Value, token: &str) -> serde_json::Va
         None => return tool_err("required parameter: 'color'"),
     };
 
-    let body = serde_json::json!({ "name": name, "color": color });
+    let mut body = serde_json::json!({ "name": name, "color": color });
+    if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
+        body["description"] = serde_json::json!(desc);
+    }
     let resp = match vault_post("/categories", token, &body) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
@@ -1455,6 +1565,9 @@ fn tool_update_category(args: &serde_json::Value, token: &str) -> serde_json::Va
     }
     if let Some(color) = args.get("color").and_then(|v| v.as_str()) {
         body["color"] = serde_json::json!(color);
+    }
+    if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
+        body["description"] = serde_json::json!(desc);
     }
 
     let path = format!("/categories/{}", urlencod(&id));
@@ -1558,6 +1671,8 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_
         "crypt_env_generate_env" => tool_generate_env(args, token),
         "crypt_env_inject_env" => tool_inject_env(args, token),
         "crypt_env_add_item" => tool_add_item(args, token),
+        "crypt_env_update_item" => tool_update_item(args, token),
+        "crypt_env_delete_item" => tool_delete_item(args, token),
         "crypt_env_update_settings" => tool_update_settings(args, token),
         "crypt_env_doctor" => tool_doctor(args, token),
         "crypt_env_list_commands" => tool_list_commands(token),

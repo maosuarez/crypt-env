@@ -8,6 +8,7 @@ pub struct DbCategory {
     pub cid: String,
     pub name: String,
     pub color: String,
+    pub description: Option<String>,
 }
 
 pub struct VaultDb {
@@ -72,6 +73,10 @@ impl VaultDb {
                 .await
                 .map_err(|e| format!("schema init: {e}"))?;
         }
+        // Additive migration: add description column if it doesn't exist yet.
+        let _ = sqlx::query("ALTER TABLE categories ADD COLUMN description TEXT")
+            .execute(&self.pool)
+            .await;
         Ok(())
     }
 
@@ -166,7 +171,7 @@ impl VaultDb {
     }
 
     pub async fn list_categories(&self) -> Result<Vec<DbCategory>, String> {
-        let rows = sqlx::query("SELECT cid, name, color FROM categories ORDER BY rowid ASC")
+        let rows = sqlx::query("SELECT cid, name, color, description FROM categories ORDER BY rowid ASC")
             .fetch_all(&self.pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -176,6 +181,7 @@ impl VaultDb {
                 cid: r.get(0),
                 name: r.get(1),
                 color: r.get(2),
+                description: r.get(3),
             })
             .collect())
     }
@@ -186,36 +192,44 @@ impl VaultDb {
             .await
             .map_err(|e| e.to_string())?;
         for cat in cats {
-            sqlx::query("INSERT INTO categories (cid, name, color) VALUES (?1, ?2, ?3)")
-                .bind(&cat.cid)
-                .bind(&cat.name)
-                .bind(&cat.color)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| e.to_string())?;
+            sqlx::query(
+                "INSERT INTO categories (cid, name, color, description) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(&cat.cid)
+            .bind(&cat.name)
+            .bind(&cat.color)
+            .bind(&cat.description)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
         }
         Ok(())
     }
 
     pub async fn insert_category(&self, cat: &DbCategory) -> Result<(), String> {
-        sqlx::query("INSERT INTO categories (cid, name, color) VALUES (?1, ?2, ?3)")
-            .bind(&cat.cid)
-            .bind(&cat.name)
-            .bind(&cat.color)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            "INSERT INTO categories (cid, name, color, description) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(&cat.cid)
+        .bind(&cat.name)
+        .bind(&cat.color)
+        .bind(&cat.description)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub async fn update_category(&self, cat: &DbCategory) -> Result<bool, String> {
-        let res = sqlx::query("UPDATE categories SET name = ?1, color = ?2 WHERE cid = ?3")
-            .bind(&cat.name)
-            .bind(&cat.color)
-            .bind(&cat.cid)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let res =
+            sqlx::query("UPDATE categories SET name = ?1, color = ?2, description = ?3 WHERE cid = ?4")
+                .bind(&cat.name)
+                .bind(&cat.color)
+                .bind(&cat.description)
+                .bind(&cat.cid)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| e.to_string())?;
         Ok(res.rows_affected() > 0)
     }
 

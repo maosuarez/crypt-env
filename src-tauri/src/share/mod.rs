@@ -397,7 +397,7 @@ async fn run_send_background(
             password: item.password,
             url: item.url,
             notes: item.notes,
-            category: item.categories.into_iter().next(),
+            category: item.categories.and_then(|v| v.into_iter().next()),
             command: item.command,
         });
     }
@@ -630,7 +630,7 @@ async fn import_plain_items_into_vault(
             command: plain.command.clone(),
             shell: None,
             content: None,
-            categories: plain.category.iter().cloned().collect(),
+            categories: Some(plain.category.iter().cloned().collect()),
             created: now_ts.clone(),
         };
 
@@ -730,7 +730,7 @@ pub async fn export_package(
             password: item.password,
             url: item.url,
             notes: item.notes,
-            category: item.categories.into_iter().next(),
+            category: item.categories.and_then(|v| v.into_iter().next()),
             command: item.command,
         });
     }

@@ -39,8 +39,8 @@ pub struct VaultItem {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
-    #[serde(default)]
-    pub categories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -54,6 +54,7 @@ pub struct Category {
     pub id: String,
     pub name: String,
     pub color: String,
+    pub description: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -152,6 +153,7 @@ async fn do_unlock(
             id: c.cid,
             name: c.name,
             color: c.color,
+            description: c.description,
         })
         .collect();
 
@@ -234,6 +236,7 @@ pub async fn vault_get_categories(
             id: c.cid,
             name: c.name,
             color: c.color,
+            description: c.description,
         })
         .collect())
 }
@@ -257,6 +260,7 @@ pub async fn vault_list(
             id: c.cid,
             name: c.name,
             color: c.color,
+            description: c.description,
         })
         .collect();
 
@@ -278,6 +282,7 @@ pub async fn vault_save_categories(
             cid: c.id,
             name: c.name,
             color: c.color,
+            description: c.description,
         })
         .collect();
     s.db.save_categories(&db_cats).await
@@ -471,7 +476,7 @@ pub async fn vault_export_backup(
     let db_cats = s.db.list_categories().await?;
     let categories: Vec<serde_json::Value> = db_cats
         .iter()
-        .map(|c| serde_json::json!({ "id": c.cid, "name": c.name, "color": c.color }))
+        .map(|c| serde_json::json!({ "id": c.cid, "name": c.name, "color": c.color, "description": c.description }))
         .collect();
 
     let created_at = SystemTime::now()
@@ -576,6 +581,7 @@ async fn do_restore_backup(
                     cid: v.get("id")?.as_str()?.to_string(),
                     name: v.get("name")?.as_str()?.to_string(),
                     color: v.get("color")?.as_str()?.to_string(),
+                    description: v.get("description").and_then(|x| x.as_str()).map(|s| s.to_string()),
                 })
             })
             .collect();
@@ -611,6 +617,7 @@ async fn do_restore_backup(
                     cid,
                     name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                     color: v.get("color").and_then(|x| x.as_str()).unwrap_or("#888").to_string(),
+                    description: v.get("description").and_then(|x| x.as_str()).map(|s| s.to_string()),
                 });
             }
         }
@@ -701,7 +708,7 @@ pub async fn vault_import_items(
             command: None,
             shell: None,
             content: None,
-            categories: Vec::new(),
+            categories: None,
             created: now.clone(),
         };
 

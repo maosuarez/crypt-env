@@ -39,6 +39,8 @@ enum Cmd {
     Cmd(commands::cmd::CmdArgs),
     /// Share secrets with a teammate (LAN bridge or encrypted package)
     Share(commands::share::ShareArgs),
+    /// Manage categories (list, create, edit, delete)
+    Category(commands::category::CategoryArgs),
 }
 
 fn main() {
@@ -55,6 +57,7 @@ fn main() {
         Cmd::Set(args) => commands::set::run(args),
         Cmd::Cmd(args) => commands::cmd::run(args),
         Cmd::Share(args) => commands::share::run(args),
+        Cmd::Category(args) => commands::category::run(args),
     };
     if let Err(e) = result {
         eprintln!("{}", e);

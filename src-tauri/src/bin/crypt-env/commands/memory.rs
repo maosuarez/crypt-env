@@ -45,11 +45,14 @@ pub fn run(args: MemoryArgs) -> Result<(), CliError> {
     let shell = shell_options[shell_idx];
 
     let body = serde_json::json!({
-        "item_type": "command",
+        "id": 0,
+        "type": "command",
         "name": name,
         "description": if description.is_empty() { serde_json::Value::Null } else { description.clone().into() },
         "command": args.command,
         "shell": shell,
+        "categories": [],
+        "created": "",
     });
 
     let resp = client::authenticated_post(

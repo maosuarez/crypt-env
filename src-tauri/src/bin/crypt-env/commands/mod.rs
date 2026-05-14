@@ -1,4 +1,5 @@
 pub mod add;
+pub mod category;
 pub mod cmd;
 pub mod doctor;
 pub mod exec;

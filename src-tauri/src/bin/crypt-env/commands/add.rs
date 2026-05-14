@@ -115,9 +115,12 @@ pub fn run(args: AddArgs) -> Result<(), CliError> {
 
     for (key, value) in &pairs {
         let body = serde_json::json!({
-            "item_type": item_type,
+            "id": 0,
+            "type": item_type,
             "name": key,
             "value": value,
+            "categories": [],
+            "created": "",
         });
         let resp = client::authenticated_post(
             &format!("{}/items", client::API_BASE),

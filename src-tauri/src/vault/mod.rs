@@ -17,6 +17,7 @@ pub mod share_commands;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct VaultItem {
+    #[serde(default)]
     pub id: i64,
     #[serde(rename = "type")]
     pub item_type: String,
@@ -38,11 +39,13 @@ pub struct VaultItem {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    #[serde(default)]
     pub categories: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(default)]
     pub created: String,
 }
 

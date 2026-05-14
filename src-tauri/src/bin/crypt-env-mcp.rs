@@ -388,6 +388,47 @@ fn tool_definitions() -> serde_json::Value {
                 },
                 "required": ["path", "passphrase"]
             }
+        },
+        {
+            "name": "crypt_env_list_categories",
+            "description": "List all categories in the vault with their id, name, and color.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "crypt_env_create_category",
+            "description": "Create a new category in the vault.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Category name (max 100 characters)" },
+                    "color": { "type": "string", "description": "Category color, e.g. #FF5733" }
+                },
+                "required": ["name", "color"]
+            }
+        },
+        {
+            "name": "crypt_env_update_category",
+            "description": "Edit an existing category by id. Only the fields provided are changed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Category id (as returned by list_categories)" },
+                    "name": { "type": "string", "description": "New name" },
+                    "color": { "type": "string", "description": "New color" }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "crypt_env_delete_category",
+            "description": "Delete a category by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Category id to delete" }
+                },
+                "required": ["id"]
+            }
         }
     ])
 }
@@ -436,6 +477,20 @@ fn vault_put(
         .put(format!("{API_BASE}{path}"))
         .header("X-Vault-Token", token)
         .json(body)
+        .send()
+        .map_err(|e| {
+            if e.is_connect() {
+                "Error: crypt-env app is not running. Open the application and try again.".to_string()
+            } else {
+                e.to_string()
+            }
+        })
+}
+
+fn vault_delete(path: &str, token: &str) -> Result<reqwest::blocking::Response, String> {
+    mcp_http_client()
+        .delete(format!("{API_BASE}{path}"))
+        .header("X-Vault-Token", token)
         .send()
         .map_err(|e| {
             if e.is_connect() {
@@ -1326,6 +1381,143 @@ fn tool_share_import(args: &serde_json::Value, token: &str) -> serde_json::Value
 
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
 
+// ─── Category tool implementations ───────────────────────────────────────────
+
+fn tool_list_categories(token: &str) -> serde_json::Value {
+    let resp = match vault_get("/categories", token) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 {
+        return tool_err("vault_locked: unlock the vault first");
+    }
+    if status >= 400 {
+        return tool_err(format!("error listing categories (HTTP {status}): {text}"));
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_create_category(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return tool_err("required parameter: 'name'"),
+    };
+    let color = match args.get("color").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => return tool_err("required parameter: 'color'"),
+    };
+
+    let body = serde_json::json!({ "name": name, "color": color });
+    let resp = match vault_post("/categories", token, &body) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 {
+        return tool_err("vault_locked: unlock the vault first");
+    }
+    if status >= 400 {
+        return tool_err(format!("error creating category (HTTP {status}): {text}"));
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_update_category(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let id = match args.get("id").and_then(|v| v.as_str()) {
+        Some(i) => i.to_string(),
+        None => return tool_err("required parameter: 'id'"),
+    };
+
+    let mut body = serde_json::json!({});
+    if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+        body["name"] = serde_json::json!(name);
+    }
+    if let Some(color) = args.get("color").and_then(|v| v.as_str()) {
+        body["color"] = serde_json::json!(color);
+    }
+
+    let path = format!("/categories/{}", urlencod(&id));
+    let resp = match vault_put(&path, token, &body) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 {
+        return tool_err("vault_locked: unlock the vault first");
+    }
+    if status == 404 {
+        return tool_err(format!("category not found: {id}"));
+    }
+    if status >= 400 {
+        return tool_err(format!("error updating category (HTTP {status}): {text}"));
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_delete_category(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let id = match args.get("id").and_then(|v| v.as_str()) {
+        Some(i) => i.to_string(),
+        None => return tool_err("required parameter: 'id'"),
+    };
+
+    let path = format!("/categories/{}", urlencod(&id));
+    let resp = match vault_delete(&path, token) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+
+    if status == 403 {
+        return tool_err("vault_locked: unlock the vault first");
+    }
+    if status == 404 {
+        return tool_err(format!("category not found: {id}"));
+    }
+    if status == 204 {
+        return tool_ok(serde_json::to_string_pretty(&serde_json::json!({ "deleted": true }))
+            .unwrap_or_default());
+    }
+    if status >= 400 {
+        let text = resp.text().unwrap_or_default();
+        return tool_err(format!("error deleting category (HTTP {status}): {text}"));
+    }
+
+    tool_ok(serde_json::to_string_pretty(&serde_json::json!({ "deleted": true }))
+        .unwrap_or_default())
+}
+
 fn dispatch(
     method: &str,
     params: &serde_json::Value,
@@ -1377,6 +1569,10 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_
         "crypt_env_share_status" => tool_share_status(token),
         "crypt_env_share_export" => tool_share_export(args, token),
         "crypt_env_share_import" => tool_share_import(args, token),
+        "crypt_env_list_categories" => tool_list_categories(token),
+        "crypt_env_create_category" => tool_create_category(args, token),
+        "crypt_env_update_category" => tool_update_category(args, token),
+        "crypt_env_delete_category" => tool_delete_category(args, token),
         _ => tool_err(format!("unknown tool: {name}")),
     }
 }

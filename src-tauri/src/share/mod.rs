@@ -131,6 +131,8 @@ pub struct ShareSession {
     pub received_items: Vec<PlainItem>,
     /// Names of items received (available after Done for the API response).
     pub received_names: Vec<String>,
+    /// Non-fatal informational note for the frontend, e.g. firewall warning.
+    pub note: Option<String>,
 }
 
 /// Top-level share state — one optional active session at a time.
@@ -195,6 +197,7 @@ pub async fn start_listen_session(
         fingerprint: None,
         received_items: Vec::new(),
         received_names: Vec::new(),
+        note: None,
     };
 
     {
@@ -239,7 +242,22 @@ async fn run_send_background(
     use std::time::Duration;
 
     // Start mDNS listener — keep daemon alive in this scope
-    let (listener, _port, _mdns_daemon) = lan::start_listener(&pairing_code)?;
+    let (listener, port, _mdns_daemon) = lan::start_listener(&pairing_code)?;
+
+    // Inform the frontend that the app is listening on a LAN port and that
+    // Windows Firewall may block inbound connections.  The user must allow the
+    // app through the firewall (or add an inbound rule for the port) if they
+    // see connection failures on the receiver side.
+    {
+        let mut guard = share_state.session.lock().await;
+        if let Some(ref mut s) = *guard {
+            s.note = Some(format!(
+                "Listening on port {port}. If the receiver cannot connect, \
+                 allow this app through Windows Firewall or add an inbound \
+                 TCP rule for port {port}."
+            ));
+        }
+    }
 
     let accept_timeout = Duration::from_secs(300); // 5 minutes
     let start = Instant::now();
@@ -287,6 +305,13 @@ async fn run_send_background(
     }
 
     let mut stream = stream_opt.expect("stream set in loop above");
+
+    // The TcpListener was put into non-blocking mode for polling; accepted
+    // streams inherit that flag.  The handshake uses blocking read_exact /
+    // write_all, so we must switch back to blocking mode before proceeding.
+    stream
+        .set_nonblocking(false)
+        .map_err(|e| ShareError::Io(format!("set stream blocking: {e}")))?;
 
     // ECDH handshake
     let our_pub = keypair.public;
@@ -439,6 +464,7 @@ pub async fn connect_to_peer(
         fingerprint: None,
         received_items: Vec::new(),
         received_names: Vec::new(),
+        note: None,
     };
 
     {
@@ -446,10 +472,11 @@ pub async fn connect_to_peer(
         *guard = Some(session);
     }
 
-    // Connect to peer via mDNS (30s timeout)
+    // Connect to peer via mDNS.  Use 60 s so slow mDNS propagation on
+    // Windows (multicast routing delays) does not cause spurious timeouts.
     let code_for_connect = pairing_code.clone();
     let stream = tokio::task::spawn_blocking(move || {
-        lan::connect_to_peer(&code_for_connect, 30)
+        lan::connect_to_peer(&code_for_connect, 60)
     })
     .await
     .map_err(|e| ShareError::Io(e.to_string()))??;

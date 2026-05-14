@@ -24,6 +24,7 @@ interface PollResult {
   fingerprint?: string;
   receivedNames?: string[];
   error?: string;
+  note?: string;
 }
 
 type Step =
@@ -329,6 +330,9 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
   const [error, setError] = useState('');
   const [failedError, setFailedError] = useState('');
 
+  // Informational note from the backend (e.g. Windows Firewall reminder)
+  const [sessionNote, setSessionNote] = useState('');
+
   // Polling
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -348,6 +352,8 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
     pollRef.current = setInterval(async () => {
       try {
         const result = await invoke<PollResult>('share_poll_status');
+        // Surface backend notes (e.g. Windows Firewall reminder) immediately
+        if (result.note) setSessionNote(result.note);
         if (result.state === 'awaiting_fingerprint' && result.fingerprint) {
           setFingerprint(result.fingerprint);
           stopPolling();
@@ -588,6 +594,11 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
           <span className="text-[11px] text-tx3 font-mono">Connection timeout:</span>
           <Countdown seconds={300} />
         </div>
+        {sessionNote && (
+          <div className="mb-3 rounded border border-amber-700/40 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-400 font-mono leading-relaxed">
+            {sessionNote}
+          </div>
+        )}
         <Divider />
         <div className="flex justify-end">
           <BtnSecondary onClick={handleCancel}>CANCEL</BtnSecondary>

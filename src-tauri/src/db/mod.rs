@@ -197,6 +197,37 @@ impl VaultDb {
         Ok(())
     }
 
+    pub async fn insert_category(&self, cat: &DbCategory) -> Result<(), String> {
+        sqlx::query("INSERT INTO categories (cid, name, color) VALUES (?1, ?2, ?3)")
+            .bind(&cat.cid)
+            .bind(&cat.name)
+            .bind(&cat.color)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn update_category(&self, cat: &DbCategory) -> Result<bool, String> {
+        let res = sqlx::query("UPDATE categories SET name = ?1, color = ?2 WHERE cid = ?3")
+            .bind(&cat.name)
+            .bind(&cat.color)
+            .bind(&cat.cid)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn delete_category(&self, cid: &str) -> Result<bool, String> {
+        let res = sqlx::query("DELETE FROM categories WHERE cid = ?1")
+            .bind(cid)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.rows_affected() > 0)
+    }
+
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>, String> {
         let val: Option<String> =
             sqlx::query_scalar("SELECT value FROM settings WHERE key = ?1")

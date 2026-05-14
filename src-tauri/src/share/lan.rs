@@ -54,7 +54,11 @@ pub fn start_listener(
     let mut properties = std::collections::HashMap::new();
     properties.insert("pc".to_string(), pc_hash);
 
-    // host_ipv4 = empty vec: mdns-sd will use the local interface address
+    // Use enable_addr_auto() so the mDNS daemon fills in the real local
+    // interface addresses at registration time.  Passing `()` alone leaves the
+    // address set empty, which means the A record is never advertised and the
+    // receiver's get_addresses() returns nothing — the root cause of LAN
+    // connection failures on Windows.
     let service = ServiceInfo::new(
         SERVICE_TYPE,
         &format!("cryptenv-share-{port}"),
@@ -63,7 +67,8 @@ pub fn start_listener(
         port,
         Some(properties),
     )
-    .map_err(|e| ShareError::Discovery(format!("build service info: {e}")))?;
+    .map_err(|e| ShareError::Discovery(format!("build service info: {e}")))?
+    .enable_addr_auto();
 
     mdns.register(service)
         .map_err(|e| ShareError::Discovery(format!("mdns register: {e}")))?;
@@ -105,23 +110,27 @@ pub fn connect_to_peer(pairing_code: &str, timeout_secs: u64) -> Result<TcpStrea
             // Check if this service's TXT pc field matches
             let pc_field = info.get_property_val_str("pc");
             if pc_field == Some(expected_hash.as_str()) {
-                // Connect to first available address
-                let ipv4 = info.get_addresses().iter().next().cloned();
-                let ipv4 = match ipv4 {
+                // Prefer IPv4 to avoid Windows link-local IPv6 routing issues.
+                // Fall back to any available address only if no IPv4 is present.
+                let addrs = info.get_addresses();
+                let chosen = addrs
+                    .iter()
+                    .find(|a| a.is_ipv4())
+                    .or_else(|| addrs.iter().next())
+                    .cloned();
+
+                let addr = match chosen {
                     Some(a) => a,
                     None => continue,
                 };
 
-                let socket_addr = std::net::SocketAddr::new(
-                    ipv4,
-                    info.get_port(),
-                );
+                let socket_addr = std::net::SocketAddr::new(addr, info.get_port());
 
                 let stream = TcpStream::connect_timeout(
                     &socket_addr,
-                    Duration::from_secs(10),
+                    Duration::from_secs(15),
                 )
-                .map_err(|e| ShareError::Io(format!("TCP connect: {e}")))?;
+                .map_err(|e| ShareError::Io(format!("TCP connect to {socket_addr}: {e}")))?;
 
                 drop(mdns); // unregisters the service when dropped
                 return Ok(stream);

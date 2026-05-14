@@ -27,6 +27,9 @@ pub struct PollStatusResponse {
     pub received_names: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Non-fatal informational note (e.g. Windows Firewall reminder).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -98,6 +101,7 @@ pub async fn share_poll_status(
             fingerprint: None,
             received_names: None,
             error: None,
+            note: None,
         }),
         Some(s) => {
             let error = match &s.state {
@@ -115,6 +119,7 @@ pub async fn share_poll_status(
                 fingerprint: s.fingerprint.clone(),
                 received_names,
                 error,
+                note: s.note.clone(),
             })
         }
     }

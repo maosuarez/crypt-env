@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::crypto;
+use crate::db::DbCategory;
 use crate::share::{ShareState, ShareSessionState};
 use crate::tls;
 use crate::vault::{SharedState, VaultItem};
@@ -733,6 +734,141 @@ async fn handle_list_categories(
         Err(e) => {
             err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response()
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateCategoryBody {
+    name: String,
+    color: String,
+}
+
+async fn handle_create_category(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<CreateCategoryBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("no autorizado", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("bóveda bloqueada", "VAULT_LOCKED"),
+            _ => ("error interno", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    if body.name.is_empty() {
+        return err_validation("name", "required and must not be empty");
+    }
+    if body.name.len() > 100 {
+        return err_validation("name", "must be 100 characters or fewer");
+    }
+    if body.color.is_empty() {
+        return err_validation("color", "required and must not be empty");
+    }
+
+    // Generate a UUID-like cid using random bytes
+    let mut id_bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut id_bytes);
+    let cid = id_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+
+    let cat = DbCategory { cid: cid.clone(), name: body.name.clone(), color: body.color.clone() };
+
+    let vault = state.vault.lock().await;
+    match vault.db.insert_category(&cat).await {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(CategoryResponse { id: cid, name: body.name, color: body.color }),
+        )
+            .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateCategoryBody {
+    name: Option<String>,
+    color: Option<String>,
+}
+
+async fn handle_update_category(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateCategoryBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("no autorizado", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("bóveda bloqueada", "VAULT_LOCKED"),
+            _ => ("error interno", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    // Fetch existing category to merge fields
+    let vault = state.vault.lock().await;
+    let cats = match vault.db.list_categories().await {
+        Ok(c) => c,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                .into_response()
+        }
+    };
+
+    let existing = match cats.into_iter().find(|c| c.cid == id) {
+        Some(c) => c,
+        None => {
+            return err_json(StatusCode::NOT_FOUND, "category not found", "NOT_FOUND")
+                .into_response()
+        }
+    };
+
+    let new_name = body.name.unwrap_or(existing.name);
+    let new_color = body.color.unwrap_or(existing.color);
+
+    if new_name.is_empty() {
+        return err_validation("name", "must not be empty");
+    }
+    if new_name.len() > 100 {
+        return err_validation("name", "must be 100 characters or fewer");
+    }
+
+    let updated = DbCategory { cid: id.clone(), name: new_name.clone(), color: new_color.clone() };
+    match vault.db.update_category(&updated).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(CategoryResponse { id, name: new_name, color: new_color }),
+        )
+            .into_response(),
+        Ok(false) => {
+            err_json(StatusCode::NOT_FOUND, "category not found", "NOT_FOUND").into_response()
+        }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+    }
+}
+
+async fn handle_delete_category(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("no autorizado", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("bóveda bloqueada", "VAULT_LOCKED"),
+            _ => ("error interno", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let vault = state.vault.lock().await;
+    match vault.db.delete_category(&id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => {
+            err_json(StatusCode::NOT_FOUND, "category not found", "NOT_FOUND").into_response()
+        }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
 }
 
@@ -1584,6 +1720,9 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         .route("/items/:id", delete(handle_delete_item))
         .route("/items/:id/reveal", post(handle_reveal_item))
         .route("/categories", get(handle_list_categories))
+        .route("/categories", post(handle_create_category))
+        .route("/categories/:id", put(handle_update_category))
+        .route("/categories/:id", delete(handle_delete_category))
         .route("/commands", get(handle_list_commands))
         .route("/commands/:id", get(handle_get_command))
         .route("/settings", get(handle_get_settings))

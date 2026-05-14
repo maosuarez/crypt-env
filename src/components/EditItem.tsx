@@ -54,6 +54,7 @@ export function EditItem() {
   const go         = useVaultStore((s) => s.go);
   const saveItem   = useVaultStore((s) => s.saveItem);
   const deleteItem = useVaultStore((s) => s.deleteItem);
+  const showToast  = useVaultStore((s) => s.showToast);
 
   const isNew   = !editTarget;
   const defType = (editTarget?.type ?? 'secret') as ItemType;
@@ -90,6 +91,9 @@ export function EditItem() {
     try {
       const payload = { ...form, type } as Omit<VaultItem, 'id' | 'created'>;
       await saveItem(payload);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(msg || 'Failed to save item', 'error');
     } finally {
       setSaving(false);
     }

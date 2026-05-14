@@ -45,7 +45,7 @@ export function Icon({ name, size = 14, color = 'currentColor' }: IconProps) {
     rename:   <svg {...s} viewBox="0 0 16 16" {...p}><path d="M3 8h10M10 5l3 3-3 3"/></svg>,
     note:        <svg {...s} viewBox="0 0 16 16" {...p}><rect x="3" y="1.5" width="10" height="13" rx="1.5"/><path d="M6 5.5h4M5 8h6M5 10.5h4"/></svg>,
     fingerprint: <svg {...s} viewBox="0 0 16 16" {...p}><path d="M8 2C5 2 2.5 4.2 2.5 7c0 2 .7 3.8 2 5.2M8 2c3 0 5.5 2.2 5.5 5 0 2-.7 3.8-2 5.2M8 4.5c1.7 0 3 1.1 3 2.5 0 1.8-.5 3.4-1.4 4.8M8 4.5C6.3 4.5 5 5.6 5 7c0 1.8.5 3.4 1.4 4.8M8 7v.1"/></svg>,
-    refresh:     <svg {...s} viewBox="0 0 16 16" {...p}><path d="M1.5 5.5a6.5 6.5 0 1010.95 5.45M7 1v4l-2.5-2.5M9 5L11.5 2.5"/></svg>,
+    refresh:     <svg {...s} viewBox="0 0 16 16" {...p}><path d="M8 2.5A5.5 5.5 0 1 0 13.5 8"/><path d="M13.5 5v3h-3"/></svg>,
   };
 
   return <span className="inline-flex items-center">{icons[name] ?? null}</span>;

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { KebabBtn } from '../ui/KebabBtn';
 import { ContextMenu } from '../ui/ContextMenu';
-import { CatDots } from './SecretRow';
+import { CatBadges } from './SecretRow';
 import { useVaultStore } from '../../store';
 import type { NoteItem, Category } from '../../types';
 
@@ -64,7 +64,7 @@ export function NoteRow({ item, cats, selected, onToggle, onShare, onSelect }: P
         <span className="flex-1 text-[13px] font-semibold text-tx overflow-hidden text-ellipsis whitespace-nowrap">
           {item.title}
         </span>
-        <CatDots names={item.categories} cats={cats} />
+        <CatBadges names={item.categories} cats={cats} />
         <KebabBtn menuItems={kebab} />
       </div>
       {preview && (

@@ -4,7 +4,7 @@ import { KebabBtn } from '../ui/KebabBtn';
 import { CmdHL } from '../ui/CmdHL';
 import { Icon } from '../ui/Icon';
 import { ContextMenu } from '../ui/ContextMenu';
-import { CatDots } from './SecretRow';
+import { CatBadges } from './SecretRow';
 import { useVaultStore } from '../../store';
 import type { CommandItem, Category } from '../../types';
 
@@ -77,7 +77,7 @@ export function CommandRow({ item, cats, selected, onToggle, onShare, onSelect }
         <span className="text-[0.65rem] px-1.5 py-0.5 border border-bd rounded text-tx3 font-mono tracking-wide shrink-0">
           {item.shell}
         </span>
-        <CatDots names={item.categories} cats={cats} />
+        <CatBadges names={item.categories} cats={cats} />
         <KebabBtn menuItems={kebab} />
       </div>
       {/* Command preview */}

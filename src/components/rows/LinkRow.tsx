@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { CopyBtn } from '../ui/CopyBtn';
 import { KebabBtn } from '../ui/KebabBtn';
 import { ContextMenu } from '../ui/ContextMenu';
-import { CatDots } from './SecretRow';
+import { CatBadges } from './SecretRow';
 import { useVaultStore } from '../../store';
 import type { LinkItem, Category } from '../../types';
 
@@ -66,7 +66,7 @@ export function LinkRow({ item, cats, selected, onToggle, onShare, onSelect }: P
         <span className="flex-1 text-[13px] font-semibold text-tx overflow-hidden text-ellipsis whitespace-nowrap">
           {item.title}
         </span>
-        <CatDots names={item.categories} cats={cats} />
+        <CatBadges names={item.categories} cats={cats} />
         <CopyBtn value={item.url} label="URL" />
         <KebabBtn menuItems={kebab} />
       </div>

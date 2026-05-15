@@ -29,12 +29,16 @@ export function MainVault() {
 
   const [query,      setQuery]      = useState('');
   const [typeF,      setTypeF]      = useState<TypeFilter>('all');
+  const [catF,       setCatF]       = useState<Set<string>>(new Set());
+  const [catOpen,    setCatOpen]    = useState(false);
   const [loading,    setLoading]    = useState(true);
   const [shareMode,  setShareMode]  = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [showShareModal, setShowShareModal] = useState(false);
   const [reloading,  setReloading]  = useState(false);
-  const ref = useRef<HTMLInputElement>(null);
+  const ref       = useRef<HTMLInputElement>(null);
+  const catBtnRef = useRef<HTMLButtonElement>(null);
+  const catMenuRef = useRef<HTMLDivElement>(null);
 
   const toggleItem = useCallback((id: number) => {
     setSelectedIds((prev) => {
@@ -81,9 +85,24 @@ export function MainVault() {
     ref.current?.focus();
   }, []);
 
+  useEffect(() => {
+    if (!catOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (
+        catMenuRef.current && !catMenuRef.current.contains(e.target as Node) &&
+        catBtnRef.current && !catBtnRef.current.contains(e.target as Node)
+      ) {
+        setCatOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [catOpen]);
+
   const filtered = useMemo(() => {
     return items.filter((it) => {
       if (typeF !== 'all' && it.type !== typeF) return false;
+      if (catF.size > 0 && !it.categories.some((c) => catF.has(c))) return false;
       const q = query.toLowerCase();
       if (!q) return true;
       const name = (('name' in it ? it.name : 'title' in it ? it.title : '') as string).toLowerCase();
@@ -92,7 +111,7 @@ export function MainVault() {
       const user = (('username' in it ? it.username : '') as string).toLowerCase();
       return name.includes(q) || val.includes(q) || desc.includes(q) || user.includes(q) || it.categories.join(' ').toLowerCase().includes(q);
     });
-  }, [items, typeF, query]);
+  }, [items, typeF, catF, query]);
 
   const typeCounts = useMemo(() => {
     const c = { all: items.length, secret: 0, credential: 0, link: 0, command: 0, note: 0 };
@@ -120,6 +139,79 @@ export function MainVault() {
             <Icon name="close" size={14} />
           </button>
         )}
+        <div className="relative">
+          <button
+            ref={catBtnRef}
+            onClick={() => setCatOpen((v) => !v)}
+            title="Filter by category"
+            className={[
+              'flex items-center justify-center w-6 h-6 rounded-md transition',
+              catF.size > 0
+                ? 'text-accent bg-accent-b hover:opacity-80'
+                : 'text-tx3 hover:text-tx hover:bg-raised',
+            ].join(' ')}
+          >
+            <Icon name="funnel" size={14} />
+          </button>
+          {catOpen && (
+            <div
+              ref={catMenuRef}
+              className="absolute right-0 top-8 z-50 min-w-[180px] bg-bg border border-bd rounded-md shadow-lg py-1 flex flex-col"
+            >
+              <div className="px-3 py-1.5 text-[0.6rem] font-mono text-tx3 tracking-[0.1em] border-b border-bd">
+                FILTER BY CATEGORY
+              </div>
+              {cats.length === 0 ? (
+                <div className="px-3 py-2 text-xs text-tx3 italic">No categories</div>
+              ) : (
+                cats.map((cat) => {
+                  const active = catF.has(cat.name);
+                  return (
+                    <button
+                      key={cat.id}
+                      onClick={() => {
+                        setCatF((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(cat.name)) next.delete(cat.name);
+                          else next.add(cat.name);
+                          return next;
+                        });
+                      }}
+                      className={[
+                        'flex items-center gap-2 px-3 py-1.5 text-left w-full',
+                        'text-[12px] font-ui transition-colors duration-100',
+                        active ? 'bg-raised text-tx' : 'text-tx2 hover:bg-raised hover:text-tx',
+                      ].join(' ')}
+                    >
+                      <span
+                        className="w-2 h-2 rounded-full shrink-0"
+                        style={{ background: cat.color }}
+                      />
+                      <span className="flex-1 truncate">{cat.name}</span>
+                      {active && (
+                        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M2.5 8.5l4 4 7-8" />
+                        </svg>
+                      )}
+                    </button>
+                  );
+                })
+              )}
+              {catF.size > 0 && (
+                <>
+                  <div className="border-t border-bd mt-1" />
+                  <button
+                    onClick={() => setCatF(new Set())}
+                    className="flex items-center gap-2 px-3 py-1.5 text-[11px] font-ui text-tx3 hover:text-tx hover:bg-raised transition-colors w-full text-left"
+                  >
+                    <Icon name="close" size={11} />
+                    Clear filter
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
         <button
           onClick={handleReload}
           disabled={reloading}

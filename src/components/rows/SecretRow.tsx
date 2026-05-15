@@ -16,22 +16,59 @@ interface Props {
   onSelect?: (id: number) => void;
 }
 
-function CatDots({ names, cats }: { names: string[]; cats: Category[] }) {
+const BADGE_VISIBLE_MAX = 2;
+
+export function CatBadges({ names, cats }: { names: string[]; cats: Category[] }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (names.length === 0) return null;
+
+  const visible  = expanded ? names : names.slice(0, BADGE_VISIBLE_MAX);
+  const overflow = names.length - BADGE_VISIBLE_MAX;
+
   return (
-    <div className="flex gap-1.5 shrink-0">
-      {names.slice(0, 3).map((name) => {
+    <div className="flex items-center gap-1 flex-wrap shrink-0 max-w-[160px]">
+      {visible.map((name) => {
         const c = cats.find((x) => x.name === name);
+        const color = c?.color ?? '#4a5268';
         return (
           <span
             key={name}
             title={name}
-            className="w-2 h-2 rounded-full inline-block shrink-0"
-            style={{ background: c?.color ?? '#4a5268' }}
-          />
+            className="inline-flex items-center px-1.5 h-[18px] rounded-sm border text-[0.6rem] font-mono tracking-wide font-medium shrink-0 max-w-[72px] overflow-hidden text-ellipsis whitespace-nowrap"
+            style={{
+              borderColor: color,
+              color:        color,
+              background:   `color-mix(in oklch, ${color} 12%, transparent)`,
+            }}
+          >
+            {name}
+          </span>
         );
       })}
+      {!expanded && overflow > 0 && (
+        <button
+          onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
+          className="inline-flex items-center px-1.5 h-[18px] rounded-sm border border-bd2 bg-raised text-tx3 text-[0.6rem] font-mono tracking-wide shrink-0 cursor-pointer hover:border-bd hover:text-tx2 transition-colors"
+        >
+          +{overflow}
+        </button>
+      )}
+      {expanded && names.length > BADGE_VISIBLE_MAX && (
+        <button
+          onClick={(e) => { e.stopPropagation(); setExpanded(false); }}
+          className="inline-flex items-center px-1.5 h-[18px] rounded-sm border border-bd2 bg-raised text-tx3 text-[0.6rem] font-mono tracking-wide shrink-0 cursor-pointer hover:border-bd hover:text-tx2 transition-colors"
+        >
+          less
+        </button>
+      )}
     </div>
   );
+}
+
+/** @deprecated Use CatBadges instead */
+function CatDots({ names, cats }: { names: string[]; cats: Category[] }) {
+  return <CatBadges names={names} cats={cats} />;
 }
 
 export function SecretRow({ item, cats, selected, onToggle, onShare, onSelect }: Props) {
@@ -102,7 +139,7 @@ export function SecretRow({ item, cats, selected, onToggle, onShare, onSelect }:
         <span className="flex-1 text-[13px] font-semibold font-mono text-tx overflow-hidden text-ellipsis whitespace-nowrap">
           {item.name}
         </span>
-        <CatDots names={item.categories} cats={cats} />
+        <CatBadges names={item.categories} cats={cats} />
       </div>
       {/* Value row */}
       <div className="flex items-center gap-2 pl-5">

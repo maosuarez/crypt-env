@@ -38,7 +38,7 @@ jobs:
           workspaces: './src-tauri -> target'
 
       - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install
 
       - name: Extract version from tag
         id: version
@@ -86,7 +86,7 @@ jobs:
           workspaces: './src-tauri -> target'
 
       - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install
 
       - name: Extract version from tag
         id: version
@@ -144,7 +144,7 @@ jobs:
             patchelf
 
       - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install
 
       - name: Extract version from tag
         id: version

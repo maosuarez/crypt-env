@@ -45,9 +45,7 @@ CryptEnv's MCP server integrates with AI coding agents (Claude Code, Claude Desk
 
 ## 🖥️ Screenshots
 
-![Lock Screen](/docs/images/lockscreen.png "Lock Screen")
-
-![Main View](/docs/images/mainscreen.png "Main View")
+![Promotion](/docs/images/imagen_readme.png "Promotion")
 
 ---
 

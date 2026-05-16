@@ -1,10 +1,15 @@
 # bump-version.ps1 — Read current versions, prompt for new version, update all files, then build.
 # Usage (interactive): .\bump-version.ps1
-# Usage (CI):          .\bump-version.ps1 -Version 0.3.0 [-Build]
+# Usage (CI):          .\bump-version.ps1 -Version 0.3.0 [-Build] [-Release]
+#
+# -Build    Run 'pnpm tauri build' locally (Windows only) after bumping
+# -Release  Commit the version bump, create tag vX.Y.Z, and push — triggers GitHub Actions
+#           (builds Windows + macOS + Linux and publishes the GitHub release automatically)
 [CmdletBinding()]
 param(
     [string] $Version,
-    [switch] $Build
+    [switch] $Build,
+    [switch] $Release
 )
 
 $Root        = Split-Path $PSScriptRoot -Parent
@@ -77,6 +82,7 @@ Write-Host "  tauri.conf.json -> $(Get-Version $TauriConf '"version"')"
 Write-Host "  package.json    -> $(Get-Version $PackageJson '"version"')"
 Write-Host ""
 
+# --- Local build (Windows only) ---
 $shouldBuild = if ($Version) { $Build } else {
     $confirm = Read-Host "Run 'pnpm tauri build' now? [Y/n]"
     $confirm -eq '' -or $confirm -match '^[Yy]'
@@ -84,9 +90,45 @@ $shouldBuild = if ($Version) { $Build } else {
 
 if ($shouldBuild) {
     Write-Host ""
-    Write-Host "Building..." -ForegroundColor Cyan
+    Write-Host "Building locally (Windows)..." -ForegroundColor Cyan
     Set-Location $Root
     pnpm tauri build
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Local build failed. Aborting release."
+        exit 1
+    }
 } else {
-    Write-Host "Build skipped." -ForegroundColor Yellow
+    Write-Host "Local build skipped." -ForegroundColor Yellow
+}
+
+# --- Release: commit + tag + push → triggers GitHub Actions ---
+$shouldRelease = if ($Version) { $Release } else {
+    $confirm = Read-Host "Create git tag v$NewVersion and push to trigger GitHub Actions release? [Y/n]"
+    $confirm -eq '' -or $confirm -match '^[Yy]'
+}
+
+if ($shouldRelease) {
+    Write-Host ""
+    Write-Host "Creating release v$NewVersion ..." -ForegroundColor Cyan
+    Set-Location $Root
+
+    # Stage the three versioned files
+    git add src-tauri/Cargo.toml src-tauri/tauri.conf.json package.json
+    if ($LASTEXITCODE -ne 0) { Write-Error "git add failed"; exit 1 }
+
+    git commit -m "chore: bump version to $NewVersion"
+    if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
+    Write-Host "  [OK] Committed version bump"
+
+    git tag "v$NewVersion"
+    if ($LASTEXITCODE -ne 0) { Write-Error "git tag failed (tag may already exist)"; exit 1 }
+    Write-Host "  [OK] Tagged v$NewVersion"
+
+    git push origin HEAD --follow-tags
+    if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
+    Write-Host "  [OK] Pushed — GitHub Actions will now build Windows, macOS, and Linux" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Track progress at: https://github.com/maosuarez/crypt-env/actions" -ForegroundColor Cyan
+} else {
+    Write-Host "Release skipped. Run 'git tag v$NewVersion && git push origin HEAD --follow-tags' manually when ready." -ForegroundColor Yellow
 }

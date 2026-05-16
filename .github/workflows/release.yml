@@ -179,6 +179,23 @@ jobs:
           name: linux-artifacts
           path: dist/linux
 
+      - name: Flatten release assets
+        run: |
+          mkdir -p release
+          # Windows installer + CLI binaries
+          find dist/windows -name "*.exe" | xargs -I{} cp {} release/
+          # macOS .dmg + CLI binaries (renamed to avoid collision with Linux)
+          find dist/macos -name "*.dmg" | xargs -I{} cp {} release/
+          find dist/macos -name "crypt-env" -not -name "*.exe" | xargs -I{} cp {} release/crypt-env-macos
+          find dist/macos -name "crypt-env-mcp" -not -name "*.exe" | xargs -I{} cp {} release/crypt-env-mcp-macos
+          # Linux .deb, .AppImage + CLI binaries
+          find dist/linux -name "*.deb" | xargs -I{} cp {} release/
+          find dist/linux -name "*.AppImage" | xargs -I{} cp {} release/
+          find dist/linux -name "crypt-env" -not -name "*.exe" | xargs -I{} cp {} release/crypt-env-linux
+          find dist/linux -name "crypt-env-mcp" -not -name "*.exe" | xargs -I{} cp {} release/crypt-env-mcp-linux
+          echo "--- release assets ---"
+          ls -lh release/
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -201,7 +218,13 @@ jobs:
             Or use the `.AppImage` — make it executable and run it directly.
 
             ### CLI and MCP binaries
-            Copy `crypt-env` (or `crypt-env.exe`) and `crypt-env-mcp` (or `crypt-env-mcp.exe`) to a directory on your `PATH`.
+            | File | Platform |
+            |------|----------|
+            | `crypt-env.exe` / `crypt-env-mcp.exe` | Windows |
+            | `crypt-env-macos` / `crypt-env-mcp-macos` | macOS |
+            | `crypt-env-linux` / `crypt-env-mcp-linux` | Linux |
+
+            Copy to a directory on your `PATH`.
 
             ### MCP Integration (Claude Code / Claude Desktop)
             After copying `crypt-env-mcp` to your PATH, add this to your agent config:
@@ -216,14 +239,6 @@ jobs:
             }
             ```
             The main CryptEnv app must be running and unlocked. Generate an MCP token in **Settings → Integrations**.
-          files: |
-            dist/windows/*.exe
-            dist/macos/*.dmg
-            dist/macos/crypt-env-mcp
-            dist/macos/crypt-env
-            dist/linux/*.deb
-            dist/linux/*.AppImage
-            dist/linux/crypt-env-mcp
-            dist/linux/crypt-env
+          files: release/*
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}

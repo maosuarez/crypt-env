@@ -24,10 +24,33 @@ CryptEnv's MCP server integrates with AI coding agents (Claude Code, Claude Desk
 - **Clipboard-first** — copy any secret in one click
 - **Export formats** — generate `.env`, `export VAR=val` or `$env:VAR = "val"` from any secret
 - **Command runner** — store terminal commands with `{{placeholders}}` and fill them on the fly
+- **Windows Hello biometric unlock** — unlock vault with fingerprint or face recognition (Windows 10/11)
 - **Auto-lock** — vault locks automatically after configurable inactivity timeout
+- **Backup & restore** — export encrypted `.cenvbak` backups and restore with merge or replace modes
+- **Import from password managers** — import from `.env` files, Bitwarden, 1Password, or generic CSV
+- **Change master password** — update vault password and re-encrypt all items atomically
+- **Vault wipe** — permanently delete all vault data
 - **CLI** — manage your vault from the terminal with `crypt-env` commands
 - **Local REST API** — integrate with your own tools at `127.0.0.1:47821`
 - **MCP server** — let AI agents (like Claude) inject secrets as environment variables without seeing them in plain text
+
+---
+
+## 🔐 Windows Hello Biometric Unlock
+
+On Windows 10/11, CryptEnv can unlock your vault using Windows Hello (fingerprint, face, or PIN) instead of typing your master password every time. The master password is stored encrypted with DPAPI (Windows Data Protection API), scoped to your user account and machine.
+
+### How it works
+
+1. **Enrollment**: Go to Settings → Biometric Unlock → ENABLE. Enter your master password and perform Windows Hello authentication once to enroll.
+2. **Unlock**: On the lock screen, click "UNLOCK WITH WINDOWS HELLO" and authenticate with your biometric method.
+3. **Security**: Your master password is protected by Windows DPAPI and only accessible if you pass Windows Hello verification. The password is never stored in plaintext.
+
+### Disabling
+
+In Settings → Biometric Unlock → DISABLE. This immediately clears the stored DPAPI blob; biometric unlock is no longer available until you re-enroll.
+
+**Note**: Biometric unlock is Windows-only and requires Windows Hello to be configured on your device. On macOS and Linux, the option is not available.
 
 ---
 
@@ -364,6 +387,87 @@ All share operations (send, receive, import, export) are logged in the vault's `
 - Item IDs shared
 - Peer fingerprint (LAN mode) or timestamp
 - Exact timestamp (ISO 8601)
+
+---
+
+## 💾 Backup & Restore
+
+CryptEnv lets you export your vault to encrypted `.cenvbak` files for backup and recovery.
+
+### Export (Backup)
+
+From the main vault, go to Settings → Backup & Restore → EXPORT BACKUP.
+
+1. Specify a file path (e.g., `C:\Users\you\Desktop\vault-backup`). The `.cenvbak` extension is appended automatically.
+2. Click EXPORT BACKUP. All items and categories are encrypted and written to the file.
+3. The backup preserves your vault's encryption key material — you only need your original master password to restore.
+
+**Security**: Your backup is as secure as your vault. Items remain AES-256-GCM encrypted with the same key.
+
+### Restore (Import)
+
+From Settings → Backup & Restore → RESTORE BACKUP.
+
+1. Select a `.cenvbak` file.
+2. Enter the master password that was in use when the backup was created.
+3. Choose **MERGE** or **REPLACE**:
+   - **MERGE**: Adds items from the backup to your existing vault. Duplicates are inserted as new entries.
+   - **REPLACE**: Wipes your entire vault and restores it to the backup's state. This cannot be undone.
+4. Click MERGE INTO VAULT or REPLACE VAULT to proceed.
+
+**Returns**: The number of items successfully restored.
+
+---
+
+## 📥 Import from Password Manager
+
+Migrate secrets from other password managers or `.env` files into your CryptEnv vault.
+
+From Settings → Data → IMPORT FROM PASSWORD MANAGER.
+
+### Supported Formats
+
+- **ENV file (`.env`)** — standard KEY=VALUE pairs
+- **Bitwarden CSV** — exported from Bitwarden's vault
+- **1Password CSV** — exported from 1Password
+- **Generic CSV** — auto-detected columns (name, value, username, password, url, notes)
+
+### Workflow
+
+1. **Select format** — choose the import format that matches your source file.
+2. **Choose file** — select your `.env` or `.csv` file from disk.
+3. **Preview & select items** — review parsed items and choose which ones to import. Deselect any items you don't want.
+4. **Import** — items are re-encrypted with your vault key and added. Items with duplicate names are skipped.
+
+**Returns**: The count of items successfully imported, and the number of items skipped (duplicates).
+
+---
+
+## 🔑 Change Master Password
+
+Your master password can be changed at any time without losing access to your vault.
+
+From Settings → Security → CHANGE.
+
+1. Enter your **current master password**.
+2. Enter your **new password** (minimum 8 characters).
+3. Confirm the new password.
+4. Click CONFIRM CHANGE.
+
+Behind the scenes, all vault items are re-encrypted with the new password's derived key in a single atomic transaction. If the change succeeds, the new password applies immediately.
+
+---
+
+## 🗑️ Vault Wipe
+
+Permanently delete all vault data (items, categories, settings, and crypto material).
+
+From Settings → Data → WIPE ALL DATA.
+
+1. Click WIPE.
+2. Confirm in the dialog. This action **cannot be undone**.
+
+After wiping, your vault is reset to the initial state. On next launch, you will be prompted to create a new master password.
 
 ---
 
@@ -793,8 +897,11 @@ Contributions are welcome! CryptEnv is actively developed and there's a lot of g
 - [x] Local REST API (Axum, port 47821)
 - [x] MCP server (JSON-RPC 2.0 over stdio)
 - [x] Rate limiting on `/unlock` endpoint (5 attempts per 60s)
+- [x] Windows Hello biometric unlock (fingerprint, face, PIN)
 - [x] Import from password managers (ENV, Bitwarden CSV, 1Password CSV)
-- [x] Encrypted backup (`.cenvbak` format)
+- [x] Encrypted backup & restore (`.cenvbak` format)
+- [x] Change master password (atomic re-encryption)
+- [x] Vault wipe (permanent data deletion)
 - [ ] macOS & Linux support (in progress)
 
 ---

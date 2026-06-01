@@ -1,9 +1,18 @@
 import { useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './ui/Icon';
 import { useVaultStore } from '../store';
 import { useWorkspaceStore } from '../store/workspaceStore';
 import type { WorkspaceVar } from '../types';
 import type { WorkspaceTemplate } from '../types';
+
+interface ExportedWorkspace {
+  version: number;
+  name: string;
+  description?: string;
+  template: string;
+  vars: Array<{ key: string; literal?: string }>;
+}
 
 // ─── Template definitions ─────────────────────────────────────────────────────
 
@@ -67,49 +76,77 @@ function VarRow({
   onChange:   (updated: WorkspaceVar) => void;
   onDelete:   () => void;
 }) {
+  const isLiteral = v.itemId == null;
+
   return (
-    <div className="flex items-center gap-2 py-1.5 border-b border-bd">
-      {/* Key */}
-      <input
-        value={v.key}
-        onChange={(e) => onChange({ ...v, key: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '') })}
-        placeholder="KEY_NAME"
-        className="w-[160px] bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-2 py-[4px] outline-none focus:border-accent-d transition-colors"
-      />
-      {/* Source */}
-      <select
-        value={v.itemId != null ? `item:${v.itemId}` : 'literal'}
-        onChange={(e) => {
-          const val = e.target.value;
-          if (val === 'literal') {
-            onChange({ ...v, itemId: undefined, literal: v.literal ?? '' });
-          } else {
-            const id = parseInt(val.replace('item:', ''), 10);
-            onChange({ ...v, itemId: id, literal: undefined });
-          }
-        }}
-        className="flex-1 bg-raised border border-bd2 text-tx rounded-[3px] px-2 py-[4px] text-[11px] font-ui cursor-pointer outline-none"
-      >
-        <option value="literal">— literal —</option>
-        {vaultItems.map((i) => (
-          <option key={i.id} value={`item:${i.id}`}>{i.name}</option>
-        ))}
-      </select>
-      {/* Literal input if not from vault */}
-      {v.itemId == null && (
+    <div className="py-2 border-b border-bd group">
+      {/* Row 1 — KEY + delete */}
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="text-[10px] font-mono text-tx3 uppercase tracking-widest w-[32px] shrink-0 select-none">
+          KEY
+        </span>
         <input
-          value={v.literal ?? ''}
-          onChange={(e) => onChange({ ...v, literal: e.target.value })}
-          placeholder="value"
-          className="w-[120px] bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-2 py-[4px] outline-none focus:border-accent-d transition-colors"
+          value={v.key}
+          onChange={(e) => onChange({ ...v, key: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '') })}
+          placeholder="KEY_NAME"
+          className="flex-1 bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-2 py-[4px] outline-none focus:border-accent-d transition-colors placeholder:text-tx3"
         />
-      )}
-      <button
-        onClick={onDelete}
-        className="text-tx3 hover:text-danger transition-colors shrink-0"
-      >
-        <Icon name="trash" size={13} />
-      </button>
+        <button
+          onClick={onDelete}
+          className="text-tx3 hover:text-danger transition-colors shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100"
+          tabIndex={0}
+          aria-label="Delete variable"
+        >
+          <Icon name="trash" size={13} />
+        </button>
+      </div>
+
+      {/* Row 2 — SOURCE (vault item or literal), indented */}
+      <div className="flex items-center gap-2 pl-[40px]">
+        {isLiteral ? (
+          <>
+            <button
+              onClick={() => {
+                const first = vaultItems[0];
+                if (first) onChange({ ...v, itemId: first.id, literal: undefined });
+                else onChange({ ...v, itemId: undefined, literal: v.literal ?? '' });
+              }}
+              className="shrink-0 text-[10px] font-mono text-tx3 border border-bd2 rounded-[3px] px-1.5 py-[3px] hover:border-accent-d hover:text-accent transition-colors whitespace-nowrap"
+              title="Switch to vault item"
+            >
+              literal
+            </button>
+            <input
+              value={v.literal ?? ''}
+              onChange={(e) => onChange({ ...v, literal: e.target.value })}
+              placeholder="value"
+              className="flex-1 bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-2 py-[4px] outline-none focus:border-accent-d transition-colors placeholder:text-tx3"
+            />
+          </>
+        ) : (
+          <>
+            <button
+              onClick={() => onChange({ ...v, itemId: undefined, literal: '' })}
+              className="shrink-0 text-[10px] font-mono text-accent border border-accent-d rounded-[3px] px-1.5 py-[3px] hover:bg-accent-b transition-colors whitespace-nowrap"
+              title="Switch to literal value"
+            >
+              vault
+            </button>
+            <select
+              value={`item:${v.itemId}`}
+              onChange={(e) => {
+                const id = parseInt(e.target.value.replace('item:', ''), 10);
+                onChange({ ...v, itemId: id, literal: undefined });
+              }}
+              className="flex-1 bg-raised border border-bd2 text-tx rounded-[3px] px-2 py-[4px] text-[11px] font-ui cursor-pointer outline-none focus:border-accent-d transition-colors"
+            >
+              {vaultItems.map((i) => (
+                <option key={i.id} value={`item:${i.id}`}>{i.name}</option>
+              ))}
+            </select>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -126,13 +163,15 @@ export function WorkspaceManager() {
   // Draft state for the editor panel
   const [name,        setName]        = useState('');
   const [description, setDescription] = useState('');
-  const [path,        setPath]        = useState('');
+  const [paths,       setPaths]       = useState<string[]>([]);
+  const [newPath,     setNewPath]     = useState('');
   const [template,    setTemplate]    = useState<WorkspaceTemplate>('generic');
   const [vars,        setVars]        = useState<WorkspaceVar[]>([]);
   const [saving,      setSaving]      = useState(false);
   const [injecting,   setInjecting]   = useState(false);
   const [confirmDel,  setConfirmDel]  = useState(false);
   const [templateModal, setTemplateModal] = useState(false);
+  const [isCreating,  setIsCreating]  = useState(false);
 
   useEffect(() => { load(); }, []);
 
@@ -140,12 +179,35 @@ export function WorkspaceManager() {
     if (selected) {
       setName(selected.name);
       setDescription(selected.description ?? '');
-      setPath(selected.path ?? '');
+      setPaths(selected.paths ?? []);
+      setNewPath('');
       setTemplate(selected.template as WorkspaceTemplate);
       setVars(selected.vars);
       setConfirmDel(false);
     }
   }, [selected?.id]);
+
+  const folderNameFromPath = (p: string): string => {
+    const normalized = p.replace(/\\/g, '/').replace(/\/[^/]+$/, '');
+    const parts = normalized.split('/').filter(Boolean);
+    return parts[parts.length - 1] ?? '';
+  };
+
+  const addPath = () => {
+    const trimmed = newPath.trim();
+    if (!trimmed || paths.includes(trimmed)) return;
+    const next = [...paths, trimmed];
+    setPaths(next);
+    if (!name && next.length === 1) {
+      const folder = folderNameFromPath(trimmed);
+      if (folder) setName(folder);
+    }
+    setNewPath('');
+  };
+
+  const removePath = (idx: number) => {
+    setPaths((prev) => prev.filter((_, i) => i !== idx));
+  };
 
   const vaultItems = items.map((i) => ({
     id:   i.id,
@@ -156,10 +218,12 @@ export function WorkspaceManager() {
     select(null);
     setName('');
     setDescription('');
-    setPath('');
+    setPaths([]);
+    setNewPath('');
     setTemplate('generic');
     setVars([]);
     setConfirmDel(false);
+    setIsCreating(true);
     setTemplateModal(true);
   };
 
@@ -180,10 +244,11 @@ export function WorkspaceManager() {
         id:          selected?.id,
         name:        name.trim(),
         description: description || undefined,
-        path:        path || undefined,
+        paths,
         template,
         vars,
       });
+      setIsCreating(false);
       showToast('Workspace saved');
     } catch (e) {
       showToast(String(e), 'error');
@@ -204,11 +269,12 @@ export function WorkspaceManager() {
 
   const handleInject = async () => {
     if (!selected) return;
-    if (!path) { showToast('Set a path before injecting', 'error'); return; }
+    if (paths.length === 0) { showToast('Add at least one path before injecting', 'error'); return; }
     setInjecting(true);
     try {
       const result = await inject(selected.id);
-      showToast(`Injected ${result.written.length} variable${result.written.length !== 1 ? 's' : ''} → ${result.path}`);
+      const pathLabel = result.paths.length === 1 ? result.paths[0] : `${result.paths.length} paths`;
+      showToast(`Injected ${result.written.length} variable${result.written.length !== 1 ? 's' : ''} → ${pathLabel}`);
     } catch (e) {
       showToast(String(e), 'error');
     } finally {
@@ -220,7 +286,59 @@ export function WorkspaceManager() {
     setVars((v) => [...v, { id: -(Date.now()), key: '', itemId: undefined, literal: '' }]);
   };
 
-  const isEditing = selected !== null || name !== '';
+  const handlePickEnvPath = async () => {
+    try {
+      const picked = await invoke<string | null>('workspace_pick_env_path');
+      if (picked) {
+        const trimmed = picked.trim();
+        if (!paths.includes(trimmed)) {
+          const next = [...paths, trimmed];
+          setPaths(next);
+          if (!name && next.length === 1) {
+            const folder = folderNameFromPath(trimmed);
+            if (folder) setName(folder);
+          }
+        }
+      }
+    } catch (e) {
+      showToast(String(e), 'error');
+    }
+  };
+
+  const handleExport = async () => {
+    if (!selected) return;
+    try {
+      await invoke('workspace_export', { workspaceId: selected.id });
+      showToast('Workspace exported');
+    } catch (e) {
+      if (String(e) !== 'cancelled') showToast(String(e), 'error');
+    }
+  };
+
+  const handleImport = async () => {
+    try {
+      const ws = await invoke<ExportedWorkspace>('workspace_import');
+      select(null);
+      setIsCreating(true);
+      setName(ws.name);
+      setDescription(ws.description ?? '');
+      setTemplate(ws.template as WorkspaceTemplate);
+      setVars(ws.vars.map((v, idx) => ({
+        id: -(idx + 1),
+        key: v.key,
+        itemId: undefined,
+        literal: v.literal ?? '',
+      })));
+      setPaths([]);
+      setNewPath('');
+      setConfirmDel(false);
+      showToast('Workspace imported — set paths and map vault refs, then save');
+    } catch (e) {
+      if (String(e) !== 'cancelled') showToast(String(e), 'error');
+    }
+  };
+
+  const isEditing = selected !== null || isCreating;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden animate-fade-in relative">
@@ -233,6 +351,12 @@ export function WorkspaceManager() {
           <Icon name="back" size={13} />Back
         </button>
         <div className="flex-1 text-[13px] font-semibold text-center text-tx">Workspaces</div>
+        <button
+          onClick={handleImport}
+          className="flex items-center gap-1 text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors"
+        >
+          IMPORT
+        </button>
         <button
           onClick={handleNew}
           className="flex items-center gap-1 text-[11px] font-bold font-ui text-accent border border-accent-d rounded-[3px] px-2.5 py-[4px] hover:bg-accent-b transition-colors"
@@ -255,7 +379,7 @@ export function WorkspaceManager() {
           {workspaces.map((ws) => (
             <button
               key={ws.id}
-              onClick={() => select(ws)}
+              onClick={() => { setIsCreating(false); select(ws); }}
               className={[
                 'w-full text-left px-3 py-2.5 border-b border-bd transition-colors',
                 selected?.id === ws.id
@@ -310,17 +434,45 @@ export function WorkspaceManager() {
                   />
                 </div>
 
-                {/* Path */}
+                {/* Paths */}
                 <div className="mb-3">
                   <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">
-                    PATH <span className="text-tx3 normal-case tracking-normal font-normal">.env file path for inject</span>
+                    PATHS <span className="text-tx3 normal-case tracking-normal font-normal">.env file paths for inject</span>
                   </div>
-                  <input
-                    value={path}
-                    onChange={(e) => setPath(e.target.value)}
-                    placeholder="C:\projects\myapp\.env"
-                    className="w-full bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-3 py-[7px] outline-none focus:border-accent-d transition-colors"
-                  />
+                  {paths.map((p, idx) => (
+                    <div key={idx} className="flex items-center gap-1.5 mb-1">
+                      <span className="flex-1 bg-bg border border-bd2 text-tx font-mono text-[11px] rounded-[3px] px-2 py-[5px] truncate">{p}</span>
+                      <button
+                        onClick={() => removePath(idx)}
+                        className="text-tx3 hover:text-danger transition-colors shrink-0"
+                      >
+                        <Icon name="trash" size={12} />
+                      </button>
+                    </div>
+                  ))}
+                  <div className="flex gap-1.5 mt-1">
+                    <input
+                      value={newPath}
+                      onChange={(e) => setNewPath(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addPath(); } }}
+                      placeholder="C:\projects\myapp\.env"
+                      className="flex-1 bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-3 py-[6px] outline-none focus:border-accent-d transition-colors"
+                    />
+                    <button
+                      onClick={handlePickEnvPath}
+                      title="Browse for .env file"
+                      className="px-2.5 py-[6px] rounded-[3px] text-[10px] font-bold font-ui text-tx2 border border-bd2 hover:text-tx transition-colors"
+                    >
+                      <Icon name="external" size={12} />
+                    </button>
+                    <button
+                      onClick={addPath}
+                      disabled={!newPath.trim()}
+                      className="px-2.5 py-[6px] rounded-[3px] text-[10px] font-bold font-ui text-accent border border-accent-d hover:bg-accent-b transition-colors disabled:opacity-40"
+                    >
+                      ADD
+                    </button>
+                  </div>
                 </div>
 
                 {/* Template */}
@@ -378,12 +530,21 @@ export function WorkspaceManager() {
                   {selected && (
                     <button
                       onClick={handleInject}
-                      disabled={injecting || !path}
+                      disabled={injecting || paths.length === 0}
                       className="flex items-center gap-1.5 px-3 py-[7px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-transparent border border-accent-d text-accent hover:bg-accent-b transition-colors disabled:opacity-40"
                     >
                       {injecting
                         ? <><div className="w-2.5 h-2.5 rounded-full border-2 border-transparent border-t-current animate-spin-fast" />INJECTING…</>
                         : <><Icon name="export" size={11} />INJECT TO PATH</>}
+                    </button>
+                  )}
+                  {/* Export */}
+                  {selected && (
+                    <button
+                      onClick={handleExport}
+                      className="px-3 py-[7px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-transparent border border-bd2 text-tx2 hover:text-tx transition-colors"
+                    >
+                      EXPORT
                     </button>
                   )}
                   <div className="flex-1" />

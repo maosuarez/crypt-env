@@ -12,7 +12,7 @@ interface WorkspaceStore {
   select:       (ws: Workspace | null) => void;
   save:         (ws: Omit<Workspace, 'id' | 'created' | 'updated'> & { id?: number; }) => Promise<number>;
   remove:       (id: number) => Promise<void>;
-  inject:       (id: number) => Promise<{ path: string; written: string[] }>;
+  inject:       (id: number) => Promise<{ paths: string[]; written: string[] }>;
   clearError:   () => void;
 }
 
@@ -41,7 +41,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
         id:          ws.id ?? 0,
         name:        ws.name,
         description: ws.description ?? null,
-        path:        ws.path ?? null,
+        paths:       ws.paths ?? [],
         template:    ws.template,
         vars:        ws.vars,
         created:     now,
@@ -64,7 +64,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
   },
 
   inject: async (id) => {
-    const result = await invoke<{ path: string; written: string[] }>('workspace_inject', { id });
+    const result = await invoke<{ paths: string[]; written: string[] }>('workspace_inject', { id });
     return result;
   },
 

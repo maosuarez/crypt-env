@@ -66,7 +66,7 @@ export interface Workspace {
   id:           number;
   name:         string;
   description?: string;
-  path?:        string;
+  paths:        string[];
   template:     string;
   created:      string;
   updated:      string;
@@ -77,7 +77,7 @@ export type WorkspaceTemplate =
   | 'generic' | 'node' | 'postgres' | 'mongo' | 'docker' | 'python';
 
 export interface InjectResult {
-  path:    string;
+  paths:   string[];
   written: string[];
 }
 

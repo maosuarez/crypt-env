@@ -27,7 +27,7 @@ export function CatBadges({ names, cats }: { names: string[]; cats: Category[] }
   const overflow = names.length - BADGE_VISIBLE_MAX;
 
   return (
-    <div className="flex items-center gap-1 flex-wrap shrink-0 max-w-[160px]">
+    <div className="flex items-center gap-1 flex-wrap shrink-0 max-w-[220px]">
       {visible.map((name) => {
         const c = cats.find((x) => x.name === name);
         const color = c?.color ?? '#4a5268';
@@ -35,7 +35,7 @@ export function CatBadges({ names, cats }: { names: string[]; cats: Category[] }
           <span
             key={name}
             title={name}
-            className="inline-flex items-center px-1.5 h-[18px] rounded-sm border text-[0.6rem] font-mono tracking-wide font-medium shrink-0 max-w-[72px] overflow-hidden text-ellipsis whitespace-nowrap"
+            className="inline-flex items-center px-1.5 py-0.5 rounded-sm border text-[0.6rem] font-mono tracking-wide font-medium shrink-0 leading-none whitespace-nowrap"
             style={{
               borderColor: color,
               color:        color,
@@ -49,7 +49,7 @@ export function CatBadges({ names, cats }: { names: string[]; cats: Category[] }
       {!expanded && overflow > 0 && (
         <button
           onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
-          className="inline-flex items-center px-1.5 h-[18px] rounded-sm border border-bd2 bg-raised text-tx3 text-[0.6rem] font-mono tracking-wide shrink-0 cursor-pointer hover:border-bd hover:text-tx2 transition-colors"
+          className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-bd2 bg-raised text-tx3 text-[0.6rem] font-mono tracking-wide shrink-0 leading-none cursor-pointer hover:border-bd hover:text-tx2 transition-colors"
         >
           +{overflow}
         </button>
@@ -57,7 +57,7 @@ export function CatBadges({ names, cats }: { names: string[]; cats: Category[] }
       {expanded && names.length > BADGE_VISIBLE_MAX && (
         <button
           onClick={(e) => { e.stopPropagation(); setExpanded(false); }}
-          className="inline-flex items-center px-1.5 h-[18px] rounded-sm border border-bd2 bg-raised text-tx3 text-[0.6rem] font-mono tracking-wide shrink-0 cursor-pointer hover:border-bd hover:text-tx2 transition-colors"
+          className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-bd2 bg-raised text-tx3 text-[0.6rem] font-mono tracking-wide shrink-0 leading-none cursor-pointer hover:border-bd hover:text-tx2 transition-colors"
         >
           less
         </button>

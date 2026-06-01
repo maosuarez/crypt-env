@@ -69,6 +69,7 @@ function RelayConfigSection({ showToast }: { showToast: (msg: string, type?: 'su
   const [showKey, setShowKey] = useState(false);
   const [sqlOpen, setSqlOpen] = useState(false);
   const [saving,  setSaving]  = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
 
   useEffect(() => {
     // Relay settings are persisted server-side; no need to load them here.
@@ -95,8 +96,7 @@ function RelayConfigSection({ showToast }: { showToast: (msg: string, type?: 'su
   return (
     <div className="mb-2">
       <div className="text-[11px] text-tx3 font-mono mb-2 leading-[1.6]">
-        Share secrets over the internet via an encrypted relay. Requires a free{' '}
-        <span className="text-accent">Supabase</span> project.
+        By default, a shared relay hosted by the developer is used. Your data is encrypted before upload — the relay cannot read it. Configure your own <span className="text-accent">Supabase</span> project below to use a private relay.
       </div>
       <div className="mb-2">
         <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">SUPABASE PROJECT URL</div>
@@ -134,12 +134,25 @@ function RelayConfigSection({ showToast }: { showToast: (msg: string, type?: 'su
           {saving ? <><div className="w-2.5 h-2.5 rounded-full border-2 border-transparent border-t-[#020504] animate-spin-fast" />SAVING…</> : 'SAVE RELAY'}
         </button>
         <button
+          onClick={() => setInfoOpen((v) => !v)}
+          className="text-[10px] font-ui font-medium text-tx3 border border-bd2 rounded-[3px] px-2 py-[5px] hover:text-tx transition-colors"
+        >
+          {infoOpen ? 'INFO ▲' : '▼ INFO'}
+        </button>
+        <button
           onClick={() => setSqlOpen((v) => !v)}
           className="text-[10px] font-ui font-medium text-tx3 border border-bd2 rounded-[3px] px-2 py-[5px] hover:text-tx transition-colors"
         >
           {sqlOpen ? 'HIDE SQL ▲' : 'SETUP SQL ▼'}
         </button>
       </div>
+      {infoOpen && (
+        <div className="mb-3 rounded-[3px] border border-bd2 bg-raised px-3 py-2 text-[10px] font-mono text-tx3 leading-[1.7]">
+          <div>Encryption: AES-256-GCM + Argon2id KDF</div>
+          <div>Burn-after-read, 24h TTL</div>
+          <div>The relay only stores encrypted ciphertext — not keys, not values</div>
+        </div>
+      )}
       {sqlOpen && (
         <div className="mb-3 rounded-[3px] border border-bd bg-raised">
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-bd">

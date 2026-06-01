@@ -979,10 +979,14 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
       <>
         <Breadcrumb path="INTERNET  /  SEND" />
         <SectionLabel>Send via encrypted relay</SectionLabel>
-        <p className="text-[12px] text-tx2 mb-4 leading-[1.6]">
+        <p className="text-[12px] text-tx2 mb-3 leading-[1.6]">
           Items will be encrypted end-to-end and uploaded to the relay. Share the code + passphrase with your teammate.
           The link is valid for <span className="text-accent font-mono">24 hours</span> and can only be retrieved once.
         </p>
+        <div className="bg-raised border border-bd2 rounded-[3px] px-3 py-2 text-[10px] text-tx3 font-mono leading-[1.7] mb-3 flex items-start gap-2">
+          <Icon name="shield" size={11} color="currentColor" />
+          <span>All data is end-to-end encrypted with AES-256-GCM before leaving your device. The relay server only stores ciphertext — it cannot read your secrets. Encrypted for 24 hours, burn-after-read.</span>
+        </div>
         <div className="flex items-center gap-2 mb-4">
           <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
           <span className="text-[11px] text-tx2 font-mono">
@@ -1007,6 +1011,10 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
       <>
         <Breadcrumb path="INTERNET  /  RECEIVE" />
         <SectionLabel>Enter relay code + passphrase</SectionLabel>
+        <div className="bg-raised border border-bd2 rounded-[3px] px-3 py-2 text-[10px] text-tx3 font-mono leading-[1.7] mb-3 flex items-start gap-2">
+          <Icon name="shield" size={11} color="currentColor" />
+          <span>All data is end-to-end encrypted with AES-256-GCM before leaving your device. The relay server only stores ciphertext — it cannot read your secrets. Encrypted for 24 hours, burn-after-read.</span>
+        </div>
         <div className="mb-3">
           <label className="block text-[10px] font-mono text-tx3 tracking-[0.08em] mb-1.5">CODE</label>
           <input

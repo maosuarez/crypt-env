@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod share;
 pub mod tls;
 pub mod vault;
+pub mod workspace;
 
 use vault::{
     biometric_check, biometric_disable, biometric_enroll, biometric_is_enrolled, biometric_unlock,
@@ -21,8 +22,10 @@ use vault::{
 };
 use vault::share_commands::{
     share_cancel, share_confirm_fingerprint, share_export_file, share_import_file,
-    share_poll_status, share_start_receive, share_start_send, SharedShareState,
+    share_poll_status, share_relay_receive, share_relay_send, share_start_receive,
+    share_start_send, SharedShareState,
 };
+use workspace::{workspace_delete, workspace_inject, workspace_list, workspace_save};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -159,6 +162,12 @@ pub fn run() {
             share_cancel,
             share_export_file,
             share_import_file,
+            share_relay_send,
+            share_relay_receive,
+            workspace_list,
+            workspace_save,
+            workspace_delete,
+            workspace_inject,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

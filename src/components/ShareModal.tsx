@@ -7,7 +7,7 @@ import { Icon } from './ui/Icon';
 // Types
 // ---------------------------------------------------------------------------
 
-type Method = 'lan' | 'file';
+type Method = 'lan' | 'file' | 'internet';
 type LanRole = 'send' | 'receive';
 
 type SessionState =
@@ -38,7 +38,11 @@ type Step =
   | 'done-file-import'
   | 'failed'
   | 'file-export'
-  | 'file-import';
+  | 'file-import'
+  | 'internet-send'
+  | 'internet-receive'
+  | 'internet-done-send'
+  | 'internet-done-receive';
 
 export interface ShareModalProps {
   selectedIds: number[];
@@ -326,6 +330,17 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
   const [importLoading, setImportLoading] = useState(false);
   const [importedNames, setImportedNames] = useState<string[]>([]);
 
+  // Internet relay state
+  const [relayCode,        setRelayCode]        = useState('');
+  const [relayPassphrase,  setRelayPassphrase]  = useState('');
+  const [relayLoading,     setRelayLoading]     = useState(false);
+  const [relayRxCode,      setRelayRxCode]      = useState('');
+  const [relayRxPass,      setRelayRxPass]      = useState('');
+  const [relayRxLoading,   setRelayRxLoading]   = useState(false);
+  const [relayRxNames,     setRelayRxNames]     = useState<string[]>([]);
+  const [copiedRelayCode,  setCopiedRelayCode]  = useState(false);
+  const [copiedRelayPass,  setCopiedRelayPass]  = useState(false);
+
   // Error state
   const [error, setError] = useState('');
   const [failedError, setFailedError] = useState('');
@@ -548,6 +563,27 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
           </button>
         </div>
 
+        {/* Internet Card (full-width row) */}
+        <button
+          onClick={() => { setMethod('internet'); setError(''); }}
+          className={[
+            'w-full border rounded-[4px] p-3 text-left transition-all duration-150 cursor-pointer mb-4',
+            method === 'internet'
+              ? 'bg-accent-b border-accent-d'
+              : 'bg-raised border-bd hover:border-bd2',
+          ].join(' ')}
+        >
+          <div className="flex items-center gap-3">
+            <Icon name="shield" size={15} color={method === 'internet' ? 'oklch(0.70 0.17 162)' : '#6b7899'} />
+            <div className="flex-1">
+              <span className={['text-[12px] font-bold tracking-wider font-ui', method === 'internet' ? 'text-accent' : 'text-tx'].join(' ')}>
+                INTERNET
+              </span>
+              <span className="text-[10px] text-tx3 font-mono ml-3">relay · burn-after-read · 24h TTL</span>
+            </div>
+          </div>
+        </button>
+
         {/* Item badge */}
         <div className="flex items-center gap-2 mb-4">
           <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
@@ -570,6 +606,20 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
             <Icon name="export" size={12} color="#020504" />
             EXPORT FILE
           </BtnPrimary>
+        )}
+
+        {/* INTERNET sub-actions */}
+        {method === 'internet' && (
+          <div className="flex gap-2">
+            <BtnPrimary onClick={() => setStep('internet-send')} className="flex-1" disabled={selectedIds.length === 0}>
+              <Icon name="export" size={12} color="#020504" />
+              SEND
+            </BtnPrimary>
+            <BtnSecondary onClick={() => setStep('internet-receive')} className="flex-1">
+              <Icon name="back" size={12} />
+              RECEIVE
+            </BtnSecondary>
+          </div>
         )}
 
         {error && <div className="mt-3"><InlineError msg={error} /></div>}
@@ -892,6 +942,186 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
     );
   }
 
+  // ─── Internet relay renderers ──────────────────────────────────────────────
+
+  async function handleRelayRelayLaunch() {
+    setRelayLoading(true);
+    setError('');
+    try {
+      const result = await invoke<{ code: string; passphrase: string }>('share_relay_send', { itemIds: selectedIds });
+      setRelayCode(result.code);
+      setRelayPassphrase(result.passphrase);
+      setStep('internet-done-send');
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRelayLoading(false);
+    }
+  }
+
+  async function handleRelayReceive() {
+    if (!relayRxCode || !relayRxPass) return;
+    setRelayRxLoading(true);
+    setError('');
+    try {
+      const names = await invoke<string[]>('share_relay_receive', { code: relayRxCode.toUpperCase(), passphrase: relayRxPass });
+      setRelayRxNames(names);
+      setStep('internet-done-receive');
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRelayRxLoading(false);
+    }
+  }
+
+  function renderInternetSend() {
+    return (
+      <>
+        <Breadcrumb path="INTERNET  /  SEND" />
+        <SectionLabel>Send via encrypted relay</SectionLabel>
+        <p className="text-[12px] text-tx2 mb-4 leading-[1.6]">
+          Items will be encrypted end-to-end and uploaded to the relay. Share the code + passphrase with your teammate.
+          The link is valid for <span className="text-accent font-mono">24 hours</span> and can only be retrieved once.
+        </p>
+        <div className="flex items-center gap-2 mb-4">
+          <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
+          <span className="text-[11px] text-tx2 font-mono">
+            Sending <span className="text-accent font-bold">{selectedIds.length}</span> item{selectedIds.length !== 1 ? 's' : ''}
+          </span>
+        </div>
+        {error && <div className="mb-3"><InlineError msg={error} /></div>}
+        <Divider />
+        <div className="flex justify-between">
+          <BtnSecondary onClick={() => { setStep('method'); setError(''); }}>BACK</BtnSecondary>
+          <BtnPrimary onClick={handleRelayRelayLaunch} disabled={relayLoading || selectedIds.length === 0}>
+            {relayLoading ? <Spinner /> : <Icon name="shield" size={12} color="#020504" />}
+            {relayLoading ? 'UPLOADING…' : 'UPLOAD & GET CODE'}
+          </BtnPrimary>
+        </div>
+      </>
+    );
+  }
+
+  function renderInternetReceive() {
+    return (
+      <>
+        <Breadcrumb path="INTERNET  /  RECEIVE" />
+        <SectionLabel>Enter relay code + passphrase</SectionLabel>
+        <div className="mb-3">
+          <label className="block text-[10px] font-mono text-tx3 tracking-[0.08em] mb-1.5">CODE</label>
+          <input
+            type="text"
+            value={relayRxCode}
+            onChange={(e) => setRelayRxCode(e.target.value.toUpperCase())}
+            placeholder="XXXX-XXXX"
+            maxLength={9}
+            className="w-full h-9 bg-raised border border-bd2 rounded-[3px] px-3 text-[15px] font-mono text-accent tracking-[0.2em] placeholder:text-tx3 outline-none focus:border-accent transition-colors"
+          />
+        </div>
+        <div className="mb-4">
+          <label className="block text-[10px] font-mono text-tx3 tracking-[0.08em] mb-1.5">PASSPHRASE</label>
+          <input
+            type="text"
+            value={relayRxPass}
+            onChange={(e) => setRelayRxPass(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleRelayReceive(); }}
+            placeholder="abc123XYZ…"
+            className="w-full h-9 bg-raised border border-bd2 rounded-[3px] px-3 text-[13px] font-mono text-tx placeholder:text-tx3 outline-none focus:border-accent transition-colors"
+          />
+        </div>
+        {error && <div className="mb-3"><InlineError msg={error} /></div>}
+        <Divider />
+        <div className="flex justify-between">
+          <BtnSecondary onClick={() => { setStep('method'); setError(''); }}>BACK</BtnSecondary>
+          <BtnPrimary onClick={handleRelayReceive} disabled={relayRxLoading || !relayRxCode || !relayRxPass}>
+            {relayRxLoading ? <Spinner /> : null}
+            {relayRxLoading ? 'DOWNLOADING…' : 'IMPORT'}
+          </BtnPrimary>
+        </div>
+      </>
+    );
+  }
+
+  function renderInternetDoneSend() {
+    const copyCode = () => { navigator.clipboard.writeText(relayCode); setCopiedRelayCode(true); setTimeout(() => setCopiedRelayCode(false), 2000); };
+    const copyPass = () => { navigator.clipboard.writeText(relayPassphrase); setCopiedRelayPass(true); setTimeout(() => setCopiedRelayPass(false), 2000); };
+    return (
+      <>
+        <Breadcrumb path="INTERNET  /  SEND  /  DONE" />
+        <div className="flex items-center gap-2 mb-4">
+          <div className="w-7 h-7 rounded-full bg-accent-b border border-accent-d flex items-center justify-center shrink-0">
+            <Icon name="check" size={13} color="oklch(0.70 0.17 162)" />
+          </div>
+          <div className="text-[13px] font-semibold text-tx">Uploaded successfully</div>
+        </div>
+
+        <SectionLabel>Send BOTH to your teammate via any channel</SectionLabel>
+
+        <div className="mb-3">
+          <div className="text-[9px] font-mono text-tx3 tracking-[0.08em] mb-1">CODE</div>
+          <div className="bg-raised border border-bd2 rounded-[3px] px-4 py-2.5 flex items-center gap-3">
+            <span className="flex-1 font-mono text-[18px] text-accent tracking-[0.3em] font-bold select-all">{relayCode}</span>
+            <button onClick={copyCode} className={['flex items-center gap-1.5 border rounded px-2 py-1 text-[10px] font-mono tracking-wide transition-all cursor-pointer', copiedRelayCode ? 'bg-accent-b border-accent-d text-accent' : 'border-bd2 text-tx3 bg-transparent hover:border-tx3'].join(' ')}>
+              <Icon name={copiedRelayCode ? 'check' : 'copy'} size={10} color={copiedRelayCode ? 'oklch(0.70 0.17 162)' : 'currentColor'} />
+              {copiedRelayCode ? 'COPIED' : 'COPY'}
+            </button>
+          </div>
+        </div>
+
+        <div className="mb-4">
+          <div className="text-[9px] font-mono text-tx3 tracking-[0.08em] mb-1">PASSPHRASE</div>
+          <div className="bg-raised border border-bd2 rounded-[3px] px-4 py-2.5 flex items-center gap-3">
+            <span className="flex-1 font-mono text-[13px] text-accent tracking-[0.05em] select-all break-all">{relayPassphrase}</span>
+            <button onClick={copyPass} className={['flex items-center gap-1.5 border rounded px-2 py-1 text-[10px] font-mono tracking-wide transition-all cursor-pointer', copiedRelayPass ? 'bg-accent-b border-accent-d text-accent' : 'border-bd2 text-tx3 bg-transparent hover:border-tx3'].join(' ')}>
+              <Icon name={copiedRelayPass ? 'check' : 'copy'} size={10} color={copiedRelayPass ? 'oklch(0.70 0.17 162)' : 'currentColor'} />
+              {copiedRelayPass ? 'COPIED' : 'COPY'}
+            </button>
+          </div>
+        </div>
+
+        <p className="text-[10px] text-tx3 font-mono leading-[1.5] mb-3">
+          The relay link expires in 24 hours and is destroyed after first use. Never share code + passphrase in the same message.
+        </p>
+        <Divider />
+        <div className="flex justify-end">
+          <BtnPrimary onClick={() => { onSendDone?.(); onClose(); }}>DONE</BtnPrimary>
+        </div>
+      </>
+    );
+  }
+
+  function renderInternetDoneReceive() {
+    return (
+      <>
+        <Breadcrumb path="INTERNET  /  RECEIVE  /  DONE" />
+        <div className="flex items-center gap-2 mb-4">
+          <div className="w-7 h-7 rounded-full bg-accent-b border border-accent-d flex items-center justify-center shrink-0">
+            <Icon name="check" size={13} color="oklch(0.70 0.17 162)" />
+          </div>
+          <div className="text-[13px] font-semibold text-tx">Import complete</div>
+        </div>
+        <div className="text-[11px] text-tx3 font-mono mb-3">
+          {relayRxNames.length} item{relayRxNames.length !== 1 ? 's' : ''} imported from relay:
+        </div>
+        <div className="bg-raised border border-bd rounded-[3px] divide-y divide-bd max-h-[120px] overflow-y-auto mb-4">
+          {relayRxNames.map((name, i) => (
+            <div key={i} className="px-3 py-2 text-[12px] font-mono text-tx2 flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
+              {name}
+            </div>
+          ))}
+        </div>
+        <Divider />
+        <div className="flex justify-end">
+          <BtnPrimary onClick={handleImportDoneClose}>
+            <Icon name="check" size={12} color="#020504" />
+            RELOAD VAULT
+          </BtnPrimary>
+        </div>
+      </>
+    );
+  }
+
   function renderFailed() {
     return (
       <>
@@ -931,9 +1161,13 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
       case 'done-send':       return renderDoneSend();
       case 'done-receive':    return renderDoneReceive();
       case 'done-file-export':return renderDoneFileExport();
-      case 'done-file-import':return renderDoneFileImport();
-      case 'failed':          return renderFailed();
-      default:                return null;
+      case 'done-file-import':    return renderDoneFileImport();
+      case 'internet-send':       return renderInternetSend();
+      case 'internet-receive':    return renderInternetReceive();
+      case 'internet-done-send':  return renderInternetDoneSend();
+      case 'internet-done-receive': return renderInternetDoneReceive();
+      case 'failed':              return renderFailed();
+      default:                    return null;
     }
   }
 

@@ -10,3 +10,4 @@ pub mod memory;
 pub mod search;
 pub mod set;
 pub mod share;
+pub mod tui;

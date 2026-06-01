@@ -360,13 +360,28 @@ pub async fn vault_wipe(state: State<'_, SharedState>) -> Result<(), String> {
 pub async fn vault_save_settings(
     auto_lock_timeout: i64,
     hotkey: String,
+    #[allow(unused_variables)]
+    relay_supabase_url: Option<String>,
+    #[allow(unused_variables)]
+    relay_supabase_anon_key: Option<String>,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
     let s = state.lock().await;
     s.db
         .set_setting("auto_lock_timeout", &auto_lock_timeout.to_string())
         .await?;
-    s.db.set_setting("hotkey", &hotkey).await
+    s.db.set_setting("hotkey", &hotkey).await?;
+    if let Some(url) = relay_supabase_url {
+        if !url.is_empty() {
+            s.db.set_setting("relay_supabase_url", &url).await?;
+        }
+    }
+    if let Some(key) = relay_supabase_anon_key {
+        if !key.is_empty() {
+            s.db.set_setting("relay_supabase_anon_key", &key).await?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

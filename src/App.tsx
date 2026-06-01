@@ -5,6 +5,7 @@ import { MainVault } from './components/MainVault';
 import { EditItem } from './components/EditItem';
 import { CategoryManager } from './components/CategoryManager';
 import { Settings } from './components/Settings';
+import { WorkspaceManager } from './components/WorkspaceManager';
 import { ContextMenu } from './components/ui/ContextMenu';
 import { Toast } from './components/ui/Toast';
 import { PlaceholderModal } from './components/ui/PlaceholderModal';
@@ -18,6 +19,7 @@ const SCREENS: Record<Screen, React.ReactElement> = {
   edit:       <EditItem />,
   categories: <CategoryManager />,
   settings:   <Settings />,
+  workspaces: <WorkspaceManager />,
 };
 
 export default function App() {

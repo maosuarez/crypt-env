@@ -77,6 +77,13 @@ rfd = "0.14"
 # rustls-tls-native-roots: use the OS trust store PLUS our custom cert addition
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls-native-roots"] }
 
+# base64 encoding for relay payloads
+base64 = "0.22"
+
+# TUI — used only by the crypt-env CLI binary
+ratatui = "0.29"
+crossterm = "0.28"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
     "Security_Credentials_UI",

@@ -41,6 +41,8 @@ enum Cmd {
     Share(commands::share::ShareArgs),
     /// Manage categories (list, create, edit, delete)
     Category(commands::category::CategoryArgs),
+    /// Interactive TUI — browse, search, and reveal secrets in the terminal
+    Tui(commands::tui::TuiArgs),
 }
 
 fn main() {
@@ -58,6 +60,7 @@ fn main() {
         Cmd::Cmd(args) => commands::cmd::run(args),
         Cmd::Share(args) => commands::share::run(args),
         Cmd::Category(args) => commands::category::run(args),
+        Cmd::Tui(args) => commands::tui::run(args),
     };
     if let Err(e) = result {
         eprintln!("{}", e);

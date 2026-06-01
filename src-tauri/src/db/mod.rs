@@ -11,6 +11,26 @@ pub struct DbCategory {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DbWorkspace {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub path: Option<String>,
+    pub template: String,
+    pub created: String,
+    pub updated: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DbWorkspaceVar {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub key: String,
+    pub item_id: Option<i64>,
+    pub literal: Option<String>,
+}
+
 pub struct VaultDb {
     pool: SqlitePool,
     path: String,
@@ -73,10 +93,32 @@ impl VaultDb {
                 .await
                 .map_err(|e| format!("schema init: {e}"))?;
         }
-        // Additive migration: add description column if it doesn't exist yet.
+        // Additive migrations
         let _ = sqlx::query("ALTER TABLE categories ADD COLUMN description TEXT")
             .execute(&self.pool)
             .await;
+        let migrations = [
+            "CREATE TABLE IF NOT EXISTS workspaces (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                description TEXT,
+                path        TEXT,
+                template    TEXT NOT NULL DEFAULT 'generic',
+                created     TEXT NOT NULL,
+                updated     TEXT NOT NULL
+            )",
+            "CREATE TABLE IF NOT EXISTS workspace_vars (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                key          TEXT NOT NULL,
+                item_id      INTEGER,
+                literal      TEXT,
+                UNIQUE(workspace_id, key)
+            )",
+        ];
+        for stmt in &migrations {
+            sqlx::query(stmt).execute(&self.pool).await.map_err(|e| format!("migration: {e}"))?;
+        }
         Ok(())
     }
 
@@ -316,6 +358,122 @@ impl VaultDb {
                 .map_err(|e| e.to_string())?;
         }
         tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn list_workspaces(&self) -> Result<Vec<DbWorkspace>, String> {
+        let rows = sqlx::query(
+            "SELECT id, name, description, path, template, created, updated FROM workspaces ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|r| DbWorkspace {
+                id: r.get(0),
+                name: r.get(1),
+                description: r.get(2),
+                path: r.get(3),
+                template: r.get(4),
+                created: r.get(5),
+                updated: r.get(6),
+            })
+            .collect())
+    }
+
+    /// id = 0 → INSERT, returns new id. id > 0 → UPDATE, returns same id.
+    pub async fn upsert_workspace(
+        &self,
+        id: i64,
+        name: &str,
+        description: Option<&str>,
+        path: Option<&str>,
+        template: &str,
+    ) -> Result<i64, String> {
+        let now = now_ts();
+        if id == 0 {
+            let res = sqlx::query(
+                "INSERT INTO workspaces (name, description, path, template, created, updated) VALUES (?1,?2,?3,?4,?5,?6)",
+            )
+            .bind(name)
+            .bind(description)
+            .bind(path)
+            .bind(template)
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(res.last_insert_rowid())
+        } else {
+            sqlx::query(
+                "UPDATE workspaces SET name=?1, description=?2, path=?3, template=?4, updated=?5 WHERE id=?6",
+            )
+            .bind(name)
+            .bind(description)
+            .bind(path)
+            .bind(template)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(id)
+        }
+    }
+
+    pub async fn delete_workspace(&self, id: i64) -> Result<(), String> {
+        sqlx::query("DELETE FROM workspaces WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn get_workspace_vars(&self, workspace_id: i64) -> Result<Vec<DbWorkspaceVar>, String> {
+        let rows = sqlx::query(
+            "SELECT id, workspace_id, key, item_id, literal FROM workspace_vars WHERE workspace_id = ?1 ORDER BY id ASC",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|r| DbWorkspaceVar {
+                id: r.get(0),
+                workspace_id: r.get(1),
+                key: r.get(2),
+                item_id: r.get(3),
+                literal: r.get(4),
+            })
+            .collect())
+    }
+
+    pub async fn set_workspace_vars(
+        &self,
+        workspace_id: i64,
+        vars: &[DbWorkspaceVar],
+    ) -> Result<(), String> {
+        sqlx::query("DELETE FROM workspace_vars WHERE workspace_id = ?1")
+            .bind(workspace_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        for v in vars {
+            sqlx::query(
+                "INSERT INTO workspace_vars (workspace_id, key, item_id, literal) VALUES (?1,?2,?3,?4)",
+            )
+            .bind(workspace_id)
+            .bind(&v.key)
+            .bind(v.item_id)
+            .bind(&v.literal)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 

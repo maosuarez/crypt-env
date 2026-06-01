@@ -76,6 +76,74 @@ The interface was previously designed with Claude. Refined industrial/utilitaria
 2. Main vault (list + fuzzy search + filters by type and category)
 3. Add/Edit item (dynamic form by type)
 4. Category manager (CRUD of editable categories)
-5. Settings (hotkey, timeout, master password)
+5. Settings (hotkey, timeout, master password, biometric unlock, workspaces, internet sharing)
 
 Consult the generated design before implementing any UI component.
+
+---
+
+## Recent Features (Session 4+)
+
+### 1. Workspaces
+New system to group environment variable references to vault items and manage `.env` files.
+
+**Modules & Commands**:
+- `src-tauri/src/workspace/mod.rs` — Core workspace logic
+- Tauri commands: `workspace_list`, `workspace_save`, `workspace_delete`, `workspace_inject`
+- Database tables: `workspaces`, `workspace_vars`
+
+**Features**:
+- Templates for common stacks: generic, node, postgres, mongo, docker, python
+- "Inject to Path" action writes decrypted KEY=VALUE pairs to specified .env file
+- Frontend: `WorkspaceManager.tsx`, `workspaceStore.ts` accessible from Settings
+
+**Example**: Create a workspace for a Node.js project, add references to `DB_HOST`, `DB_PASSWORD` vault items, then inject to `.env` with one click.
+
+---
+
+### 2. Interactive TUI (`crypt-env tui`)
+Terminal user interface for vault management without opening the GUI.
+
+**Module & Command**:
+- CLI subcommand: `crypt-env tui`
+- Source: `src-tauri/src/bin/crypt-env/commands/tui.rs`
+- Built with ratatui 0.29 + crossterm 0.28
+
+**Screens**:
+- Unlock (master password entry)
+- Main (item list + fuzzy search with `/`)
+- Item Detail (reveal/copy controls)
+- Help (`?`)
+- Confirm (for destructive operations)
+
+**Keybindings**:
+- Navigate: ↑↓ or jk
+- Fuzzy search: `/`
+- Detail view: Enter
+- Reveal secret: v
+- Copy to clipboard: c
+- Delete item: d
+- Refresh: r
+- Help: ?
+- Quit: q
+
+---
+
+### 3. Internet Relay Sharing
+Secure secret sharing via encrypted relay (Supabase table) for users on different networks.
+
+**Module & Commands**:
+- `src-tauri/src/share/relay.rs` — Relay protocol implementation
+- Tauri commands: `share_relay_send`, `share_relay_receive`
+
+**Flow**:
+1. **Sender**: Selects items → encrypts with AES-256-GCM → uploads to Supabase relay → receives `XXXX-XXXX` code + plaintext passphrase
+2. **Receiver**: Enters code + passphrase → downloads encrypted payload → decrypts → imports items
+3. **Security**: Burn-after-read, 24-hour TTL, Argon2id KDF from passphrase
+
+**Setup**:
+- Requires free Supabase project
+- Run relay setup SQL (provided in docs)
+- Store Supabase URL + anon key in Settings → Internet Sharing config
+
+**Frontend**: New "INTERNET" tab in ShareModal, relay configuration in Settings

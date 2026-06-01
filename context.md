@@ -18,23 +18,26 @@ Personal productivity vault for developers. Centralizes credentials, API keys, t
 ```
 crypt-env/
 ├── src/                          # React frontend
-│   ├── components/               # UI components by screen
-│   ├── store/                    # Global state with Zustand
+│   ├── components/               # UI components by screen (includes WorkspaceManager, ShareModal)
+│   ├── store/                    # Global state with Zustand (includes workspaceStore)
 │   ├── hooks/                    # Custom hooks for Tauri invoke()
 │   └── types/                    # Shared TypeScript types
 ├── src-tauri/
 │   ├── src/
 │   │   ├── main.rs               # Tauri entrypoint (initializes lib)
-│   │   ├── lib.rs                # Tauri command registry (19 commands), AppState setup
-│   │   ├── db/mod.rs             # SQLite pool, tables, CRUD items/categories/settings
+│   │   ├── lib.rs                # Tauri command registry, AppState setup
+│   │   ├── db/mod.rs             # SQLite pool, tables, CRUD items/categories/settings/workspaces
 │   │   ├── crypto/mod.rs         # Argon2id KDF + AES-256-GCM encrypt/decrypt
-│   │   ├── vault/mod.rs          # VaultState, 19 Tauri commands including backup/import
+│   │   ├── vault/mod.rs          # VaultState, Tauri commands for vault management
 │   │   ├── api/mod.rs            # Axum server on 127.0.0.1:47821, dual token auth
 │   │   ├── share/mod.rs          # Secure secret sharing (LAN bridge + encrypted packages)
+│   │   ├── share/relay.rs        # Internet relay sharing (Supabase-based)
+│   │   ├── workspace/mod.rs      # Workspace management for .env files and env var grouping
 │   │   ├── cli/mod.rs            # CLI module (stub)
 │   │   ├── mcp/mod.rs            # MCP module (stub)
 │   │   └── bin/
 │   │       ├── crypt-env.rs      # CLI standalone (clap), connects via HTTP to API
+│   │       │   └── commands/tui.rs  # Interactive TUI (ratatui-based)
 │   │       └── crypt-env-mcp.rs  # MCP JSON-RPC 2.0 server over stdio
 │   ├── Cargo.toml                # Rust dependencies
 │   └── tauri.conf.json           # Window config, permissions, hotkey
@@ -44,6 +47,11 @@ crypt-env/
 - Frontend → Tauri `invoke()` → registered Rust commands
 - CLI (`crypt-env`) → HTTP REST to `127.0.0.1:47821` with session/MCP token
 - MCP (`crypt-env-mcp`) → HTTP REST to `127.0.0.1:47821` with MCP token
+- TUI (`crypt-env tui`) → Direct vault access (Tauri command context, no HTTP)
+
+**New Tauri Commands** (Session 4+):
+- Workspace: `workspace_list`, `workspace_save`, `workspace_delete`, `workspace_inject`
+- Internet Relay: `share_relay_send`, `share_relay_receive`
 
 ## Vault Item Types
 1. **Secret / API Key**: name, encrypted value, category, notes. Export as `.env` / `export` / `$env:`
@@ -51,6 +59,123 @@ crypt-env/
 3. **Link**: title, URL, description, category
 4. **Command**: name, command, description, shell target (bash/zsh/sh/PowerShell), placeholders `{{VAR}}`
 5. **Note**: title, free-form content, category
+
+## Core Features Implemented (Session 4+)
+
+### Workspaces
+Grouping system for managing environment variables and `.env` files.
+
+- **Purpose**: Organize vault item references by project/context (Node.js, PostgreSQL, Docker, Python, etc.)
+- **Data Model**: 
+  - `workspaces` table: id, name, description, template_type, env_file_path
+  - `workspace_vars` table: workspace_id, var_name, vault_item_id (foreign key to item)
+- **Stack Templates**: generic, node, postgres, mongo, docker, python (provided as scaffolds)
+- **Inject Action**: Writes decrypted KEY=VALUE pairs to the specified `.env` file on disk
+- **Frontend**: `WorkspaceManager.tsx`, `workspaceStore.ts` in Settings tab
+- **Tauri Commands**: 
+  - `workspace_list() → Vec<Workspace>` — List all workspaces
+  - `workspace_save(workspace: Workspace) → Workspace` — Create or update
+  - `workspace_delete(id: String) → bool` — Delete workspace
+  - `workspace_inject(id: String) → Result<()>` — Write decrypted env vars to file
+
+### Interactive TUI (`crypt-env tui`)
+Terminal user interface for vault access without GUI, built with ratatui.
+
+- **Purpose**: Vault management from terminal (useful for SSH sessions, CI/CD pipelines, minimal environments)
+- **Invocation**: `crypt-env tui` (subcommand of CLI binary)
+- **Source**: `src-tauri/src/bin/crypt-env/commands/tui.rs`
+- **Dependencies**: ratatui 0.29, crossterm 0.28
+- **Screens**:
+  1. **Unlock** — Master password input with masked echoing
+  2. **Main** — Item list with preview pane, fuzzy search, type/category filters
+  3. **Item Detail** — Full item metadata, reveal secret, copy to clipboard
+  4. **Help** — Keybinding reference
+  5. **Confirm** — Destructive action confirmation (delete item)
+- **Keybindings**:
+  - `↑` / `↓` or `j` / `k` — Navigate list
+  - `/` — Start fuzzy search (incremental, real-time filtering)
+  - `Enter` — View item detail
+  - `v` — Reveal encrypted secret value in current item
+  - `c` — Copy selected secret to system clipboard
+  - `d` — Delete selected item (with confirmation)
+  - `r` — Refresh item list from DB
+  - `?` — Show help
+  - `q` — Quit (lock vault, exit)
+- **Architecture**: No external REST calls; TUI runs as privileged subprocess with direct vault access (Tauri command context)
+
+### Internet Relay Sharing (Supabase)
+Secure sharing of vault items across networks via encrypted relay.
+
+- **Purpose**: Share secrets with teammates on different networks without WhatsApp/email exposure
+- **Scenario**: Sender selects items, receiver enters code + passphrase, items are securely transferred and imported
+- **Architecture**:
+  - Module: `src-tauri/src/share/relay.rs`
+  - Backend: Supabase PostgreSQL table with burn-after-read + 24h TTL
+  - Encryption: AES-256-GCM for payload, Argon2id(m=32768, t=2, p=2) KDF from passphrase
+  - Pairing: 4-digit code (XXXX-XXXX format) + random passphrase (12 alphanumeric chars)
+
+- **Send Flow**:
+  1. Sender calls `share_relay_send(item_ids: Vec<i64>)` 
+  2. Backend: Encrypts selected items (JSON) with AES-256-GCM using random key
+  3. Generates Argon2id KDF from random passphrase + random salt
+  4. Uploads encrypted payload + salt + nonce to Supabase relay table
+  5. Generates code: pairing_token hash → 4-digit code
+  6. Returns to sender: code + passphrase (shown once, stored nowhere)
+
+- **Receive Flow**:
+  1. Receiver calls `share_relay_receive(code: String, passphrase: String)`
+  2. Backend: Looks up relay record by code hash
+  3. Derives AES key from passphrase + stored salt using Argon2id
+  4. Decrypts payload → deserializes items
+  5. Imports items to vault (same mechanism as backup import)
+  6. Deletes relay record (burn-after-read)
+  7. Returns import summary to receiver
+
+- **Database Setup**: 
+  - Supabase project required (free tier sufficient)
+  - SQL to run in Supabase:
+    ```sql
+    CREATE TABLE relay (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        code_hash TEXT UNIQUE NOT NULL,
+        encrypted_payload BYTEA NOT NULL,
+        salt BYTEA NOT NULL,
+        nonce BYTEA NOT NULL,
+        created_at TIMESTAMP DEFAULT now(),
+        expires_at TIMESTAMP DEFAULT now() + INTERVAL '24 hours',
+        accessed BOOLEAN DEFAULT FALSE
+    );
+    CREATE INDEX idx_relay_code_hash ON relay(code_hash);
+    CREATE INDEX idx_relay_expires_at ON relay(expires_at);
+    ```
+  - Supabase auto-cleanup: SQL trigger to delete rows where `expires_at < now()`
+
+- **Configuration**: Settings → Internet Sharing
+  - Input: Supabase project URL, anon API key
+  - Validation: Test connectivity on save
+
+- **Frontend**: `ShareModal` component with tabs:
+  - **LAN Tab**: Existing mDNS-based sharing
+  - **INTERNET Tab**: Code entry (receiver) / code display (sender) + passphrase display
+
+- **Tauri Commands**:
+  - `share_relay_send(item_ids: Vec<i64>) → { code: String, passphrase: String, expires_in: u64 }` — Encrypt and upload
+  - `share_relay_receive(code: String, passphrase: String) → { imported_count: usize, items: Vec<ItemSummary> }` — Download and decrypt
+
+- **Security Decisions**:
+  - Passphrase is random and shown once (not derived from password; user cannot recover it if lost)
+  - Code + passphrase required to prevent accidental discovery (code alone is insufficient)
+  - 24h TTL prevents indefinite relay accumulation
+  - Burn-after-read prevents reuse and auditing of past transfers
+  - AES-256-GCM provides authenticated encryption (integrity check prevents tampering)
+  - Argon2id with high memory cost (32MB) makes brute-forcing the passphrase expensive (~1-2s per attempt)
+  - Supabase URL + key stored in plaintext settings (acceptable because they only control relay table, not the vault itself)
+
+- **Consequences**:
+  - Requires active internet connection (not usable in offline/air-gapped scenarios; use LAN mode or encrypted package mode)
+  - Depends on Supabase service availability (single point of failure if Supabase is down)
+  - Code is short (XXXX-XXXX) for human typing; ~10,000 possible values (brute-forceable in ~10 minutes on 1000 req/sec, but code expires in 5 minutes)
+  - Passphrase must be communicated separately (out-of-band via chat/call/email); Supabase stores nothing about passphrase
 
 ## Security — Decisions Made
 - **Master password** derived with Argon2id (m=65536, t=3, p=4), never stored in plaintext
@@ -506,6 +631,156 @@ CREATE TABLE settings (
 - If user loses biometric enrollment (e.g., resets fingerprints), `biometric_blob` persists in DB but cannot be used (safe fallback: use master password)
 - DPAPI blob in plaintext hex in DB is acceptable because blob is useless without Windows user privileges and Hello verification
 - Unlock latency: ~100-200ms for WinRT call + ~500ms for Windows Hello UI = ~700ms total (slower than master password alone, but negligible for user experience)
+
+---
+
+### 13. Workspaces for Environment Variable Management
+**Context**: Developers manage multiple projects, each with different environment variable sets. Need to organize vault items by project and easily export to `.env` files.
+
+**Decision**: Create a Workspace system that groups vault item references and associates them with a `.env` file path.
+
+1. **Data Model**:
+   - `workspaces` table: id, name, description, template_type (generic/node/postgres/mongo/docker/python), env_file_path
+   - `workspace_vars` table: workspace_id, var_name, vault_item_id (foreign key to items)
+
+2. **Stack Templates**: Provide 6 pre-configured templates with common environment variables (e.g., node includes NODE_ENV, DEBUG; postgres includes DB_HOST, DB_PORT, DB_PASSWORD)
+
+3. **Inject Action**: User selects workspace → clicks "Inject to Path" → backend decrypts all referenced items → writes KEY=VALUE pairs to file on disk
+
+4. **Tauri Commands**:
+   - `workspace_list() → Vec<Workspace>` — List all workspaces with var count
+   - `workspace_save(workspace: Workspace) → Workspace` — Create or update workspace
+   - `workspace_delete(id: String) → bool` — Delete workspace (does not delete vault items)
+   - `workspace_inject(id: String) → Result<()>` — Write decrypted env vars to configured file path
+
+5. **Frontend**: `WorkspaceManager.tsx` component in Settings tab; allows CRUD of workspaces, select template, add/remove variable references, preview variables, inject
+
+**Rationale**:
+- Workspaces eliminate manual copying of secrets to `.env` files
+- Templates reduce cognitive load for new projects
+- Vault item references (not duplication) keep single source of truth
+- Inject writes to disk instead of response (prevents secrets in logs or clipboard)
+
+**Consequences**:
+- If workspace env_file_path is invalid or not writable, inject fails gracefully
+- Workspace deletion does not cascade to vault items (safe default; user may reuse items)
+- Templates are static; future versions could allow custom templates
+
+---
+
+### 14. Interactive TUI with Ratatui
+**Context**: Developers need vault access from terminal for SSH sessions, CI/CD scripting, or minimal environments where GUI is unavailable.
+
+**Decision**: Implement `crypt-env tui` subcommand using ratatui 0.29 + crossterm 0.28 for interactive terminal UI.
+
+1. **Architecture**:
+   - Built as subcommand of `crypt-env` CLI binary: `crypt-env tui`
+   - Source: `src-tauri/src/bin/crypt-env/commands/tui.rs`
+   - Runs with direct vault access (Tauri command context), no HTTP dependency
+   - Single-threaded event loop (tokio `select!` for input + tick events)
+
+2. **Screens**:
+   - **Unlock**: Master password input with masked echoing
+   - **Main**: Item list with fuzzy search, preview pane, type/category filters
+   - **Item Detail**: Full metadata, reveal/copy controls
+   - **Help**: Keybinding reference
+   - **Confirm**: Destructive action confirmation
+
+3. **Keybindings**:
+   - Navigate: ↑↓ or jk
+   - Fuzzy search: / (real-time incremental filtering)
+   - Detail: Enter
+   - Reveal: v
+   - Copy: c
+   - Delete: d
+   - Refresh: r
+   - Help: ?
+   - Quit: q
+
+4. **State Machine**:
+   - `Screen::Unlock` (password input)
+   - `Screen::Main` (item list, fuzzy search)
+   - `Screen::ItemDetail` (selected item metadata)
+   - `Screen::Help` (keybinding reference)
+   - `Screen::Confirm` (destructive confirmation)
+   - Transitions on user input, returns to Main or exits
+
+**Rationale**:
+- Ratatui is lightweight and terminal-independent (works on SSH, CI/CD)
+- Direct vault access avoids HTTP dependency (faster, simpler)
+- Keybindings follow Vim conventions (↑↓/jk, hjkl for navigation)
+- Single-threaded design simplifies state management
+
+**Consequences**:
+- TUI output not suitable for scripting (use REST API or MCP for automation)
+- Cannot resize terminal during operation (acceptable for target use case)
+- Clipboard copy requires system integration (via `clipboard-manager` plugin or system command)
+
+---
+
+### 15. Internet Relay Sharing with Supabase
+**Context**: Users need to share secrets with teammates on different networks. LAN bridge works for local network; encrypted packages work for offline. Internet relay bridges the gap for remote teams.
+
+**Decision**: Implement Supabase-backed relay with AES-256-GCM encryption and Argon2id KDF from passphrase.
+
+1. **Service Architecture**:
+   - Sender uploads encrypted items to Supabase relay table
+   - Backend generates 4-digit code (XXXX-XXXX) from pairing token hash
+   - Passphrase: 12-char random alphanumeric, never stored (shown once to sender)
+   - Receiver enters code + passphrase → decrypts → imports
+   - Relay record auto-deleted after first read (burn-after-read)
+   - 24-hour TTL via Supabase scheduled trigger
+
+2. **Database Schema** (Supabase PostgreSQL):
+   ```sql
+   CREATE TABLE relay (
+       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+       code_hash TEXT UNIQUE NOT NULL,
+       encrypted_payload BYTEA NOT NULL,
+       salt BYTEA NOT NULL,
+       nonce BYTEA NOT NULL,
+       created_at TIMESTAMP DEFAULT now(),
+       expires_at TIMESTAMP DEFAULT now() + INTERVAL '24 hours',
+       accessed BOOLEAN DEFAULT FALSE
+   );
+   CREATE INDEX idx_relay_code_hash ON relay(code_hash);
+   CREATE INDEX idx_relay_expires_at ON relay(expires_at);
+   ```
+
+3. **Encryption**:
+   - Random 32-byte key + 12-byte nonce for AES-256-GCM
+   - Payload: JSON serialization of selected items + metadata
+   - Passphrase KDF: Argon2id(m=32768, t=2, p=2, salt=random 16 bytes)
+   - No key derivation from code (code is just a lookup handle)
+
+4. **Tauri Commands**:
+   - `share_relay_send(item_ids: Vec<i64>) → { code: String, passphrase: String, expires_in: u64 }` — Encrypt and upload
+   - `share_relay_receive(code: String, passphrase: String) → { imported_count: usize, items: Vec<ItemSummary> }` — Download and decrypt
+
+5. **Configuration** (Settings → Internet Sharing):
+   - Supabase project URL (input field)
+   - Anon API key (input field, password masked)
+   - Test button to validate connectivity
+   - Stored in `settings` table as plaintext (acceptable scope)
+
+6. **Frontend**:
+   - `ShareModal` component with tabs: LAN, INTERNET
+   - INTERNET tab: Sender sees code + passphrase (copyable); Receiver enters code + passphrase
+
+**Rationale**:
+- Supabase provides PostgreSQL + realtime + REST API with no backend maintenance
+- Argon2id(m=32MB) makes brute-forcing passphrase expensive (~1-2s per attempt)
+- Code + passphrase required (code alone insufficient for security)
+- Burn-after-read prevents audit trail and replay attacks
+- 24h TTL prevents relay table bloat
+- AES-256-GCM provides authenticated encryption (detects tampering)
+
+**Consequences**:
+- Requires internet connection (not usable offline)
+- Depends on Supabase availability (SPoF if Supabase is down)
+- Code is short (XXXX-XXXX, ~10,000 values); brute-forceable in ~10 minutes on 1000 req/sec, but expires in 5 minutes
+- Passphrase must be communicated out-of-band (via chat, call, email; Supabase only stores encrypted payload)
+- Each import requires ~1-2s Argon2id KDF (acceptable for infrequent use, but not suitable for bulk imports)
 
 ---
 

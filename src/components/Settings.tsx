@@ -51,6 +51,113 @@ function PwField({
   );
 }
 
+const RELAY_SQL = `create table if not exists relay_packages (
+  id          uuid primary key default gen_random_uuid(),
+  code        text not null unique,
+  payload     text not null,
+  expires_at  timestamptz not null default (now() + interval '24 hours'),
+  retrieved   boolean not null default false
+);
+alter table relay_packages enable row level security;
+create policy "insert" on relay_packages for insert to anon with check (true);
+create policy "select" on relay_packages for select to anon using (true);
+create policy "update" on relay_packages for update to anon using (true) with check (true);`;
+
+function RelayConfigSection({ showToast }: { showToast: (msg: string, type?: 'success' | 'error') => void }) {
+  const [url,     setUrl]     = useState('');
+  const [anonKey, setAnonKey] = useState('');
+  const [showKey, setShowKey] = useState(false);
+  const [sqlOpen, setSqlOpen] = useState(false);
+  const [saving,  setSaving]  = useState(false);
+
+  useEffect(() => {
+    // Relay settings are persisted server-side; no need to load them here.
+  }, []);
+
+  const handleSaveRelay = async () => {
+    if (!url.trim() || !anonKey.trim()) { showToast('Both URL and Anon Key are required', 'error'); return; }
+    setSaving(true);
+    try {
+      await invoke('vault_save_settings', {
+        autoLockTimeout: 5, // won't change existing value — but we need a workaround
+        hotkey: 'Ctrl+Alt+Z',
+        relaySupabaseUrl: url.trim(),
+        relaySupabaseAnonKey: anonKey.trim(),
+      });
+      showToast('Relay settings saved');
+    } catch (e) {
+      showToast(String(e), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mb-2">
+      <div className="text-[11px] text-tx3 font-mono mb-2 leading-[1.6]">
+        Share secrets over the internet via an encrypted relay. Requires a free{' '}
+        <span className="text-accent">Supabase</span> project.
+      </div>
+      <div className="mb-2">
+        <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">SUPABASE PROJECT URL</div>
+        <input
+          type="text"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://xxxx.supabase.co"
+          autoComplete="off"
+          className="w-full bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-3 py-[6px] outline-none focus:border-accent-d transition-colors"
+        />
+      </div>
+      <div className="mb-3">
+        <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">SUPABASE ANON KEY</div>
+        <div className="relative">
+          <input
+            type={showKey ? 'text' : 'password'}
+            value={anonKey}
+            onChange={(e) => setAnonKey(e.target.value)}
+            placeholder="eyJ..."
+            autoComplete="off"
+            className="w-full bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-3 py-[6px] pr-9 outline-none focus:border-accent-d transition-colors"
+          />
+          <button type="button" onClick={() => setShowKey((v) => !v)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-tx3 hover:text-tx transition-colors">
+            <Icon name={showKey ? 'eyeOff' : 'eye'} size={13} />
+          </button>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 mb-3">
+        <button
+          onClick={handleSaveRelay}
+          disabled={saving}
+          className="px-3 py-[6px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-accent border-none text-[#020504] hover:opacity-90 disabled:opacity-40 flex items-center gap-1.5"
+        >
+          {saving ? <><div className="w-2.5 h-2.5 rounded-full border-2 border-transparent border-t-[#020504] animate-spin-fast" />SAVING…</> : 'SAVE RELAY'}
+        </button>
+        <button
+          onClick={() => setSqlOpen((v) => !v)}
+          className="text-[10px] font-ui font-medium text-tx3 border border-bd2 rounded-[3px] px-2 py-[5px] hover:text-tx transition-colors"
+        >
+          {sqlOpen ? 'HIDE SQL ▲' : 'SETUP SQL ▼'}
+        </button>
+      </div>
+      {sqlOpen && (
+        <div className="mb-3 rounded-[3px] border border-bd bg-raised">
+          <div className="flex items-center justify-between px-3 py-1.5 border-b border-bd">
+            <span className="text-[9px] font-mono text-tx3 tracking-[0.06em]">Run this SQL in your Supabase SQL Editor</span>
+            <button
+              onClick={() => navigator.clipboard.writeText(RELAY_SQL).then(() => showToast('SQL copied'))}
+              className="text-tx3 hover:text-accent transition-colors"
+            >
+              <Icon name="copy" size={11} />
+            </button>
+          </div>
+          <pre className="text-[10px] font-mono text-tx2 p-3 overflow-x-auto leading-[1.6] whitespace-pre-wrap">{RELAY_SQL}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Settings() {
   const go             = useVaultStore((s) => s.go);
   const showToast      = useVaultStore((s) => s.showToast);
@@ -329,6 +436,16 @@ export function Settings() {
           </button>
         </Row>
 
+        <Sec title="// WORKSPACES" />
+        <Row icon="terminal" label="Env Workspaces">
+          <button
+            onClick={() => go('workspaces')}
+            className="flex items-center gap-[5px] bg-transparent border border-bd2 rounded-[3px] text-tx2 px-[11px] py-[5px] text-[11px] cursor-pointer font-ui font-medium tracking-[0.04em] hover:text-tx transition-colors"
+          >
+            MANAGE →
+          </button>
+        </Row>
+
         <Sec title="// DATA" />
         <Row icon="export" label="Import from Password Manager">
           <button
@@ -364,6 +481,9 @@ export function Settings() {
             OPEN
           </button>
         </Row>
+
+        <Sec title="// INTERNET SHARING" />
+        <RelayConfigSection showToast={showToast} />
 
         <Sec title="// INTEGRATIONS" />
         <Row icon="key" label="MCP Token">

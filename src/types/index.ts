@@ -1,6 +1,6 @@
 export type ItemType = 'secret' | 'credential' | 'link' | 'command' | 'note';
 export type Shell    = 'bash' | 'zsh' | 'fish' | 'PowerShell' | 'cmd';
-export type Screen   = 'lock' | 'vault' | 'edit' | 'categories' | 'settings';
+export type Screen   = 'lock' | 'vault' | 'edit' | 'categories' | 'settings' | 'workspaces';
 
 export interface Category {
   id:    string;
@@ -52,6 +52,34 @@ export interface NoteItem extends BaseItem {
 }
 
 export type VaultItem = SecretItem | CredentialItem | LinkItem | CommandItem | NoteItem;
+
+// ─── Workspace types ──────────────────────────────────────────────────────────
+
+export interface WorkspaceVar {
+  id:       number;
+  key:      string;
+  itemId?:  number;
+  literal?: string;
+}
+
+export interface Workspace {
+  id:           number;
+  name:         string;
+  description?: string;
+  path?:        string;
+  template:     string;
+  created:      string;
+  updated:      string;
+  vars:         WorkspaceVar[];
+}
+
+export type WorkspaceTemplate =
+  | 'generic' | 'node' | 'postgres' | 'mongo' | 'docker' | 'python';
+
+export interface InjectResult {
+  path:    string;
+  written: string[];
+}
 
 export interface ContextMenuItemDef {
   label?:   string;

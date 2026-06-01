@@ -2,6 +2,7 @@ pub mod crypto;
 pub mod lan;
 pub mod package;
 pub mod protocol;
+pub mod relay;
 
 use rand::RngCore;
 use std::sync::Arc;

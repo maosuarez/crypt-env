@@ -269,8 +269,7 @@ async fn run_send_background(
         .map_err(|e| ShareError::Io(e.to_string()))?;
 
     // Poll for accept with periodic cancellation checks
-    let mut stream_opt: Option<std::net::TcpStream> = None;
-    loop {
+    let mut stream = loop {
         if start.elapsed() >= accept_timeout {
             let mut guard = share_state.session.lock().await;
             if let Some(ref mut s) = *guard {
@@ -290,10 +289,7 @@ async fn run_send_background(
         }
 
         match listener.accept() {
-            Ok((s, _)) => {
-                stream_opt = Some(s);
-                break;
-            }
+            Ok((s, _)) => break s,
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -303,9 +299,7 @@ async fn run_send_background(
             }
             Err(e) => return Err(ShareError::Io(format!("accept: {e}"))),
         }
-    }
-
-    let mut stream = stream_opt.expect("stream set in loop above");
+    };
 
     // The TcpListener was put into non-blocking mode for polling; accepted
     // streams inherit that flag.  The handshake uses blocking read_exact /

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -16,7 +17,7 @@ pub struct DbWorkspace {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
-    pub path: Option<String>,
+    pub paths: Vec<String>,
     pub template: String,
     pub created: String,
     pub updated: String,
@@ -115,6 +116,14 @@ impl VaultDb {
                 literal      TEXT,
                 UNIQUE(workspace_id, key)
             )",
+            "CREATE TABLE IF NOT EXISTS workspace_paths (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                path         TEXT NOT NULL,
+                UNIQUE(workspace_id, path)
+            )",
+            "INSERT OR IGNORE INTO workspace_paths (workspace_id, path)
+                SELECT id, path FROM workspaces WHERE path IS NOT NULL",
         ];
         for stmt in &migrations {
             sqlx::query(stmt).execute(&self.pool).await.map_err(|e| format!("migration: {e}"))?;
@@ -363,21 +372,39 @@ impl VaultDb {
 
     pub async fn list_workspaces(&self) -> Result<Vec<DbWorkspace>, String> {
         let rows = sqlx::query(
-            "SELECT id, name, description, path, template, created, updated FROM workspaces ORDER BY id ASC",
+            "SELECT id, name, description, template, created, updated FROM workspaces ORDER BY id ASC",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(|e| e.to_string())?;
+
+        let path_rows = sqlx::query(
+            "SELECT workspace_id, path FROM workspace_paths ORDER BY workspace_id, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let mut paths_map: HashMap<i64, Vec<String>> = HashMap::new();
+        for row in path_rows {
+            let ws_id: i64 = row.get(0);
+            let path: String = row.get(1);
+            paths_map.entry(ws_id).or_default().push(path);
+        }
+
         Ok(rows
             .into_iter()
-            .map(|r| DbWorkspace {
-                id: r.get(0),
-                name: r.get(1),
-                description: r.get(2),
-                path: r.get(3),
-                template: r.get(4),
-                created: r.get(5),
-                updated: r.get(6),
+            .map(|r| {
+                let id: i64 = r.get(0);
+                DbWorkspace {
+                    id,
+                    name: r.get(1),
+                    description: r.get(2),
+                    paths: paths_map.remove(&id).unwrap_or_default(),
+                    template: r.get(3),
+                    created: r.get(4),
+                    updated: r.get(5),
+                }
             })
             .collect())
     }
@@ -388,17 +415,15 @@ impl VaultDb {
         id: i64,
         name: &str,
         description: Option<&str>,
-        path: Option<&str>,
         template: &str,
     ) -> Result<i64, String> {
         let now = now_ts();
         if id == 0 {
             let res = sqlx::query(
-                "INSERT INTO workspaces (name, description, path, template, created, updated) VALUES (?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO workspaces (name, description, template, created, updated) VALUES (?1,?2,?3,?4,?5)",
             )
             .bind(name)
             .bind(description)
-            .bind(path)
             .bind(template)
             .bind(&now)
             .bind(&now)
@@ -408,11 +433,10 @@ impl VaultDb {
             Ok(res.last_insert_rowid())
         } else {
             sqlx::query(
-                "UPDATE workspaces SET name=?1, description=?2, path=?3, template=?4, updated=?5 WHERE id=?6",
+                "UPDATE workspaces SET name=?1, description=?2, template=?3, updated=?4 WHERE id=?5",
             )
             .bind(name)
             .bind(description)
-            .bind(path)
             .bind(template)
             .bind(&now)
             .bind(id)
@@ -421,6 +445,40 @@ impl VaultDb {
             .map_err(|e| e.to_string())?;
             Ok(id)
         }
+    }
+
+    pub async fn get_workspace_paths(&self, workspace_id: i64) -> Result<Vec<String>, String> {
+        let rows = sqlx::query(
+            "SELECT path FROM workspace_paths WHERE workspace_id = ?1 ORDER BY id ASC",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(rows.into_iter().map(|r| r.get(0)).collect())
+    }
+
+    pub async fn set_workspace_paths(
+        &self,
+        workspace_id: i64,
+        paths: &[String],
+    ) -> Result<(), String> {
+        sqlx::query("DELETE FROM workspace_paths WHERE workspace_id = ?1")
+            .bind(workspace_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        for path in paths {
+            sqlx::query(
+                "INSERT INTO workspace_paths (workspace_id, path) VALUES (?1, ?2)",
+            )
+            .bind(workspace_id)
+            .bind(path)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     pub async fn delete_workspace(&self, id: i64) -> Result<(), String> {

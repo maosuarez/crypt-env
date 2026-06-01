@@ -25,7 +25,7 @@ use vault::share_commands::{
     share_poll_status, share_relay_receive, share_relay_send, share_start_receive,
     share_start_send, SharedShareState,
 };
-use workspace::{workspace_delete, workspace_inject, workspace_list, workspace_save};
+use workspace::{workspace_delete, workspace_export, workspace_import, workspace_inject, workspace_list, workspace_pick_env_path, workspace_save};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -168,6 +168,9 @@ pub fn run() {
             workspace_save,
             workspace_delete,
             workspace_inject,
+            workspace_pick_env_path,
+            workspace_export,
+            workspace_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

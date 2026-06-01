@@ -13,10 +13,13 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::crypto;
-use crate::db::DbCategory;
+use crate::db::{DbCategory, DbWorkspaceVar};
 use crate::share::{ShareState, ShareSessionState};
+use crate::share::relay;
+use crate::share::package::PlainItem;
 use crate::tls;
 use crate::vault::{SharedState, VaultItem};
+use crate::workspace::{InjectResult, Workspace, WorkspaceInput, WorkspaceVar};
 
 // ─── Estado compartido de la API ──────────────────────────────────────────────
 
@@ -1727,6 +1730,682 @@ async fn handle_share_import(
     }
 }
 
+// ─── Workspace handlers ───────────────────────────────────────────────────────
+
+async fn handle_list_workspaces(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let vault = state.vault.lock().await;
+    let db_workspaces = match vault.db.list_workspaces().await {
+        Ok(ws) => ws,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                .into_response()
+        }
+    };
+
+    let mut result: Vec<Workspace> = Vec::with_capacity(db_workspaces.len());
+    for ws in db_workspaces {
+        let db_vars = match vault.db.get_workspace_vars(ws.id).await {
+            Ok(v) => v,
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+        let vars: Vec<WorkspaceVar> = db_vars
+            .into_iter()
+            .map(|v| WorkspaceVar { id: v.id, key: v.key, item_id: v.item_id, literal: v.literal })
+            .collect();
+        result.push(Workspace {
+            id: ws.id,
+            name: ws.name,
+            description: ws.description,
+            paths: ws.paths,
+            template: ws.template,
+            created: ws.created,
+            updated: ws.updated,
+            vars,
+        });
+    }
+
+    (StatusCode::OK, Json(result)).into_response()
+}
+
+async fn handle_save_workspace(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<WorkspaceInput>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    if body.name.is_empty() {
+        return err_json(StatusCode::UNPROCESSABLE_ENTITY, "name: required and must not be empty", "VALIDATION_ERROR")
+            .into_response();
+    }
+
+    let vault = state.vault.lock().await;
+    let ws_id = match vault
+        .db
+        .upsert_workspace(
+            body.id,
+            &body.name,
+            body.description.as_deref(),
+            &body.template,
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                .into_response()
+        }
+    };
+
+    if let Err(e) = vault.db.set_workspace_paths(ws_id, &body.paths).await {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+            .into_response();
+    }
+
+    let db_vars: Vec<DbWorkspaceVar> = body
+        .vars
+        .into_iter()
+        .map(|v| DbWorkspaceVar {
+            id: 0,
+            workspace_id: ws_id,
+            key: v.key,
+            item_id: v.item_id,
+            literal: v.literal,
+        })
+        .collect();
+
+    if let Err(e) = vault.db.set_workspace_vars(ws_id, &db_vars).await {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+            .into_response();
+    }
+
+    let status = if body.id == 0 { StatusCode::CREATED } else { StatusCode::OK };
+    (status, Json(serde_json::json!({ "id": ws_id }))).into_response()
+}
+
+async fn handle_delete_workspace(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let vault = state.vault.lock().await;
+
+    // Verify workspace exists
+    let workspaces = match vault.db.list_workspaces().await {
+        Ok(ws) => ws,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                .into_response()
+        }
+    };
+    if workspaces.iter().find(|ws| ws.id == id).is_none() {
+        return err_json(StatusCode::NOT_FOUND, "workspace not found", "NOT_FOUND").into_response();
+    }
+
+    match vault.db.delete_workspace(id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+    }
+}
+
+async fn handle_inject_workspace(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let vault = state.vault.lock().await;
+
+    let vault_key: [u8; 32] = match vault.key.as_ref() {
+        Some(k) => **k,
+        None => {
+            return err_json(StatusCode::FORBIDDEN, "vault locked", "VAULT_LOCKED").into_response()
+        }
+    };
+
+    let workspaces = match vault.db.list_workspaces().await {
+        Ok(ws) => ws,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                .into_response()
+        }
+    };
+    let ws = match workspaces.into_iter().find(|w| w.id == id) {
+        Some(w) => w,
+        None => {
+            return err_json(StatusCode::NOT_FOUND, "workspace not found", "NOT_FOUND")
+                .into_response()
+        }
+    };
+
+    if ws.paths.is_empty() {
+        return err_json(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "workspace has no paths configured",
+            "VALIDATION_ERROR",
+        )
+        .into_response();
+    }
+
+    let vars = match vault.db.get_workspace_vars(id).await {
+        Ok(v) => v,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                .into_response()
+        }
+    };
+
+    if vars.is_empty() {
+        return (StatusCode::OK, Json(InjectResult { paths: ws.paths, written: vec![] })).into_response();
+    }
+
+    // Decrypt vault items needed for this workspace
+    let raw_items = match vault.db.list_items().await {
+        Ok(items) => items,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                .into_response()
+        }
+    };
+
+    let mut item_values: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    for (item_id, _, data, _) in &raw_items {
+        let json = match crypto::decrypt(&vault_key, data) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        let item: VaultItem = match serde_json::from_slice(&json) {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        let value = item.value.or(item.password).or(item.content).unwrap_or_default();
+        item_values.insert(*item_id, value);
+    }
+
+    // Build key → value map for this workspace
+    let mut inject_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for v in &vars {
+        let value = if let Some(iid) = v.item_id {
+            item_values.get(&iid).cloned().unwrap_or_default()
+        } else {
+            v.literal.clone().unwrap_or_default()
+        };
+        inject_map.insert(v.key.clone(), value);
+    }
+
+    // Write inject_map into each configured .env path
+    let mut written_keys: Vec<String> = Vec::new();
+    let mut written_once = false;
+
+    for path in &ws.paths {
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        let mut lines: Vec<String> = existing.lines().map(String::from).collect();
+        let mut updated_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut written: Vec<String> = Vec::new();
+
+        for line in &mut lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') || !trimmed.contains('=') {
+                continue;
+            }
+            let eq_pos = match trimmed.find('=') {
+                Some(p) => p,
+                None => continue,
+            };
+            let existing_key = trimmed[..eq_pos].trim().to_string();
+            if let Some(new_val) = inject_map.get(&existing_key) {
+                *line = format!("{}={}", existing_key, new_val);
+                updated_keys.insert(existing_key.clone());
+                written.push(existing_key);
+            }
+        }
+
+        for (k, v) in &inject_map {
+            if !updated_keys.contains(k) {
+                lines.push(format!("{}={}", k, v));
+                written.push(k.clone());
+            }
+        }
+
+        let content = lines.join("\n") + "\n";
+        if let Err(e) = std::fs::write(path, content) {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("write .env ({}): {e}", path),
+                "INTERNAL_ERROR",
+            )
+            .into_response();
+        }
+
+        if !written_once {
+            written.sort();
+            written_keys = written;
+            written_once = true;
+        }
+    }
+
+    (StatusCode::OK, Json(InjectResult { paths: ws.paths, written: written_keys })).into_response()
+}
+
+// ─── Relay handlers ───────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct RelaySendBody {
+    item_ids: Vec<i64>,
+}
+
+#[derive(serde::Serialize)]
+struct RelaySendResponse {
+    code: String,
+    passphrase: String,
+}
+
+async fn handle_relay_send(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<RelaySendBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    if body.item_ids.is_empty() {
+        return err_json(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "item_ids must not be empty",
+            "VALIDATION_ERROR",
+        )
+        .into_response();
+    }
+
+    // Extract everything needed while holding the lock, then release it before
+    // the blocking relay upload.
+    let (_vault_key, supabase_url, anon_key, plain_items) = {
+        let vault = state.vault.lock().await;
+        let k = match vault.key.as_ref() {
+            Some(k) => **k,
+            None => {
+                return err_json(StatusCode::FORBIDDEN, "vault locked", "VAULT_LOCKED")
+                    .into_response()
+            }
+        };
+
+        let supabase_url = match vault.db.get_setting("relay_supabase_url").await {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "relay not configured: set relay_supabase_url in Settings",
+                    "NOT_CONFIGURED",
+                )
+                .into_response()
+            }
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+
+        let anon_key = match vault.db.get_setting("relay_supabase_anon_key").await {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "relay not configured: set relay_supabase_anon_key in Settings",
+                    "NOT_CONFIGURED",
+                )
+                .into_response()
+            }
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+
+        let raw = match vault.db.list_items().await {
+            Ok(r) => r,
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+
+        let mut items: Vec<PlainItem> = Vec::new();
+        for (id, _, data, _) in &raw {
+            if !body.item_ids.contains(id) {
+                continue;
+            }
+            let json = match crypto::decrypt(&k, data) {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            let item: VaultItem = match serde_json::from_slice(&json) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            items.push(PlainItem {
+                item_type: item.item_type,
+                name: item.name.unwrap_or_default(),
+                value: item.value,
+                username: item.username,
+                password: item.password,
+                url: item.url,
+                notes: item.notes,
+                category: item.categories.and_then(|v| v.into_iter().next()),
+                command: item.command,
+            });
+        }
+
+        (k, supabase_url, anon_key, items)
+    };
+
+    let code = relay::generate_share_code();
+    let passphrase = crate::share::crypto::generate_passphrase();
+
+    let relay_key = match relay::derive_relay_key(&code, &passphrase) {
+        Ok(k) => k,
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+                "INTERNAL_ERROR",
+            )
+            .into_response()
+        }
+    };
+
+    let payload = match relay::encrypt_items(&plain_items, &relay_key) {
+        Ok(p) => p,
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+                "INTERNAL_ERROR",
+            )
+            .into_response()
+        }
+    };
+
+    let code_clone = code.clone();
+    let upload_result = tokio::task::spawn_blocking(move || {
+        relay::relay_upload(&supabase_url, &anon_key, &code_clone, &payload)
+    })
+    .await;
+
+    match upload_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            return err_json(
+                StatusCode::BAD_GATEWAY,
+                &format!("relay upload failed: {e}"),
+                "RELAY_ERROR",
+            )
+            .into_response()
+        }
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("task error: {e}"),
+                "INTERNAL_ERROR",
+            )
+            .into_response()
+        }
+    }
+
+    (StatusCode::OK, Json(RelaySendResponse { code, passphrase })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct RelayReceiveBody {
+    code: String,
+    passphrase: String,
+}
+
+#[derive(serde::Serialize)]
+struct RelayReceiveResponse {
+    names: Vec<String>,
+}
+
+async fn handle_relay_receive(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<RelayReceiveBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    if body.code.is_empty() || body.passphrase.is_empty() {
+        return err_json(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "code and passphrase are required",
+            "VALIDATION_ERROR",
+        )
+        .into_response();
+    }
+
+    // Derive relay key before spawning blocking tasks (no I/O needed)
+    let relay_key = match relay::derive_relay_key(&body.code, &body.passphrase) {
+        Ok(k) => k,
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+                "INTERNAL_ERROR",
+            )
+            .into_response()
+        }
+    };
+
+    // Extract relay settings while holding the lock
+    let (vault_key, supabase_url, anon_key) = {
+        let vault = state.vault.lock().await;
+        let k = match vault.key.as_ref() {
+            Some(k) => **k,
+            None => {
+                return err_json(StatusCode::FORBIDDEN, "vault locked", "VAULT_LOCKED")
+                    .into_response()
+            }
+        };
+
+        let supabase_url = match vault.db.get_setting("relay_supabase_url").await {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "relay not configured: set relay_supabase_url in Settings",
+                    "NOT_CONFIGURED",
+                )
+                .into_response()
+            }
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+
+        let anon_key_val = match vault.db.get_setting("relay_supabase_anon_key").await {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "relay not configured: set relay_supabase_anon_key in Settings",
+                    "NOT_CONFIGURED",
+                )
+                .into_response()
+            }
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+
+        (k, supabase_url, anon_key_val)
+    };
+
+    // Download the relay payload (blocking)
+    let url_clone = supabase_url.clone();
+    let key_clone = anon_key.clone();
+    let code_clone = body.code.clone();
+    let download_result = tokio::task::spawn_blocking(move || {
+        relay::relay_download(&url_clone, &key_clone, &code_clone)
+    })
+    .await;
+
+    let payload = match download_result {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => {
+            return err_json(
+                StatusCode::BAD_GATEWAY,
+                &format!("relay download failed: {e}"),
+                "RELAY_ERROR",
+            )
+            .into_response()
+        }
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("task error: {e}"),
+                "INTERNAL_ERROR",
+            )
+            .into_response()
+        }
+    };
+
+    let plain_items = match relay::decrypt_payload(&payload, &relay_key) {
+        Ok(items) => items,
+        Err(e) => {
+            return err_json(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("decrypt failed (wrong passphrase?): {e}"),
+                "DECRYPT_ERROR",
+            )
+            .into_response()
+        }
+    };
+
+    // Mark retrieved (best-effort, fire and forget)
+    let url_clone2 = supabase_url.clone();
+    let key_clone2 = anon_key.clone();
+    let code_clone2 = body.code.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        relay::relay_mark_retrieved(&url_clone2, &key_clone2, &code_clone2)
+    })
+    .await;
+
+    // Import items into the vault
+    let vault = state.vault.lock().await;
+    let now_ts = now_ts_str();
+    let mut names: Vec<String> = Vec::new();
+
+    for plain in &plain_items {
+        let vault_item = VaultItem {
+            id: 0,
+            item_type: plain.item_type.clone(),
+            name: Some(plain.name.clone()),
+            value: plain.value.clone(),
+            username: plain.username.clone(),
+            password: plain.password.clone(),
+            url: plain.url.clone(),
+            notes: plain.notes.clone(),
+            title: None,
+            description: None,
+            command: plain.command.clone(),
+            shell: None,
+            content: None,
+            categories: Some(plain.category.iter().cloned().collect()),
+            created: now_ts.clone(),
+        };
+
+        let json = match serde_json::to_vec(&vault_item) {
+            Ok(j) => j,
+            Err(e) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("serialize item: {e}"),
+                    "INTERNAL_ERROR",
+                )
+                .into_response()
+            }
+        };
+
+        let encrypted = match crypto::encrypt(&vault_key, &json) {
+            Ok(e) => e,
+            Err(e) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("encrypt item: {e}"),
+                    "INTERNAL_ERROR",
+                )
+                .into_response()
+            }
+        };
+
+        match vault
+            .db
+            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created)
+            .await
+        {
+            Ok(_) => names.push(plain.name.clone()),
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(RelayReceiveResponse { names })).into_response()
+}
+
 // ─── Función pública de arranque ──────────────────────────────────────────────
 
 pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
@@ -1766,6 +2445,12 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         .route("/share/session", delete(handle_share_cancel))
         .route("/share/export", post(handle_share_export))
         .route("/share/import", post(handle_share_import))
+        .route("/workspaces", get(handle_list_workspaces))
+        .route("/workspaces", post(handle_save_workspace))
+        .route("/workspaces/:id", delete(handle_delete_workspace))
+        .route("/workspaces/:id/inject", post(handle_inject_workspace))
+        .route("/relay/send", post(handle_relay_send))
+        .route("/relay/receive", post(handle_relay_receive))
         .with_state(api_state)
         .layer(middleware::from_fn(cors_guard));
 

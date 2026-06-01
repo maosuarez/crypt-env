@@ -5,6 +5,15 @@ use serde::Serialize;
 use crate::share::{self, package::PlainItem, relay, ShareState, ShareSessionState};
 use crate::vault::SharedState;
 
+const DEFAULT_RELAY_URL: &str = match option_env!("CRYPTENV_RELAY_URL") {
+    Some(v) => v,
+    None => "",
+};
+const DEFAULT_RELAY_ANON_KEY: &str = match option_env!("CRYPTENV_RELAY_ANON_KEY") {
+    Some(v) => v,
+    None => "",
+};
+
 pub type SharedShareState = Arc<ShareState>;
 
 #[derive(Serialize)]
@@ -200,7 +209,7 @@ pub async fn share_relay_send(
     item_ids: Vec<i64>,
     vault_state: State<'_, SharedState>,
 ) -> Result<RelayShareResult, String> {
-    let (vault_key, supabase_url, anon_key, plain_items) = {
+    let (supabase_url, anon_key, plain_items) = {
         let guard = vault_state.lock().await;
         let k = guard.key.as_ref().ok_or("vault is locked")?;
         let vault_key: [u8; 32] = **k;
@@ -209,12 +218,12 @@ pub async fn share_relay_send(
             .db
             .get_setting("relay_supabase_url")
             .await?
-            .ok_or("Relay not configured. Set relay_supabase_url in Settings.")?;
+            .unwrap_or_else(|| DEFAULT_RELAY_URL.to_string());
         let anon_key = guard
             .db
             .get_setting("relay_supabase_anon_key")
             .await?
-            .ok_or("Relay not configured. Set relay_supabase_anon_key in Settings.")?;
+            .unwrap_or_else(|| DEFAULT_RELAY_ANON_KEY.to_string());
 
         let raw = guard.db.list_items().await?;
         let mut items: Vec<PlainItem> = Vec::new();
@@ -237,7 +246,7 @@ pub async fn share_relay_send(
                 command: item.command,
             });
         }
-        (vault_key, supabase_url, anon_key, items)
+        (supabase_url, anon_key, items)
     };
 
     let code = relay::generate_share_code();
@@ -273,12 +282,12 @@ pub async fn share_relay_receive(
             .db
             .get_setting("relay_supabase_url")
             .await?
-            .ok_or("Relay not configured. Set relay_supabase_url in Settings.")?;
+            .unwrap_or_else(|| DEFAULT_RELAY_URL.to_string());
         let anon_key = guard
             .db
             .get_setting("relay_supabase_anon_key")
             .await?
-            .ok_or("Relay not configured. Set relay_supabase_anon_key in Settings.")?;
+            .unwrap_or_else(|| DEFAULT_RELAY_ANON_KEY.to_string());
         (vault_key, supabase_url, anon_key)
     };
 

@@ -43,6 +43,10 @@ enum Cmd {
     Category(commands::category::CategoryArgs),
     /// Interactive TUI — browse, search, and reveal secrets in the terminal
     Tui(commands::tui::TuiArgs),
+    /// Manage workspaces (list, inject, delete)
+    Workspace(commands::workspace::WorkspaceArgs),
+    /// Share secrets via internet relay (send, receive)
+    Relay(commands::relay::RelayArgs),
 }
 
 fn main() {
@@ -61,6 +65,8 @@ fn main() {
         Cmd::Share(args) => commands::share::run(args),
         Cmd::Category(args) => commands::category::run(args),
         Cmd::Tui(args) => commands::tui::run(args),
+        Cmd::Workspace(args) => commands::workspace::run(args),
+        Cmd::Relay(args) => commands::relay::run(args),
     };
     if let Err(e) = result {
         eprintln!("{}", e);

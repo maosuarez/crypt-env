@@ -25,8 +25,7 @@ pub struct Workspace {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
+    pub paths: Vec<String>,
     pub template: String,
     pub created: String,
     pub updated: String,
@@ -41,14 +40,14 @@ pub struct WorkspaceInput {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub path: Option<String>,
+    pub paths: Vec<String>,
     pub template: String,
     pub vars: Vec<WorkspaceVar>,
 }
 
 #[derive(Serialize)]
 pub struct InjectResult {
-    pub path: String,
+    pub paths: Vec<String>,
     pub written: Vec<String>,
 }
 
@@ -74,7 +73,7 @@ pub async fn workspace_list(state: State<'_, SharedState>) -> Result<Vec<Workspa
             id: ws.id,
             name: ws.name,
             description: ws.description,
-            path: ws.path,
+            paths: ws.paths,
             template: ws.template,
             created: ws.created,
             updated: ws.updated,
@@ -96,10 +95,11 @@ pub async fn workspace_save(
             workspace.id,
             &workspace.name,
             workspace.description.as_deref(),
-            workspace.path.as_deref(),
             &workspace.template,
         )
         .await?;
+
+    s.db.set_workspace_paths(ws_id, &workspace.paths).await?;
 
     let db_vars: Vec<DbWorkspaceVar> = workspace
         .vars
@@ -126,7 +126,7 @@ pub async fn workspace_delete(
     s.db.delete_workspace(id).await
 }
 
-/// Decrypt referenced vault items and write KEY=VALUE pairs into the .env at workspace.path.
+/// Decrypt referenced vault items and write KEY=VALUE pairs into each .env at workspace.paths.
 /// Merges with existing file content (existing keys not in the workspace are preserved).
 #[tauri::command]
 pub async fn workspace_inject(
@@ -144,11 +144,14 @@ pub async fn workspace_inject(
         .find(|w| w.id == id)
         .ok_or("workspace not found")?;
 
-    let path = ws.path.ok_or("workspace has no path configured")?;
+    if ws.paths.is_empty() {
+        return Err("workspace has no paths configured".into());
+    }
+
     let vars = s.db.get_workspace_vars(id).await?;
 
     if vars.is_empty() {
-        return Ok(InjectResult { path, written: vec![] });
+        return Ok(InjectResult { paths: ws.paths, written: vec![] });
     }
 
     // Decrypt vault items needed
@@ -176,38 +179,137 @@ pub async fn workspace_inject(
         inject_map.insert(v.key.clone(), value);
     }
 
-    // Read existing .env, merge, write back
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut lines: Vec<String> = existing.lines().map(String::from).collect();
-    let mut written: Vec<String> = Vec::new();
-    let mut updated_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Write inject_map into each configured .env path
+    let mut written_keys: Vec<String> = Vec::new();
+    let mut written_once = false;
 
-    // Update existing lines
-    for line in &mut lines {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') || !trimmed.contains('=') {
-            continue;
+    for path in &ws.paths {
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        let mut lines: Vec<String> = existing.lines().map(String::from).collect();
+        let mut updated_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut written: Vec<String> = Vec::new();
+
+        for line in &mut lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') || !trimmed.contains('=') {
+                continue;
+            }
+            let eq_pos = trimmed.find('=').unwrap();
+            let existing_key = trimmed[..eq_pos].trim().to_string();
+            if let Some(new_val) = inject_map.get(&existing_key) {
+                *line = format!("{}={}", existing_key, new_val);
+                updated_keys.insert(existing_key.clone());
+                written.push(existing_key);
+            }
         }
-        let eq_pos = trimmed.find('=').unwrap();
-        let existing_key = trimmed[..eq_pos].trim().to_string();
-        if let Some(new_val) = inject_map.get(&existing_key) {
-            *line = format!("{}={}", existing_key, new_val);
-            updated_keys.insert(existing_key.clone());
-            written.push(existing_key);
+
+        for (k, v) in &inject_map {
+            if !updated_keys.contains(k) {
+                lines.push(format!("{}={}", k, v));
+                written.push(k.clone());
+            }
+        }
+
+        let content = lines.join("\n") + "\n";
+        std::fs::write(path, content).map_err(|e| format!("write .env ({}): {e}", path))?;
+
+        if !written_once {
+            written.sort();
+            written_keys = written;
+            written_once = true;
         }
     }
 
-    // Append new keys not already in the file
-    for (k, v) in &inject_map {
-        if !updated_keys.contains(k) {
-            lines.push(format!("{}={}", k, v));
-            written.push(k.clone());
-        }
-    }
+    Ok(InjectResult { paths: ws.paths, written: written_keys })
+}
 
-    let content = lines.join("\n") + "\n";
-    std::fs::write(&path, content).map_err(|e| format!("write .env: {e}"))?;
+#[tauri::command]
+pub async fn workspace_pick_env_path() -> Result<Option<String>, String> {
+    let result = tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("Select .env file location")
+            .add_filter("Env files", &["env"])
+            .add_filter("All files", &["*"])
+            .save_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
 
-    written.sort();
-    Ok(InjectResult { path, written })
+    Ok(result.map(|p| p.to_string_lossy().into_owned()))
+}
+
+// ─── Export / Import ──────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+pub struct ExportedWorkspaceVar {
+    pub key: String,
+    pub literal: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ExportedWorkspace {
+    pub version: u8,
+    pub name: String,
+    pub description: Option<String>,
+    pub template: String,
+    pub vars: Vec<ExportedWorkspaceVar>,
+}
+
+#[tauri::command]
+pub async fn workspace_export(
+    workspace_id: i64,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let s = state.lock().await;
+    let workspaces = s.db.list_workspaces().await?;
+    let ws = workspaces
+        .into_iter()
+        .find(|w| w.id == workspace_id)
+        .ok_or("workspace not found")?;
+    let db_vars = s.db.get_workspace_vars(workspace_id).await?;
+
+    let exported = ExportedWorkspace {
+        version: 1,
+        name: ws.name.clone(),
+        description: ws.description.clone(),
+        template: ws.template.clone(),
+        vars: db_vars.into_iter().map(|v| ExportedWorkspaceVar {
+            key: v.key,
+            literal: if v.item_id.is_some() { None } else { v.literal },
+        }).collect(),
+    };
+
+    let json = serde_json::to_vec_pretty(&exported).map_err(|e| e.to_string())?;
+
+    let safe_name = ws.name.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
+    let default_name = format!("{}.cryptenv-ws", safe_name);
+
+    let path = tokio::task::spawn_blocking(move || {
+        rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter("CryptEnv Workspace", &["cryptenv-ws"])
+            .save_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "cancelled".to_string())?;
+
+    std::fs::write(&path, &json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn workspace_import() -> Result<ExportedWorkspace, String> {
+    let path = tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .add_filter("CryptEnv Workspace", &["cryptenv-ws"])
+            .pick_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "cancelled".to_string())?;
+
+    let json = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let ws: ExportedWorkspace = serde_json::from_slice(&json).map_err(|e| format!("invalid file: {e}"))?;
+    Ok(ws)
 }

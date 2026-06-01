@@ -309,7 +309,7 @@ export function WorkspaceManager() {
     if (!selected) return;
     try {
       await invoke('workspace_export', { workspaceId: selected.id });
-      showToast('Workspace exported');
+      showToast('Template saved');
     } catch (e) {
       if (String(e) !== 'cancelled') showToast(String(e), 'error');
     }
@@ -332,7 +332,7 @@ export function WorkspaceManager() {
       setPaths([]);
       setNewPath('');
       setConfirmDel(false);
-      showToast('Workspace imported — set paths and map vault refs, then save');
+      showToast('Template loaded — add paths and connect vault items, then save');
     } catch (e) {
       if (String(e) !== 'cancelled') showToast(String(e), 'error');
     }
@@ -355,7 +355,7 @@ export function WorkspaceManager() {
           onClick={handleImport}
           className="flex items-center gap-1 text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors"
         >
-          IMPORT
+          LOAD TEMPLATE
         </button>
         <button
           onClick={handleNew}
@@ -544,7 +544,7 @@ export function WorkspaceManager() {
                       onClick={handleExport}
                       className="px-3 py-[7px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-transparent border border-bd2 text-tx2 hover:text-tx transition-colors"
                     >
-                      EXPORT
+                      SAVE TEMPLATE
                     </button>
                   )}
                   <div className="flex-1" />

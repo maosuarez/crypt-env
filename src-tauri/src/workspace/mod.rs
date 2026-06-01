@@ -227,10 +227,10 @@ pub async fn workspace_inject(
 pub async fn workspace_pick_env_path() -> Result<Option<String>, String> {
     let result = tokio::task::spawn_blocking(|| {
         rfd::FileDialog::new()
-            .set_title("Select .env file location")
-            .add_filter("Env files", &["env"])
+            .set_title("Select .env file")
             .add_filter("All files", &["*"])
-            .save_file()
+            .add_filter("Env files", &["env"])
+            .pick_file()
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -286,6 +286,7 @@ pub async fn workspace_export(
 
     let path = tokio::task::spawn_blocking(move || {
         rfd::FileDialog::new()
+            .set_title("Save workspace template")
             .set_file_name(&default_name)
             .add_filter("CryptEnv Workspace", &["cryptenv-ws"])
             .save_file()
@@ -302,6 +303,7 @@ pub async fn workspace_export(
 pub async fn workspace_import() -> Result<ExportedWorkspace, String> {
     let path = tokio::task::spawn_blocking(|| {
         rfd::FileDialog::new()
+            .set_title("Load workspace template")
             .add_filter("CryptEnv Workspace", &["cryptenv-ws"])
             .pick_file()
     })

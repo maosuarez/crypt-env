@@ -2333,12 +2333,12 @@ async fn handle_relay_receive(
         }
     };
 
-    // Mark retrieved (best-effort, fire and forget)
+    // Delete after first use (burn-after-read, best-effort)
     let url_clone2 = supabase_url.clone();
     let key_clone2 = anon_key.clone();
     let code_clone2 = body.code.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        relay::relay_mark_retrieved(&url_clone2, &key_clone2, &code_clone2)
+        relay::relay_delete(&url_clone2, &key_clone2, &code_clone2)
     })
     .await;
 

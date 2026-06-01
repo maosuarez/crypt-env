@@ -469,6 +469,49 @@ fn tool_definitions() -> serde_json::Value {
                 },
                 "required": ["id"]
             }
+        },
+        {
+            "name": "crypt_env_list_workspaces",
+            "description": "List all workspaces with their name, template, path, and variable count.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "crypt_env_inject_workspace",
+            "description": "Inject workspace vars into the .env file at the workspace path. Identify by name or id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Workspace ID" },
+                    "name": { "type": "string", "description": "Workspace name (case-insensitive, used if id not given)" }
+                }
+            }
+        },
+        {
+            "name": "crypt_env_relay_send",
+            "description": "Send vault items via internet relay. Returns a code and passphrase. IMPORTANT: Show code and passphrase to user immediately. The passphrase is only shown once.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "item_ids": {
+                        "type": "array",
+                        "items": { "type": "integer" },
+                        "description": "IDs of vault items to share"
+                    }
+                },
+                "required": ["item_ids"]
+            }
+        },
+        {
+            "name": "crypt_env_relay_receive",
+            "description": "Receive vault items shared via internet relay using a code and passphrase from the sender.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "code": { "type": "string", "description": "Relay code provided by the sender (e.g. X7K2-M9P4)" },
+                    "passphrase": { "type": "string", "description": "Passphrase provided by the sender" }
+                },
+                "required": ["code", "passphrase"]
+            }
         }
     ])
 }
@@ -1486,6 +1529,163 @@ fn tool_delete_item(args: &serde_json::Value, token: &str) -> serde_json::Value 
     )
 }
 
+// ─── Workspace tool implementations ──────────────────────────────────────────
+
+fn tool_list_workspaces(token: &str) -> serde_json::Value {
+    let resp = match vault_get("/workspaces", token) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 {
+        return tool_err("vault_locked: unlock the vault first");
+    }
+    if status >= 400 {
+        return tool_err(format!("error listing workspaces (HTTP {status}): {text}"));
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_inject_workspace(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    // Resolve workspace ID: use id directly, or find by name
+    let workspace_id: i64 = if let Some(id) = args.get("id").and_then(|v| v.as_i64()) {
+        id
+    } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+        // Fetch all workspaces and find by name
+        let resp = match vault_get("/workspaces", token) {
+            Ok(r) => r,
+            Err(e) => return tool_err(e),
+        };
+        if resp.status().as_u16() == 403 {
+            return tool_err("vault_locked: unlock the vault first");
+        }
+        let text = match resp.text() {
+            Ok(t) => t,
+            Err(e) => return tool_err(format!("error reading workspaces: {e}")),
+        };
+        let list: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => return tool_err("error parsing workspace list"),
+        };
+        let name_lower = name.to_lowercase();
+        let found = list.as_array().and_then(|arr| {
+            arr.iter().find(|ws| {
+                ws.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.to_lowercase() == name_lower)
+                    .unwrap_or(false)
+            })
+        }).and_then(|ws| ws.get("id").and_then(|v| v.as_i64()));
+
+        match found {
+            Some(id) => id,
+            None => return tool_err(format!("workspace '{name}' not found")),
+        }
+    } else {
+        return tool_err("required: 'id' (integer) or 'name' (string)");
+    };
+
+    let resp = match vault_post(
+        &format!("/workspaces/{workspace_id}/inject"),
+        token,
+        &serde_json::json!({}),
+    ) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status == 404 { return tool_err(format!("workspace {workspace_id} not found")); }
+    if status >= 400 { return tool_err(format!("inject failed (HTTP {status}): {text}")); }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+// ─── Relay tool implementations ───────────────────────────────────────────────
+
+fn tool_relay_send(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let item_ids: Vec<i64> = match args.get("item_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_i64()).collect(),
+        None => return tool_err("required parameter: 'item_ids' (array of integers)"),
+    };
+
+    if item_ids.is_empty() {
+        return tool_err("item_ids must not be empty");
+    }
+
+    let body = serde_json::json!({ "item_ids": item_ids });
+    let resp = match vault_post("/relay/send", token, &body) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status >= 400 { return tool_err(format!("relay send failed (HTTP {status}): {text}")); }
+
+    // Surface the response including code and passphrase — the tool description
+    // instructs the model to show both to the user immediately.
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_relay_receive(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let code = match args.get("code").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => return tool_err("required parameter: 'code'"),
+    };
+    let passphrase = match args.get("passphrase").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return tool_err("required parameter: 'passphrase'"),
+    };
+
+    let body = serde_json::json!({ "code": code, "passphrase": passphrase });
+    let resp = match vault_post("/relay/receive", token, &body) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status >= 400 { return tool_err(format!("relay receive failed (HTTP {status}): {text}")); }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
 
 // ─── Category tool implementations ───────────────────────────────────────────
@@ -1688,6 +1888,10 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_
         "crypt_env_create_category" => tool_create_category(args, token),
         "crypt_env_update_category" => tool_update_category(args, token),
         "crypt_env_delete_category" => tool_delete_category(args, token),
+        "crypt_env_list_workspaces" => tool_list_workspaces(token),
+        "crypt_env_inject_workspace" => tool_inject_workspace(args, token),
+        "crypt_env_relay_send" => tool_relay_send(args, token),
+        "crypt_env_relay_receive" => tool_relay_receive(args, token),
         _ => tool_err(format!("unknown tool: {name}")),
     }
 }

@@ -144,16 +144,11 @@ pub fn relay_download(
         .ok_or(ShareError::Remote("code not found or already used".into()))
 }
 
-pub fn relay_mark_retrieved(
+pub fn relay_delete(
     supabase_url: &str,
     anon_key: &str,
     code: &str,
 ) -> Result<(), ShareError> {
-    #[derive(Serialize)]
-    struct Patch {
-        retrieved: bool,
-    }
-
     let client = reqwest::blocking::Client::new();
     let url = format!(
         "{}/rest/v1/relay_packages?code=eq.{}",
@@ -161,11 +156,9 @@ pub fn relay_mark_retrieved(
         code,
     );
     let _ = client
-        .patch(&url)
+        .delete(&url)
         .header("apikey", anon_key)
         .header("Authorization", format!("Bearer {}", anon_key))
-        .header("Content-Type", "application/json")
-        .json(&Patch { retrieved: true })
         .send()
         .map_err(|e| ShareError::Io(e.to_string()))?;
     Ok(())

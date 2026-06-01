@@ -309,7 +309,7 @@ pub async fn share_relay_receive(
     let key_clone2 = anon_key.clone();
     let code_clone2 = code.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        relay::relay_mark_retrieved(&url_clone2, &key_clone2, &code_clone2)
+        relay::relay_delete(&url_clone2, &key_clone2, &code_clone2)
     })
     .await;
 

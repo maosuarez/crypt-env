@@ -26,6 +26,9 @@ CryptEnv's MCP server integrates with AI coding agents (Claude Code, Claude Desk
 - **Command runner** — store terminal commands with `{{placeholders}}` and fill them on the fly
 - **Windows Hello biometric unlock** — unlock vault with fingerprint or face recognition (Windows 10/11)
 - **Auto-lock** — vault locks automatically after configurable inactivity timeout
+- **Workspaces** — group vault items by project, manage `.env` files with one click, pre-configured templates
+- **Interactive TUI** — access your vault from the terminal with `crypt-env tui` (ratatui-based, no GUI required)
+- **Secure secret sharing** — three methods: LAN bridge (local network, real-time), encrypted packages (offline, portable), or internet relay (remote teams via Supabase)
 - **Backup & restore** — export encrypted `.cenvbak` backups and restore with merge or replace modes
 - **Import from password managers** — import from `.env` files, Bitwarden, 1Password, or generic CSV
 - **Change master password** — update vault password and re-encrypt all items atomically
@@ -63,6 +66,83 @@ In Settings → Biometric Unlock → DISABLE. This immediately clears the stored
 - **Timing-safe** token comparison to prevent brute-force attacks
 - **Strict CSP** on the Tauri webview
 - **MCP never exposes secret values** — injects them directly as environment variables
+
+---
+
+## 📦 Workspaces
+
+Organize your vault items by project and manage environment variable files (`.env`) with templates for common tech stacks.
+
+### What are workspaces?
+
+A **workspace** groups vault item references and associates them with a `.env` file path. Instead of manually copying secrets into `.env` files, create a workspace, add references to vault items, and inject them all at once.
+
+### Pre-configured templates
+
+Choose from 6 built-in templates when creating a workspace:
+
+- **Generic** — basic KEY=VALUE pairs
+- **Node.js** — NODE_ENV, DEBUG, API_KEYS, etc.
+- **PostgreSQL** — DB_HOST, DB_PORT, DB_PASSWORD, DB_USER
+- **MongoDB** — MONGO_URI, MONGO_TIMEOUT, etc.
+- **Docker** — DOCKER_REGISTRY, DOCKER_USERNAME, etc.
+- **Python** — PYTHONPATH, VENV_PATH, SECRET_KEY, etc.
+
+### Workflow
+
+1. Go to **Settings** → **Workspaces**
+2. Click **Create Workspace** and select a template
+3. Enter workspace name and path to `.env` file (e.g., `/home/user/myproject/.env`)
+4. Click **Add Variable** and select vault items to include
+5. Click **Inject to Path** — all secrets are decrypted and written to the file
+
+### Usage
+
+Via CLI:
+
+```bash
+# Inject a workspace to its configured .env file
+crypt-env workspace inject "my-node-project"
+```
+
+Via UI: Settings → Workspaces → [select workspace] → **INJECT TO PATH**
+
+---
+
+## 💻 Interactive TUI
+
+Access your vault from the terminal without opening the GUI using `crypt-env tui`.
+
+### Features
+
+- **Master password unlock** — secured terminal input
+- **Item list with fuzzy search** — type `/` to search in real-time
+- **Full item metadata** — view details including categories and notes
+- **Reveal & copy** — decrypt secrets and copy to clipboard from within the TUI
+- **Vim-style navigation** — hjkl or arrow keys to navigate, Enter to view details
+- **Help built-in** — press `?` for keybindings reference
+
+### Keybindings
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` or `j` / `k` | Navigate list |
+| `/` | Start fuzzy search (incremental filtering) |
+| `Enter` | View selected item's full details |
+| `v` | Reveal encrypted secret value |
+| `c` | Copy selected secret to clipboard |
+| `d` | Delete item (with confirmation) |
+| `r` | Refresh list from database |
+| `?` | Show help |
+| `q` | Quit and lock vault |
+
+### Usage
+
+```bash
+crypt-env tui
+```
+
+Useful for SSH sessions, CI/CD scripts, or environments where a GUI is unavailable.
 
 ---
 
@@ -305,6 +385,54 @@ crypt-env share import -f secrets.vault
 # Output: Imported 2 items successfully
 ```
 
+#### `crypt-env share relay send <ITEM_IDS>...`
+
+Share items via internet relay for remote teams (requires Supabase setup).
+
+```bash
+# Upload items to relay and get code + passphrase
+crypt-env share relay send api_key_1 api_key_2
+
+# Output:
+# Code: 1234-5678 (expires in 5 minutes)
+# Passphrase: xK9pL2mN (share separately!)
+```
+
+**Note**: Share the code and passphrase separately (via different channels like chat and phone).
+
+#### `crypt-env share relay receive <CODE>`
+
+Receive items from an internet relay session.
+
+```bash
+crypt-env share relay receive 1234-5678
+
+# Prompts for passphrase (masked, no echo)
+# Output: Imported 2 items successfully
+```
+
+#### `crypt-env tui`
+
+Launch the interactive terminal UI for full vault access without a GUI.
+
+```bash
+crypt-env tui
+# Displays: Master password prompt → Item list with fuzzy search → Item details
+```
+
+Press `?` inside the TUI for keybindings help.
+
+#### `crypt-env workspace inject <WORKSPACE_NAME>`
+
+Inject a workspace's environment variables to its configured `.env` file.
+
+```bash
+# Inject a workspace by name
+crypt-env workspace inject "my-node-project"
+
+# Output: Injected 5 variables to /home/user/myproject/.env
+```
+
 ### Examples
 
 ```bash
@@ -379,10 +507,66 @@ For scenarios where real-time sharing isn't possible (different networks, email 
 - Passphrase never stored, only used during encryption/decryption
 - `.vault` file is self-contained and portable (can be stored offline)
 
+### Internet Relay (Remote Teams, Cloud-Free)
+
+For users on different networks without real-time connectivity, CryptEnv provides a Supabase-backed relay for secure internet-based sharing.
+
+**Flow**:
+1. Sender runs: `crypt-env share relay send api_key_1 api_key_2`
+   - Items are encrypted with AES-256-GCM
+   - Uploaded to Supabase relay table
+   - Generates 4-digit code (XXXX-XXXX format) + random 12-char passphrase
+   - Code + passphrase are shown once to sender
+
+2. Sender shares code + passphrase out-of-band (via chat, email, call)
+   - **Passphrase is NOT stored** anywhere in the relay
+   - **Code is the only lookup handle** stored in Supabase
+   - Code expires in 5 minutes by default
+
+3. Receiver runs: `crypt-env share relay receive XXXX-XXXX`
+   - Prompted for passphrase (input is masked, does not echo)
+   - Retrieves encrypted payload from Supabase using code
+   - Derives decryption key from passphrase using Argon2id KDF
+   - Decrypts and imports items to vault
+   - Relay record is auto-deleted (burn-after-read)
+
+**Security**:
+- AES-256-GCM encryption (authenticated, detects tampering)
+- Argon2id KDF with high memory cost (32MB) — passphrase brute-forcing costs ~1-2 seconds per attempt
+- Code + passphrase required (neither alone is sufficient)
+- Burn-after-read prevents replay attacks and audit trails
+- 24-hour TTL prevents relay table bloat
+- Supabase URL + key stored plaintext in Settings (acceptable — they control relay table only, not your vault)
+
+**Setup** (one-time):
+
+1. Create a free [Supabase project](https://supabase.com)
+2. Run this SQL in the Supabase SQL Editor:
+   ```sql
+   CREATE TABLE relay (
+       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+       code_hash TEXT UNIQUE NOT NULL,
+       encrypted_payload BYTEA NOT NULL,
+       salt BYTEA NOT NULL,
+       nonce BYTEA NOT NULL,
+       created_at TIMESTAMP DEFAULT now(),
+       expires_at TIMESTAMP DEFAULT now() + INTERVAL '24 hours',
+       accessed BOOLEAN DEFAULT FALSE
+   );
+   CREATE INDEX idx_relay_code_hash ON relay(code_hash);
+   CREATE INDEX idx_relay_expires_at ON relay(expires_at);
+   ```
+
+3. In CryptEnv Settings → Internet Sharing, enter:
+   - Supabase project URL
+   - Supabase anon API key (from Settings → API in Supabase)
+
+4. Click **TEST CONNECTIVITY** to verify
+
 ### Audit Trail
 
 All share operations (send, receive, import, export) are logged in the vault's `share_log` database table:
-- Mode (LAN bridge or encrypted package)
+- Mode (LAN bridge, encrypted package, or internet relay)
 - Direction (sent or received)
 - Item IDs shared
 - Peer fingerprint (LAN mode) or timestamp

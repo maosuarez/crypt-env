@@ -89,7 +89,7 @@ function BtnPrimary({
       onClick={onClick}
       disabled={disabled}
       className={[
-        'flex items-center justify-center gap-2 rounded px-4 h-9',
+        'flex items-center justify-center gap-2 rounded-[3px] px-4 h-9',
         'bg-accent text-[#020504] text-[11px] font-bold tracking-wider font-ui',
         'cursor-pointer transition-opacity shrink-0',
         'disabled:opacity-30 disabled:cursor-not-allowed hover:opacity-90',
@@ -117,7 +117,7 @@ function BtnSecondary({
       onClick={onClick}
       disabled={disabled}
       className={[
-        'flex items-center justify-center gap-2 rounded px-4 h-9',
+        'flex items-center justify-center gap-2 rounded-[3px] px-4 h-9',
         'border border-bd2 text-tx2 text-[11px] font-medium tracking-wider font-ui bg-transparent',
         'cursor-pointer transition-all duration-150 shrink-0',
         'disabled:opacity-30 disabled:cursor-not-allowed hover:border-tx3 hover:text-tx',
@@ -143,7 +143,7 @@ function BtnDanger({
       onClick={onClick}
       disabled={disabled}
       className={[
-        'flex items-center justify-center gap-2 rounded px-4 h-9',
+        'flex items-center justify-center gap-2 rounded-[3px] px-4 h-9',
         'bg-danger-b border border-danger text-danger',
         'text-[11px] font-bold tracking-wider font-ui',
         'cursor-pointer transition-opacity shrink-0',
@@ -526,7 +526,7 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
           <button
             onClick={() => { setMethod('lan'); setError(''); }}
             className={[
-              'flex-1 border rounded-[4px] p-4 text-left transition-all duration-150 cursor-pointer',
+              'flex-1 border rounded-[3px] p-4 text-left transition-all duration-150 cursor-pointer',
               method === 'lan'
                 ? 'bg-accent-b border-accent-d'
                 : 'bg-raised border-bd hover:border-bd2',
@@ -546,7 +546,7 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
           <button
             onClick={() => { setMethod('file'); setError(''); }}
             className={[
-              'flex-1 border rounded-[4px] p-4 text-left transition-all duration-150 cursor-pointer',
+              'flex-1 border rounded-[3px] p-4 text-left transition-all duration-150 cursor-pointer',
               method === 'file'
                 ? 'bg-accent-b border-accent-d'
                 : 'bg-raised border-bd hover:border-bd2',
@@ -567,7 +567,7 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
         <button
           onClick={() => { setMethod('internet'); setError(''); }}
           className={[
-            'w-full border rounded-[4px] p-3 text-left transition-all duration-150 cursor-pointer mb-4',
+            'w-full border rounded-[3px] p-3 text-left transition-all duration-150 cursor-pointer mb-4',
             method === 'internet'
               ? 'bg-accent-b border-accent-d'
               : 'bg-raised border-bd hover:border-bd2',
@@ -645,7 +645,7 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
           <Countdown seconds={300} />
         </div>
         {sessionNote && (
-          <div className="mb-3 rounded border border-amber-700/40 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-400 font-mono leading-relaxed">
+          <div className="mb-3 rounded-[3px] border border-warn-d bg-warn-b px-3 py-2 text-[11px] text-warn font-mono leading-relaxed">
             {sessionNote}
           </div>
         )}
@@ -887,7 +887,7 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
             onClick={handleCopyPassphrase}
             title="Copy passphrase"
             className={[
-              'flex items-center gap-1.5 border rounded px-2 py-1',
+              'flex items-center gap-1.5 border rounded-[3px] px-2 py-1',
               'text-[10px] font-mono tracking-wide shrink-0 transition-all duration-150 cursor-pointer',
               copiedPass
                 ? 'bg-accent-b border-accent-d text-accent'
@@ -1194,7 +1194,7 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
           </div>
           <button
             onClick={step === 'method' ? onClose : handleCancel}
-            className="flex items-center justify-center w-6 h-6 rounded text-tx3 hover:text-tx hover:bg-raised transition-all duration-150 cursor-pointer border-none bg-transparent"
+            className="flex items-center justify-center w-6 h-6 rounded-[3px] text-tx3 hover:text-tx hover:bg-raised transition-all duration-150 cursor-pointer border-none bg-transparent"
           >
             <Icon name="close" size={13} />
           </button>

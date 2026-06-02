@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './ui/Icon';
 import { useVaultStore } from '../store';
 import { useWorkspaceStore } from '../store/workspaceStore';
-import type { WorkspaceVar } from '../types';
+import type { WorkspaceVar, Workspace } from '../types';
 import type { WorkspaceTemplate } from '../types';
 
 interface ExportedWorkspace {
@@ -25,7 +25,7 @@ const TEMPLATES: { id: WorkspaceTemplate; label: string; vars: string[] }[] = [
   { id: 'python',   label: 'Python',      vars: ['FLASK_ENV', 'SECRET_KEY', 'DATABASE_URL', 'REDIS_URL', 'DEBUG'] },
 ];
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+// ─── TemplateModal ────────────────────────────────────────────────────────────
 
 function TemplateModal({
   onSelect,
@@ -64,6 +64,8 @@ function TemplateModal({
     </div>
   );
 }
+
+// ─── VarRow ───────────────────────────────────────────────────────────────────
 
 function VarRow({
   v,
@@ -151,27 +153,127 @@ function VarRow({
   );
 }
 
+// ─── WorkspaceCard ────────────────────────────────────────────────────────────
+
+const MAX_CHIPS = 4;
+
+function truncatePath(p: string): string {
+  const norm = p.replace(/\\/g, '/');
+  return norm.length > 38 ? '…' + norm.slice(-37) : norm;
+}
+
+function WorkspaceCard({
+  ws,
+  onOpen,
+  onInject,
+}: {
+  ws:       Workspace;
+  onOpen:   () => void;
+  onInject: (id: number) => Promise<{ paths: string[]; written: string[] }>;
+}) {
+  const [injectState, setInjectState] = useState<'idle' | 'ok' | 'err'>('idle');
+
+  const chips    = ws.vars.slice(0, MAX_CHIPS);
+  const overflow = ws.vars.length - MAX_CHIPS;
+  const firstPath = ws.paths[0];
+  const canInject = ws.paths.length > 0 && ws.vars.length > 0;
+
+  const handleInjectClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!canInject || injectState !== 'idle') return;
+    try {
+      await onInject(ws.id);
+      setInjectState('ok');
+      setTimeout(() => setInjectState('idle'), 2000);
+    } catch {
+      setInjectState('err');
+      setTimeout(() => setInjectState('idle'), 2000);
+    }
+  };
+
+  return (
+    <button
+      onClick={onOpen}
+      className="w-full text-left px-3.5 py-3 border-b border-bd hover:bg-raised transition-colors"
+    >
+      {/* Row 1: name + template badge */}
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="flex-1 text-[13px] font-semibold text-tx font-ui truncate">{ws.name}</span>
+        <span className="text-[9px] font-mono text-tx3 bg-bg border border-bd px-1.5 py-[1px] rounded-[2px] uppercase shrink-0">
+          {ws.template}
+        </span>
+      </div>
+
+      {/* Row 2: key chips */}
+      <div className="flex items-center gap-1 mb-2 flex-wrap min-h-[18px]">
+        {ws.vars.length === 0 ? (
+          <span className="text-[10px] font-mono text-tx3 italic">no variables yet</span>
+        ) : (
+          <>
+            {chips.map((v) => (
+              <span
+                key={v.id}
+                className="text-[10px] font-mono px-1.5 py-[1px] bg-bg border border-bd2 text-tx3 rounded-[2px] max-w-[9rem] truncate"
+              >
+                {v.key || '…'}
+              </span>
+            ))}
+            {overflow > 0 && (
+              <span className="text-[10px] font-mono text-tx3">+{overflow}</span>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Row 3: path + inject button */}
+      <div className="flex items-center gap-2">
+        <span className="flex-1 text-[10px] font-mono text-tx3 truncate">
+          {firstPath ? truncatePath(firstPath) : (
+            <span className="opacity-50">no path configured</span>
+          )}
+        </span>
+        <button
+          onClick={handleInjectClick}
+          disabled={!canInject || injectState !== 'idle'}
+          title={!canInject ? 'Set a path and add variables first' : undefined}
+          className={[
+            'shrink-0 text-[9px] font-mono font-bold px-2 py-[3px] rounded-[2px] border transition-colors',
+            injectState === 'ok'
+              ? 'border-transparent text-tx3 cursor-default'
+              : injectState === 'err'
+              ? 'border-transparent text-danger cursor-default'
+              : canInject
+              ? 'border-accent-d text-accent bg-accent-b hover:opacity-80 cursor-pointer'
+              : 'border-bd text-tx3 opacity-40 cursor-not-allowed',
+          ].join(' ')}
+        >
+          {injectState === 'ok' ? '✓ injected' : injectState === 'err' ? '✗ failed' : 'INJECT ▶'}
+        </button>
+      </div>
+    </button>
+  );
+}
+
 // ─── WorkspaceManager ─────────────────────────────────────────────────────────
 
 export function WorkspaceManager() {
-  const go         = useVaultStore((s) => s.go);
-  const showToast  = useVaultStore((s) => s.showToast);
-  const items      = useVaultStore((s) => s.items);
+  const go        = useVaultStore((s) => s.go);
+  const showToast = useVaultStore((s) => s.showToast);
+  const items     = useVaultStore((s) => s.items);
 
   const { workspaces, selected, loading, load, select, save, remove, inject } = useWorkspaceStore();
 
-  // Draft state for the editor panel
-  const [name,        setName]        = useState('');
-  const [description, setDescription] = useState('');
-  const [paths,       setPaths]       = useState<string[]>([]);
-  const [newPath,     setNewPath]     = useState('');
-  const [template,    setTemplate]    = useState<WorkspaceTemplate>('generic');
-  const [vars,        setVars]        = useState<WorkspaceVar[]>([]);
-  const [saving,      setSaving]      = useState(false);
-  const [injecting,   setInjecting]   = useState(false);
-  const [confirmDel,  setConfirmDel]  = useState(false);
+  const [name,          setName]          = useState('');
+  const [description,   setDescription]   = useState('');
+  const [paths,         setPaths]         = useState<string[]>([]);
+  const [newPath,       setNewPath]       = useState('');
+  const [template,      setTemplate]      = useState<WorkspaceTemplate>('generic');
+  const [vars,          setVars]          = useState<WorkspaceVar[]>([]);
+  const [saving,        setSaving]        = useState(false);
+  const [injecting,     setInjecting]     = useState(false);
+  const [confirmDel,    setConfirmDel]    = useState(false);
   const [templateModal, setTemplateModal] = useState(false);
-  const [isCreating,  setIsCreating]  = useState(false);
+  const [isCreating,    setIsCreating]    = useState(false);
 
   useEffect(() => { load(); }, []);
 
@@ -213,6 +315,12 @@ export function WorkspaceManager() {
     id:   i.id,
     name: ('name' in i ? i.name : 'title' in i ? (i as any).title : '') || `#${i.id}`,
   }));
+
+  const goBackToList = () => {
+    select(null);
+    setIsCreating(false);
+    setConfirmDel(false);
+  };
 
   const handleNew = () => {
     select(null);
@@ -261,6 +369,7 @@ export function WorkspaceManager() {
     if (!selected) return;
     try {
       await remove(selected.id);
+      goBackToList();
       showToast('Workspace deleted');
     } catch (e) {
       showToast(String(e), 'error');
@@ -338,263 +447,271 @@ export function WorkspaceManager() {
     }
   };
 
-  const isEditing = selected !== null || isCreating;
+  const isDetail = selected !== null || isCreating;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden animate-fade-in relative">
-      {/* Header */}
-      <div className="px-3.5 py-[9px] border-b border-bd flex items-center gap-[10px] shrink-0">
-        <button
-          onClick={() => go('vault')}
-          className="flex items-center gap-1 text-[12px] font-medium font-ui text-tx3 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
-        >
-          <Icon name="back" size={13} />Back
-        </button>
-        <div className="flex-1 text-[13px] font-semibold text-center text-tx">Workspaces</div>
-        <button
-          onClick={handleImport}
-          className="flex items-center gap-1 text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors"
-        >
-          LOAD TEMPLATE
-        </button>
-        <button
-          onClick={handleNew}
-          className="flex items-center gap-1 text-[11px] font-bold font-ui text-accent border border-accent-d rounded-[3px] px-2.5 py-[4px] hover:bg-accent-b transition-colors"
-        >
-          <Icon name="plus" size={12} />NEW
-        </button>
-      </div>
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar */}
-        <div className="w-[220px] shrink-0 border-r border-bd overflow-y-auto bg-bg">
+      {/* ── Header ── */}
+      {isDetail ? (
+        <div className="px-3.5 py-[9px] border-b border-bd flex items-center gap-[10px] shrink-0">
+          <button
+            onClick={goBackToList}
+            className="flex items-center gap-1 text-[12px] font-medium font-ui text-tx3 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
+          >
+            <Icon name="back" size={13} />workspaces
+          </button>
+          <div className="flex-1 text-[13px] font-semibold text-center text-tx truncate px-1">
+            {isCreating ? 'New Workspace' : (selected?.name ?? '')}
+          </div>
+          {selected && (
+            <button
+              onClick={handleExport}
+              className="text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors whitespace-nowrap"
+            >
+              SAVE TEMPLATE
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="px-3.5 py-[9px] border-b border-bd flex items-center gap-[10px] shrink-0">
+          <button
+            onClick={() => go('vault')}
+            className="flex items-center gap-1 text-[12px] font-medium font-ui text-tx3 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
+          >
+            <Icon name="back" size={13} />Back
+          </button>
+          <div className="flex-1 text-[13px] font-semibold text-center text-tx">Workspaces</div>
+          <button
+            onClick={handleImport}
+            className="text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors"
+          >
+            LOAD TEMPLATE
+          </button>
+          <button
+            onClick={handleNew}
+            className="flex items-center gap-1 text-[11px] font-bold font-ui text-accent border border-accent-d rounded-[3px] px-2.5 py-[4px] hover:bg-accent-b transition-colors"
+          >
+            <Icon name="plus" size={12} />NEW
+          </button>
+        </div>
+      )}
+
+      {/* ── Content ── */}
+      {isDetail ? (
+        <>
+          {/* Editor — full width */}
+          <div className="flex-1 overflow-y-auto px-4 py-3">
+            <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.12em] mb-3 pb-1.5 border-b border-bd">
+              // WORKSPACE
+            </div>
+
+            {/* Name */}
+            <div className="mb-3">
+              <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">NAME</div>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="my-project"
+                className="w-full bg-bg border border-bd2 text-tx font-mono text-[13px] rounded-[3px] px-3 py-[7px] outline-none focus:border-accent-d transition-colors"
+              />
+            </div>
+
+            {/* Description */}
+            <div className="mb-3">
+              <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">DESCRIPTION</div>
+              <input
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Optional notes"
+                className="w-full bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-3 py-[7px] outline-none focus:border-accent-d transition-colors"
+              />
+            </div>
+
+            {/* Paths */}
+            <div className="mb-3">
+              <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">
+                PATHS <span className="text-tx3 normal-case tracking-normal font-normal">.env file paths for inject</span>
+              </div>
+              {paths.map((p, idx) => (
+                <div key={idx} className="flex items-center gap-1.5 mb-1">
+                  <span className="flex-1 bg-bg border border-bd2 text-tx font-mono text-[11px] rounded-[3px] px-2 py-[5px] truncate">{p}</span>
+                  <button
+                    onClick={() => removePath(idx)}
+                    className="text-tx3 hover:text-danger transition-colors shrink-0"
+                  >
+                    <Icon name="trash" size={12} />
+                  </button>
+                </div>
+              ))}
+              <div className="flex gap-1.5 mt-1">
+                <input
+                  value={newPath}
+                  onChange={(e) => setNewPath(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addPath(); } }}
+                  placeholder="C:\projects\myapp\.env"
+                  className="flex-1 bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-3 py-[6px] outline-none focus:border-accent-d transition-colors"
+                />
+                <button
+                  onClick={handlePickEnvPath}
+                  title="Browse for .env file"
+                  className="px-2.5 py-[6px] rounded-[3px] text-[10px] font-bold font-ui text-tx2 border border-bd2 hover:text-tx transition-colors"
+                >
+                  <Icon name="external" size={12} />
+                </button>
+                <button
+                  onClick={addPath}
+                  disabled={!newPath.trim()}
+                  className="px-2.5 py-[6px] rounded-[3px] text-[10px] font-bold font-ui text-accent border border-accent-d hover:bg-accent-b transition-colors disabled:opacity-40"
+                >
+                  ADD
+                </button>
+              </div>
+            </div>
+
+            {/* Template */}
+            <div className="mb-3">
+              <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">TEMPLATE</div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-mono text-accent bg-accent-b border border-accent-d rounded-[3px] px-2 py-[3px] capitalize">
+                  {template}
+                </span>
+                <button
+                  onClick={() => setTemplateModal(true)}
+                  className="text-[10px] font-ui font-medium text-tx2 border border-bd2 rounded-[3px] px-2 py-[3px] hover:text-tx transition-colors"
+                >
+                  CHANGE
+                </button>
+              </div>
+            </div>
+
+            {/* Variables */}
+            <div className="mt-4">
+              <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.12em] mb-2 pb-1.5 border-b border-bd flex items-center justify-between">
+                <span>// VARIABLES</span>
+                <button
+                  onClick={addVar}
+                  className="flex items-center gap-1 text-accent text-[10px] font-ui font-bold hover:opacity-80 transition-opacity"
+                >
+                  <Icon name="plus" size={10} />ADD
+                </button>
+              </div>
+
+              {vars.length === 0 && (
+                <div className="text-[11px] text-tx3 font-mono py-2">
+                  No variables. Click ADD or change template.
+                </div>
+              )}
+
+              {vars.map((v, idx) => (
+                <VarRow
+                  key={v.id}
+                  v={v}
+                  vaultItems={vaultItems}
+                  onChange={(updated) =>
+                    setVars((prev) => prev.map((x, i) => (i === idx ? updated : x)))
+                  }
+                  onDelete={() => setVars((prev) => prev.filter((_, i) => i !== idx))}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Footer actions */}
+          <div className="px-4 py-3 border-t border-bd bg-bg shrink-0">
+            <div className="flex items-center gap-2">
+              {/* Inject */}
+              {selected && (
+                <button
+                  onClick={handleInject}
+                  disabled={injecting || paths.length === 0}
+                  className="flex items-center gap-1.5 px-3 py-[7px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-transparent border border-accent-d text-accent hover:bg-accent-b transition-colors disabled:opacity-40"
+                >
+                  {injecting
+                    ? <><div className="w-2.5 h-2.5 rounded-full border-2 border-transparent border-t-current animate-spin-fast" />INJECTING…</>
+                    : <><Icon name="export" size={11} />INJECT</>}
+                </button>
+              )}
+              <div className="flex-1" />
+              {/* Delete */}
+              {selected && !confirmDel && (
+                <button
+                  onClick={() => setConfirmDel(true)}
+                  className="px-3 py-[7px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-transparent border border-bd2 text-tx3 hover:text-danger hover:border-danger transition-colors"
+                >
+                  DELETE
+                </button>
+              )}
+              {confirmDel && (
+                <>
+                  <button
+                    onClick={() => setConfirmDel(false)}
+                    className="px-3 py-[7px] rounded-[3px] text-[11px] font-ui cursor-pointer bg-transparent border border-bd2 text-tx2 hover:text-tx transition-colors"
+                  >
+                    CANCEL
+                  </button>
+                  <button
+                    onClick={handleDelete}
+                    className="px-3 py-[7px] rounded-[3px] text-[11px] font-bold font-ui cursor-pointer bg-danger border-none text-white hover:opacity-90 transition-opacity"
+                  >
+                    CONFIRM DELETE
+                  </button>
+                </>
+              )}
+              {/* Save */}
+              <button
+                onClick={handleSave}
+                disabled={saving || !name.trim()}
+                className="px-4 py-[7px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-accent border-none text-[#020504] hover:opacity-90 transition-opacity disabled:opacity-40 flex items-center gap-1.5"
+              >
+                {saving
+                  ? <><div className="w-2.5 h-2.5 rounded-full border-2 border-transparent border-t-[#020504] animate-spin-fast" />SAVING…</>
+                  : 'SAVE'}
+              </button>
+            </div>
+          </div>
+        </>
+      ) : (
+        /* ── List view ── */
+        <div className="flex-1 overflow-y-auto bg-surface">
           {loading && (
             <div className="p-4 text-[11px] text-tx3 font-mono">Loading…</div>
           )}
           {!loading && workspaces.length === 0 && (
-            <div className="p-4 text-[11px] text-tx3 font-mono leading-[1.7]">
-              No workspaces yet.<br />Click NEW to create one.
+            <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-6">
+              <div className="text-[11px] text-tx3 font-mono leading-[1.8]">
+                No workspaces yet.<br />
+                <span className="text-[10px]">Group env vars for a project context.</span>
+              </div>
+              <button
+                onClick={handleNew}
+                className="flex items-center gap-1 text-[11px] font-bold font-ui text-accent border border-accent-d rounded-[3px] px-3 py-[5px] hover:bg-accent-b transition-colors"
+              >
+                <Icon name="plus" size={11} />NEW WORKSPACE
+              </button>
             </div>
           )}
           {workspaces.map((ws) => (
-            <button
+            <WorkspaceCard
               key={ws.id}
-              onClick={() => { setIsCreating(false); select(ws); }}
-              className={[
-                'w-full text-left px-3 py-2.5 border-b border-bd transition-colors',
-                selected?.id === ws.id
-                  ? 'bg-accent-b border-l-2 border-l-accent'
-                  : 'hover:bg-raised border-l-2 border-l-transparent',
-              ].join(' ')}
-            >
-              <div className="text-[12px] font-semibold text-tx font-ui truncate">{ws.name}</div>
-              <div className="flex items-center gap-1.5 mt-0.5">
-                <span className="text-[9px] font-mono text-tx3 bg-raised px-1.5 py-[1px] rounded-[2px] uppercase">{ws.template}</span>
-                <span className="text-[9px] text-tx3 font-mono">{ws.vars.length} var{ws.vars.length !== 1 ? 's' : ''}</span>
-              </div>
-            </button>
+              ws={ws}
+              onOpen={() => { setIsCreating(false); select(ws); }}
+              onInject={inject}
+            />
           ))}
         </div>
-
-        {/* Editor panel */}
-        <div className="flex-1 flex flex-col overflow-hidden bg-surface">
-          {!isEditing && !selected ? (
-            <div className="flex-1 flex items-center justify-center">
-              <div className="text-center text-tx3 font-mono text-[12px] leading-[1.8]">
-                Select or create a workspace<br />
-                <span className="text-[10px]">Workspaces group env vars for a project context</span>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="flex-1 overflow-y-auto px-4 py-3">
-                <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.12em] mb-3 pb-1.5 border-b border-bd">
-                  // WORKSPACE
-                </div>
-
-                {/* Name */}
-                <div className="mb-3">
-                  <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">NAME</div>
-                  <input
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="my-project"
-                    className="w-full bg-bg border border-bd2 text-tx font-mono text-[13px] rounded-[3px] px-3 py-[7px] outline-none focus:border-accent-d transition-colors"
-                  />
-                </div>
-
-                {/* Description */}
-                <div className="mb-3">
-                  <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">DESCRIPTION</div>
-                  <input
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    placeholder="Optional notes"
-                    className="w-full bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-3 py-[7px] outline-none focus:border-accent-d transition-colors"
-                  />
-                </div>
-
-                {/* Paths */}
-                <div className="mb-3">
-                  <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">
-                    PATHS <span className="text-tx3 normal-case tracking-normal font-normal">.env file paths for inject</span>
-                  </div>
-                  {paths.map((p, idx) => (
-                    <div key={idx} className="flex items-center gap-1.5 mb-1">
-                      <span className="flex-1 bg-bg border border-bd2 text-tx font-mono text-[11px] rounded-[3px] px-2 py-[5px] truncate">{p}</span>
-                      <button
-                        onClick={() => removePath(idx)}
-                        className="text-tx3 hover:text-danger transition-colors shrink-0"
-                      >
-                        <Icon name="trash" size={12} />
-                      </button>
-                    </div>
-                  ))}
-                  <div className="flex gap-1.5 mt-1">
-                    <input
-                      value={newPath}
-                      onChange={(e) => setNewPath(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addPath(); } }}
-                      placeholder="C:\projects\myapp\.env"
-                      className="flex-1 bg-bg border border-bd2 text-tx font-mono text-[12px] rounded-[3px] px-3 py-[6px] outline-none focus:border-accent-d transition-colors"
-                    />
-                    <button
-                      onClick={handlePickEnvPath}
-                      title="Browse for .env file"
-                      className="px-2.5 py-[6px] rounded-[3px] text-[10px] font-bold font-ui text-tx2 border border-bd2 hover:text-tx transition-colors"
-                    >
-                      <Icon name="external" size={12} />
-                    </button>
-                    <button
-                      onClick={addPath}
-                      disabled={!newPath.trim()}
-                      className="px-2.5 py-[6px] rounded-[3px] text-[10px] font-bold font-ui text-accent border border-accent-d hover:bg-accent-b transition-colors disabled:opacity-40"
-                    >
-                      ADD
-                    </button>
-                  </div>
-                </div>
-
-                {/* Template */}
-                <div className="mb-3">
-                  <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">TEMPLATE</div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-mono text-accent bg-accent-b border border-accent-d rounded-[3px] px-2 py-[3px] capitalize">
-                      {template}
-                    </span>
-                    <button
-                      onClick={() => setTemplateModal(true)}
-                      className="text-[10px] font-ui font-medium text-tx2 border border-bd2 rounded-[3px] px-2 py-[3px] hover:text-tx transition-colors"
-                    >
-                      CHANGE
-                    </button>
-                  </div>
-                </div>
-
-                {/* Variables */}
-                <div className="mt-4">
-                  <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.12em] mb-2 pb-1.5 border-b border-bd flex items-center justify-between">
-                    <span>// VARIABLES</span>
-                    <button
-                      onClick={addVar}
-                      className="flex items-center gap-1 text-accent text-[10px] font-ui font-bold hover:opacity-80 transition-opacity"
-                    >
-                      <Icon name="plus" size={10} />ADD
-                    </button>
-                  </div>
-
-                  {vars.length === 0 && (
-                    <div className="text-[11px] text-tx3 font-mono py-2">
-                      No variables. Click ADD or change template.
-                    </div>
-                  )}
-
-                  {vars.map((v, idx) => (
-                    <VarRow
-                      key={v.id}
-                      v={v}
-                      vaultItems={vaultItems}
-                      onChange={(updated) =>
-                        setVars((prev) => prev.map((x, i) => (i === idx ? updated : x)))
-                      }
-                      onDelete={() => setVars((prev) => prev.filter((_, i) => i !== idx))}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              {/* Footer actions */}
-              <div className="px-4 py-3 border-t border-bd bg-bg shrink-0">
-                <div className="flex items-center gap-2">
-                  {/* Inject */}
-                  {selected && (
-                    <button
-                      onClick={handleInject}
-                      disabled={injecting || paths.length === 0}
-                      className="flex items-center gap-1.5 px-3 py-[7px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-transparent border border-accent-d text-accent hover:bg-accent-b transition-colors disabled:opacity-40"
-                    >
-                      {injecting
-                        ? <><div className="w-2.5 h-2.5 rounded-full border-2 border-transparent border-t-current animate-spin-fast" />INJECTING…</>
-                        : <><Icon name="export" size={11} />INJECT TO PATH</>}
-                    </button>
-                  )}
-                  {/* Export */}
-                  {selected && (
-                    <button
-                      onClick={handleExport}
-                      className="px-3 py-[7px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-transparent border border-bd2 text-tx2 hover:text-tx transition-colors"
-                    >
-                      SAVE TEMPLATE
-                    </button>
-                  )}
-                  <div className="flex-1" />
-                  {/* Delete */}
-                  {selected && !confirmDel && (
-                    <button
-                      onClick={() => setConfirmDel(true)}
-                      className="px-3 py-[7px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-transparent border border-bd2 text-tx3 hover:text-danger hover:border-danger transition-colors"
-                    >
-                      DELETE
-                    </button>
-                  )}
-                  {confirmDel && (
-                    <>
-                      <button
-                        onClick={() => setConfirmDel(false)}
-                        className="px-3 py-[7px] rounded-[3px] text-[11px] font-ui cursor-pointer bg-transparent border border-bd2 text-tx2 hover:text-tx transition-colors"
-                      >
-                        CANCEL
-                      </button>
-                      <button
-                        onClick={handleDelete}
-                        className="px-3 py-[7px] rounded-[3px] text-[11px] font-bold font-ui cursor-pointer bg-danger border-none text-white hover:opacity-90 transition-opacity"
-                      >
-                        CONFIRM DELETE
-                      </button>
-                    </>
-                  )}
-                  {/* Save */}
-                  <button
-                    onClick={handleSave}
-                    disabled={saving || !name.trim()}
-                    className="px-4 py-[7px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-accent border-none text-[#020504] hover:opacity-90 transition-opacity disabled:opacity-40 flex items-center gap-1.5"
-                  >
-                    {saving
-                      ? <><div className="w-2.5 h-2.5 rounded-full border-2 border-transparent border-t-[#020504] animate-spin-fast" />SAVING…</>
-                      : 'SAVE'}
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
+      )}
 
       {/* Template selection modal */}
       {templateModal && (
         <TemplateModal
           onSelect={handleTemplateSelect}
-          onClose={() => setTemplateModal(false)}
+          onClose={() => {
+            setTemplateModal(false);
+            if (isCreating && !name) {
+              setIsCreating(false);
+            }
+          }}
         />
       )}
     </div>

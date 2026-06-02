@@ -25,7 +25,7 @@ export function CopyBtn({ value, label = 'COPY', title }: CopyBtnProps) {
       onClick={handle}
       title={title}
       className={[
-        'flex items-center gap-1 rounded px-2 py-1',
+        'flex items-center gap-1 rounded-[3px] px-2 py-1',
         'border text-xs font-medium tracking-wide font-ui',
         'transition-all duration-150 shrink-0 whitespace-nowrap cursor-pointer',
         ok

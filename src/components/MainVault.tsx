@@ -134,7 +134,7 @@ export function MainVault() {
         {query && (
           <button
             onClick={() => setQuery('')}
-            className="flex items-center justify-center w-6 h-6 rounded-md text-tx3 hover:text-tx hover:bg-raised transition"
+            className="flex items-center justify-center w-6 h-6 rounded-[3px] text-tx3 hover:text-tx hover:bg-raised transition"
           >
             <Icon name="close" size={14} />
           </button>
@@ -145,7 +145,7 @@ export function MainVault() {
             onClick={() => setCatOpen((v) => !v)}
             title="Filter by category"
             className={[
-              'flex items-center justify-center w-6 h-6 rounded-md transition',
+              'flex items-center justify-center w-6 h-6 rounded-[3px] transition',
               catF.size > 0
                 ? 'text-accent bg-accent-b hover:opacity-80'
                 : 'text-tx3 hover:text-tx hover:bg-raised',
@@ -156,7 +156,7 @@ export function MainVault() {
           {catOpen && (
             <div
               ref={catMenuRef}
-              className="absolute right-0 top-8 z-50 min-w-[180px] bg-bg border border-bd rounded-md shadow-lg py-1 flex flex-col"
+              className="absolute right-0 top-8 z-50 min-w-[180px] bg-bg border border-bd rounded-[3px] shadow-lg py-1 flex flex-col"
             >
               <div className="px-3 py-1.5 text-[0.6rem] font-mono text-tx3 tracking-[0.1em] border-b border-bd">
                 FILTER BY CATEGORY
@@ -216,7 +216,7 @@ export function MainVault() {
           onClick={handleReload}
           disabled={reloading}
           title="Reload vault"
-          className="flex items-center justify-center w-6 h-6 rounded-md text-tx3 hover:text-tx hover:bg-raised transition disabled:opacity-50"
+          className="flex items-center justify-center w-6 h-6 rounded-[3px] text-tx3 hover:text-tx hover:bg-raised transition disabled:opacity-50"
         >
           <span className={reloading ? 'animate-spin inline-flex' : 'inline-flex'}>
             <Icon name="refresh" size={14} />
@@ -239,7 +239,7 @@ export function MainVault() {
                   key={id}
                   onClick={() => setTypeF(id)}
                   className={[
-                    'flex items-center gap-1 rounded px-2.5 h-[28px]',
+                    'flex items-center gap-1 rounded-[3px] px-2.5 h-[28px]',
                     'border text-[11px] font-medium tracking-[0.05em] font-ui cursor-pointer',
                     'transition-all duration-150 shrink-0 whitespace-nowrap',
                     active
@@ -261,7 +261,7 @@ export function MainVault() {
             <button
               onClick={() => { setEditTarget(null); go('edit'); }}
               className={[
-                'flex items-center gap-1 bg-accent border-none rounded',
+                'flex items-center gap-1 bg-accent border-none rounded-[3px]',
                 'px-3 h-[28px] text-[10px] font-bold tracking-wider font-ui',
                 'text-[#020504] cursor-pointer shrink-0 hover:opacity-90 transition-opacity',
               ].join(' ')}
@@ -288,7 +288,7 @@ export function MainVault() {
             <button
               onClick={exitShareMode}
               className={[
-                'flex items-center gap-1 border rounded',
+                'flex items-center gap-1 border rounded-[3px]',
                 'px-2.5 h-[28px] text-[10px] font-medium tracking-wider font-ui',
                 'border-bd2 text-tx2 bg-transparent cursor-pointer shrink-0',
                 'hover:border-tx3 hover:text-tx transition-all duration-150',
@@ -300,7 +300,7 @@ export function MainVault() {
             <button
               onClick={() => setShowShareModal(true)}
               className={[
-                'flex items-center gap-1 border-none rounded',
+                'flex items-center gap-1 border-none rounded-[3px]',
                 'px-2.5 h-[28px] text-[10px] font-bold tracking-wider font-ui',
                 'cursor-pointer shrink-0 transition-opacity',
                 selectedIds.size > 0
@@ -348,6 +348,12 @@ export function MainVault() {
       <div className="flex items-center justify-between px-5 h-10 border-t border-bd bg-bg shrink-0">
         <div className="text-[12px] text-tx2 font-mono">{items.length} items · AES-256-GCM</div>
         <div className="flex gap-3">
+          <button
+            onClick={() => go('workspaces')}
+            className="flex items-center gap-1.5 text-[13px] font-mono text-tx2 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
+          >
+            <Icon name="terminal" size={13} />workspaces
+          </button>
           <button
             onClick={() => go('categories')}
             className="flex items-center gap-1.5 text-[13px] font-mono text-tx2 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"

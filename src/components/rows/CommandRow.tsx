@@ -74,7 +74,7 @@ export function CommandRow({ item, cats, selected, onToggle, onShare, onSelect }
         <span className="flex-1 text-[13px] font-semibold text-tx overflow-hidden text-ellipsis whitespace-nowrap">
           {item.name}
         </span>
-        <span className="text-[0.65rem] px-1.5 py-0.5 border border-bd rounded text-tx3 font-mono tracking-wide shrink-0">
+        <span className="text-[0.65rem] px-1.5 py-0.5 border border-bd rounded-[2px] text-tx3 font-mono tracking-wide shrink-0">
           {item.shell}
         </span>
         <CatBadges names={item.categories} cats={cats} />
@@ -97,7 +97,7 @@ export function CommandRow({ item, cats, selected, onToggle, onShare, onSelect }
           <button
             onClick={() => setPlaceholder(item)}
             className={[
-              'bg-warn-b border border-warn-d rounded text-warn cursor-pointer',
+              'bg-warn-b border border-warn-d rounded-[3px] text-warn cursor-pointer',
               'px-2 py-1 text-xs font-medium tracking-wide font-ui whitespace-nowrap',
               'flex items-center gap-2 transition-all duration-150 hover:opacity-80',
             ].join(' ')}

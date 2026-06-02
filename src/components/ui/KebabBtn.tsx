@@ -22,7 +22,7 @@ export function KebabBtn({ menuItems }: KebabBtnProps) {
       ref={ref}
       onClick={handle}
       className={[
-        'flex items-center shrink-0 rounded px-1 py-1',
+        'flex items-center shrink-0 rounded-[3px] px-1 py-1',
         'border border-bd bg-transparent text-tx3 cursor-pointer',
         'hover:border-bd2 hover:text-tx transition-all duration-150',
       ].join(' ')}

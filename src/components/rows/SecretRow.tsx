@@ -35,7 +35,7 @@ export function CatBadges({ names, cats }: { names: string[]; cats: Category[] }
           <span
             key={name}
             title={name}
-            className="inline-flex items-center px-1.5 py-0.5 rounded-sm border text-[0.6rem] font-mono tracking-wide font-medium shrink-0 leading-none whitespace-nowrap"
+            className="inline-flex items-center px-1.5 py-0.5 rounded-[2px] border text-[0.6rem] font-mono tracking-wide font-medium shrink-0 leading-none whitespace-nowrap"
             style={{
               borderColor: color,
               color:        color,
@@ -49,7 +49,7 @@ export function CatBadges({ names, cats }: { names: string[]; cats: Category[] }
       {!expanded && overflow > 0 && (
         <button
           onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
-          className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-bd2 bg-raised text-tx3 text-[0.6rem] font-mono tracking-wide shrink-0 leading-none cursor-pointer hover:border-bd hover:text-tx2 transition-colors"
+          className="inline-flex items-center px-1.5 py-0.5 rounded-[2px] border border-bd2 bg-raised text-tx3 text-[0.6rem] font-mono tracking-wide shrink-0 leading-none cursor-pointer hover:border-bd hover:text-tx2 transition-colors"
         >
           +{overflow}
         </button>
@@ -57,7 +57,7 @@ export function CatBadges({ names, cats }: { names: string[]; cats: Category[] }
       {expanded && names.length > BADGE_VISIBLE_MAX && (
         <button
           onClick={(e) => { e.stopPropagation(); setExpanded(false); }}
-          className="inline-flex items-center px-1.5 py-0.5 rounded-sm border border-bd2 bg-raised text-tx3 text-[0.6rem] font-mono tracking-wide shrink-0 leading-none cursor-pointer hover:border-bd hover:text-tx2 transition-colors"
+          className="inline-flex items-center px-1.5 py-0.5 rounded-[2px] border border-bd2 bg-raised text-tx3 text-[0.6rem] font-mono tracking-wide shrink-0 leading-none cursor-pointer hover:border-bd hover:text-tx2 transition-colors"
         >
           less
         </button>
@@ -153,7 +153,7 @@ export function SecretRow({ item, cats, selected, onToggle, onShare, onSelect }:
         </span>
         <button
           onClick={(e) => { e.stopPropagation(); setRev((v) => !v); }}
-          className="border border-bd bg-transparent text-tx3 cursor-pointer p-1 rounded flex shrink-0 hover:border-bd2 hover:text-tx transition-all duration-150"
+          className="border border-bd bg-transparent text-tx3 cursor-pointer p-1 rounded-[3px] flex shrink-0 hover:border-bd2 hover:text-tx transition-all duration-150"
         >
           <Icon name={rev ? 'eyeOff' : 'eye'} size={13} />
         </button>

@@ -30,7 +30,7 @@ export function PlaceholderModal({ command, onClose }: PlaceholderModalProps) {
       <div
         onClick={(e) => e.stopPropagation()}
         className={[
-          'bg-surface border border-bd2 rounded-[5px] p-5 w-[380px]',
+          'bg-surface border border-bd2 rounded-[4px] p-5 w-[380px]',
           'shadow-[0_16px_48px_rgba(0,0,0,.8)] animate-fade-in',
         ].join(' ')}
       >

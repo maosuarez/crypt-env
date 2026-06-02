@@ -59,7 +59,7 @@ function BtnPrimary({
       onClick={onClick}
       disabled={disabled}
       className={[
-        'flex items-center justify-center gap-2 rounded px-4 h-9',
+        'flex items-center justify-center gap-2 rounded-[3px] px-4 h-9',
         'bg-accent text-[#020504] text-[11px] font-bold tracking-wider font-ui',
         'cursor-pointer transition-opacity shrink-0',
         'disabled:opacity-30 disabled:cursor-not-allowed hover:opacity-90',
@@ -87,7 +87,7 @@ function BtnSecondary({
       onClick={onClick}
       disabled={disabled}
       className={[
-        'flex items-center justify-center gap-2 rounded px-4 h-9',
+        'flex items-center justify-center gap-2 rounded-[3px] px-4 h-9',
         'border border-bd2 text-tx2 text-[11px] font-medium tracking-wider font-ui bg-transparent',
         'cursor-pointer transition-all duration-150 shrink-0',
         'disabled:opacity-30 disabled:cursor-not-allowed hover:border-tx3 hover:text-tx',
@@ -485,7 +485,7 @@ export function ReceiveModal({ onClose }: ReceiveModalProps) {
           </div>
           <button
             onClick={step === 'lan-receive' ? onClose : handleCancel}
-            className="flex items-center justify-center w-6 h-6 rounded text-tx3 hover:text-tx hover:bg-raised transition-all duration-150 cursor-pointer border-none bg-transparent"
+            className="flex items-center justify-center w-6 h-6 rounded-[3px] text-tx3 hover:text-tx hover:bg-raised transition-all duration-150 cursor-pointer border-none bg-transparent"
           >
             <Icon name="close" size={13} />
           </button>

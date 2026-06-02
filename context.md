@@ -60,6 +60,40 @@ crypt-env/
 4. **Command**: name, command, description, shell target (bash/zsh/sh/PowerShell), placeholders `{{VAR}}`
 5. **Note**: title, free-form content, category
 
+## UI Design
+
+The interface follows an **industrial/utilitarian aesthetic** with a **dark color palette** and **monospace typography**, inspired by IBM Carbon Design System principles implemented purely in Tailwind CSS (no Carbon React library).
+
+### Design Language
+- **Color Palette**: Dark background with high-contrast accent colors (emerald for success, red for destructive, amber for warnings)
+- **Typography**: Monospace fonts (IBM Plex Mono) for values and code, sans-serif (Inter) for UI labels
+- **Spacing & Layout**: Geometric grid with consistent padding/margins (4px base unit, multiples of 4)
+- **Components**: Carbon-like card, button, modal, input, dropdown, badge styles — all built with Tailwind classes
+
+### Semantic Token System
+Tailwind configuration in `src/index.css` defines semantic tokens:
+- **Surface tokens** (`bg-surface`, `surface-hover`, `surface-active`): Layered card backgrounds
+- **Interactive tokens** (`interactive-primary`, `interactive-secondary`, `interactive-danger`): Buttons and clickable elements
+- **Text tokens** (`text-ui`, `text-secondary`, `text-disabled`, `text-critical`): Hierarchical text styling
+- **Border & stroke tokens**: Consistent edge styling
+
+### 5 Main Screens
+1. **Lock Screen** — Master password input with biometric unlock option (Windows Hello)
+2. **Main Vault** — Item list with fuzzy search, category filters, preview pane
+3. **Add/Edit Item** — Dynamic form that changes based on item type (API Key, Credential, Link, Command, Note)
+4. **Category Manager** — CRUD interface for editable categories with color picker
+5. **Settings** — Master password, timeout, biometric, workspaces, internet relay config, backup/restore, import
+
+### Decorationless Window
+- The Tauri window is configured with `decorations: false` — no OS titlebar
+- Custom React titlebar component (`WindowChrome.tsx`) with window controls (minimize, maximize, close)
+- Allows unified, branded window frame consistent across platforms
+
+### Responsive Design
+- Fixed window size on launch, resizable by user
+- UI scales with Tailwind breakpoints for future mobile/tablet support
+- All form inputs and lists scroll gracefully within viewport
+
 ## Core Features Implemented (Session 4+)
 
 ### Workspaces

@@ -86,3 +86,43 @@ pub fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| ()))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_key() -> CryptoKey { [0x42u8; 32] }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let key = test_key();
+        let plaintext = b"super secret value";
+        let ct = encrypt(&key, plaintext).expect("encrypt should succeed");
+        let recovered = decrypt(&key, &ct).expect("decrypt should succeed");
+        assert_eq!(recovered, plaintext);
+    }
+
+    #[test]
+    fn decrypt_with_wrong_key_returns_error() {
+        let key = test_key();
+        let wrong_key = [0xFFu8; 32];
+        let ct = encrypt(&key, b"some data").expect("encrypt should succeed");
+        assert!(decrypt(&wrong_key, &ct).is_err(), "wrong key must return Err");
+    }
+
+    #[test]
+    fn encrypt_decrypt_empty_plaintext() {
+        let key = test_key();
+        let ct = encrypt(&key, b"").expect("encrypt of empty slice should succeed");
+        let recovered = decrypt(&key, &ct).expect("decrypt of empty slice should succeed");
+        assert_eq!(recovered, b"");
+    }
+
+    #[test]
+    fn two_encryptions_produce_different_ciphertexts() {
+        let key = test_key();
+        let ct1 = encrypt(&key, b"same input").expect("first encrypt should succeed");
+        let ct2 = encrypt(&key, b"same input").expect("second encrypt should succeed");
+        assert_ne!(ct1, ct2, "nonces are random — ciphertexts must differ");
+    }
+}

@@ -43,7 +43,8 @@
       "nsis": {
         "displayLanguageSelector": false,
         "installMode": "currentUser",
-        "languages": ["English"]
+        "languages": ["English"],
+        "installerHooks": "nsis/installer_hooks.nsi"
       },
       "wix": {
         "language": "en-US"

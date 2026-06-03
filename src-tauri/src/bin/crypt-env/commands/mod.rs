@@ -11,5 +11,6 @@ pub mod relay;
 pub mod search;
 pub mod set;
 pub mod share;
+pub mod sync;
 pub mod tui;
 pub mod workspace;

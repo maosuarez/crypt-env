@@ -47,6 +47,8 @@ enum Cmd {
     Workspace(commands::workspace::WorkspaceArgs),
     /// Share secrets via internet relay (send, receive)
     Relay(commands::relay::RelayArgs),
+    /// Sync new variables from .env.example into .env without overwriting existing values
+    Sync(commands::sync::SyncArgs),
 }
 
 fn main() {
@@ -67,6 +69,7 @@ fn main() {
         Cmd::Tui(args) => commands::tui::run(args),
         Cmd::Workspace(args) => commands::workspace::run(args),
         Cmd::Relay(args) => commands::relay::run(args),
+        Cmd::Sync(args) => commands::sync::run(args),
     };
     if let Err(e) = result {
         eprintln!("{}", e);

@@ -210,9 +210,10 @@ pub async fn share_relay_send(
     vault_state: State<'_, SharedState>,
 ) -> Result<RelayShareResult, String> {
     let (supabase_url, anon_key, plain_items) = {
-        let guard = vault_state.lock().await;
+        let mut guard = vault_state.lock().await;
         let k = guard.key.as_ref().ok_or("vault is locked")?;
         let vault_key: [u8; 32] = **k;
+        guard.touch();
 
         let supabase_url = guard
             .db
@@ -224,6 +225,10 @@ pub async fn share_relay_send(
             .get_setting("relay_supabase_anon_key")
             .await?
             .unwrap_or_else(|| DEFAULT_RELAY_ANON_KEY.to_string());
+
+        if supabase_url.is_empty() || anon_key.is_empty() {
+            return Err("Supabase relay not configured. Go to Settings → Internet Sharing to add your Supabase URL and API key.".to_string());
+        }
 
         let raw = guard.db.list_items().await?;
         let mut items: Vec<PlainItem> = Vec::new();
@@ -262,8 +267,10 @@ pub async fn share_relay_send(
         relay::relay_upload(&url_clone, &key_clone, &code_clone, &payload)
     })
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("relay send failed: {e}"))?
+    .map_err(|e| format!("relay send failed: {e}"))?;
+
+    { vault_state.lock().await.touch(); }
 
     Ok(RelayShareResult { code, passphrase })
 }
@@ -275,9 +282,11 @@ pub async fn share_relay_receive(
     vault_state: State<'_, SharedState>,
 ) -> Result<Vec<String>, String> {
     let (vault_key, supabase_url, anon_key) = {
-        let guard = vault_state.lock().await;
+        let mut guard = vault_state.lock().await;
         let k = guard.key.as_ref().ok_or("vault is locked")?;
         let vault_key: [u8; 32] = **k;
+        guard.touch();
+
         let supabase_url = guard
             .db
             .get_setting("relay_supabase_url")
@@ -288,6 +297,11 @@ pub async fn share_relay_receive(
             .get_setting("relay_supabase_anon_key")
             .await?
             .unwrap_or_else(|| DEFAULT_RELAY_ANON_KEY.to_string());
+
+        if supabase_url.is_empty() || anon_key.is_empty() {
+            return Err("Supabase relay not configured. Go to Settings → Internet Sharing to add your Supabase URL and API key.".to_string());
+        }
+
         (vault_key, supabase_url, anon_key)
     };
 
@@ -300,10 +314,11 @@ pub async fn share_relay_receive(
         relay::relay_download(&url_clone, &key_clone, &code_clone)
     })
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("relay receive failed: {e}"))?
+    .map_err(|e| format!("relay receive failed: {e}"))?;
 
-    let plain_items = relay::decrypt_payload(&payload, &relay_key).map_err(|e| e.to_string())?;
+    let plain_items = relay::decrypt_payload(&payload, &relay_key)
+        .map_err(|e| format!("relay receive failed: could not decrypt payload — {e}"))?;
 
     let url_clone2 = supabase_url.clone();
     let key_clone2 = anon_key.clone();
@@ -313,7 +328,8 @@ pub async fn share_relay_receive(
     })
     .await;
 
-    let guard = vault_state.lock().await;
+    let mut guard = vault_state.lock().await;
+    guard.touch();
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

@@ -1,3 +1,5 @@
+import { useState, useEffect, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { AnimatePresence, motion } from 'framer-motion';
 import { WindowChrome } from './components/WindowChrome';
 import { LockScreen } from './components/LockScreen';
@@ -9,6 +11,7 @@ import { WorkspaceManager } from './components/WorkspaceManager';
 import { ContextMenu } from './components/ui/ContextMenu';
 import { Toast } from './components/ui/Toast';
 import { PlaceholderModal } from './components/ui/PlaceholderModal';
+import { SetupWizard } from './components/SetupWizard';
 import { useVaultStore } from './store';
 import { useAutoLock } from './hooks/useAutoLock';
 import type { Screen } from './types';
@@ -24,12 +27,25 @@ const SCREENS: Record<Screen, React.ReactElement> = {
 
 export default function App() {
   useAutoLock();
-  const screen      = useVaultStore((s) => s.screen);
-  const menu        = useVaultStore((s) => s.menu);
-  const closeMenu   = useVaultStore((s) => s.closeMenu);
-  const toast       = useVaultStore((s) => s.toast);
-  const placeholder = useVaultStore((s) => s.placeholder);
+  const screen         = useVaultStore((s) => s.screen);
+  const menu           = useVaultStore((s) => s.menu);
+  const closeMenu      = useVaultStore((s) => s.closeMenu);
+  const toast          = useVaultStore((s) => s.toast);
+  const placeholder    = useVaultStore((s) => s.placeholder);
   const setPlaceholder = useVaultStore((s) => s.setPlaceholder);
+
+  const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const prevScreenRef = useRef<Screen>(screen);
+
+  useEffect(() => {
+    const prev = prevScreenRef.current;
+    prevScreenRef.current = screen;
+    if (prev === 'lock' && screen === 'vault') {
+      invoke<boolean>('app_is_first_run')
+        .then((isFirst) => { if (isFirst) setShowSetupWizard(true); })
+        .catch(() => {});
+    }
+  }, [screen]);
 
   return (
     <div className="flex flex-col w-full h-full bg-bg overflow-hidden">
@@ -59,6 +75,9 @@ export default function App() {
           command={(placeholder as any).command}
           onClose={() => setPlaceholder(null)}
         />
+      )}
+      {showSetupWizard && (
+        <SetupWizard onClose={() => setShowSetupWizard(false)} />
       )}
     </div>
   );

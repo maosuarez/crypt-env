@@ -763,6 +763,92 @@ fn days_since_epoch_to_ymd(mut days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
+// ─── First-run / setup commands ──────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn app_is_first_run(state: State<'_, SharedState>) -> Result<bool, String> {
+    let s = state.lock().await;
+    let val = s.db.get_setting("setup_complete").await?;
+    Ok(val.as_deref() != Some("true"))
+}
+
+#[tauri::command]
+pub async fn app_complete_setup(state: State<'_, SharedState>) -> Result<(), String> {
+    let s = state.lock().await;
+    s.db.set_setting("setup_complete", "true").await
+}
+
+#[tauri::command]
+pub async fn app_generate_mcp_config(
+    target_path: String,
+    state: State<'_, SharedState>,
+) -> Result<String, String> {
+    let token = {
+        let s = state.lock().await;
+        s.key.as_ref().ok_or("vault is locked")?;
+        s.db.get_setting("mcp_token")
+            .await?
+            .ok_or_else(|| "MCP token not found — open Settings to generate one".to_string())?
+    };
+    fn home_dir() -> Option<std::path::PathBuf> {
+        if let Ok(p) = std::env::var("USERPROFILE") {
+            if !p.is_empty() { return Some(std::path::PathBuf::from(p)); }
+        }
+        if let Ok(p) = std::env::var("HOME") {
+            if !p.is_empty() { return Some(std::path::PathBuf::from(p)); }
+        }
+        None
+    }
+
+    let resolved: std::path::PathBuf = if target_path.is_empty() {
+        let home = home_dir().ok_or("cannot determine home directory")?;
+        home.join(".mcp.json")
+    } else if target_path.starts_with('~') {
+        let home = home_dir().ok_or("cannot determine home directory")?;
+        let rest = target_path
+            .trim_start_matches('~')
+            .trim_start_matches('/')
+            .trim_start_matches('\\');
+        if rest.is_empty() { home.join(".mcp.json") } else { home.join(rest) }
+    } else {
+        std::path::PathBuf::from(&target_path)
+    };
+
+    let mut root: serde_json::Value = if resolved.exists() {
+        let content = std::fs::read_to_string(&resolved)
+            .map_err(|e| format!("read {}: {e}", resolved.display()))?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    {
+        let obj = root.as_object_mut().ok_or("existing .mcp.json is not a JSON object")?;
+        let mcp_servers = obj.entry("mcpServers").or_insert_with(|| serde_json::json!({}));
+        if let Some(servers) = mcp_servers.as_object_mut() {
+            servers.insert(
+                "cryptenv".to_string(),
+                serde_json::json!({
+                    "command": "crypt-env-mcp",
+                    "env": { "CRYPTENV_TOKEN": token }
+                }),
+            );
+        }
+    }
+
+    if let Some(parent) = resolved.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create dirs {}: {e}", parent.display()))?;
+    }
+
+    let json_str = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("serialize mcp config: {e}"))?;
+    std::fs::write(&resolved, &json_str)
+        .map_err(|e| format!("write {}: {e}", resolved.display()))?;
+
+    Ok(resolved.to_string_lossy().into_owned())
+}
+
 // ─── Biometric commands ───────────────────────────────────────────────────────
 
 #[tauri::command]

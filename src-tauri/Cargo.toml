@@ -24,6 +24,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-os = "2"
+tauri-plugin-updater = "2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -92,6 +93,10 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Memory",
 ] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [[bin]]
 name = "crypt-env"

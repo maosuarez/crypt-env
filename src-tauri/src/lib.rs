@@ -13,6 +13,7 @@ pub mod vault;
 pub mod workspace;
 
 use vault::{
+    app_complete_setup, app_generate_mcp_config, app_is_first_run,
     biometric_check, biometric_disable, biometric_enroll, biometric_is_enrolled, biometric_unlock,
     lock_vault, vault_change_password, vault_delete_item, vault_export_backup,
     vault_generate_mcp_token, vault_get_categories, vault_get_items, vault_get_mcp_token,
@@ -27,6 +28,34 @@ use vault::share_commands::{
 };
 use workspace::{workspace_delete, workspace_export, workspace_import, workspace_inject, workspace_list, workspace_pick_env_path, workspace_save};
 
+struct PendingUpdate(std::sync::Mutex<Option<tauri_plugin_updater::Update>>);
+
+#[tauri::command]
+async fn check_for_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    match app.updater().map_err(|e| e.to_string())?.check().await {
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            let pending = app.state::<PendingUpdate>();
+            *pending.0.lock().unwrap() = Some(update);
+            Ok(Some(version))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    let pending = app.state::<PendingUpdate>();
+    let update = pending.0.lock().unwrap().take()
+        .ok_or_else(|| "No update available — run check first".to_string())?;
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Multiple crates in the dependency tree enable different rustls crypto
@@ -39,6 +68,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_dir = app
                 .path()
@@ -59,6 +89,8 @@ pub fn run() {
             let share_state: SharedShareState =
                 std::sync::Arc::new(share::ShareState::new());
             app.manage(share_state);
+
+            app.manage(PendingUpdate(std::sync::Mutex::new(None)));
 
             let api_state = state.clone();
             let api_app_dir = app_dir.clone();
@@ -172,6 +204,11 @@ pub fn run() {
             workspace_pick_env_path,
             workspace_export,
             workspace_import,
+            check_for_update,
+            install_update,
+            app_is_first_run,
+            app_complete_setup,
+            app_generate_mcp_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

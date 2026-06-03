@@ -270,6 +270,11 @@ export function Settings() {
   const [showBioPw,    setShowBioPw]    = useState(false);
   const [bioWorking,   setBioWorking]   = useState(false);
 
+  const [updateStatus,      setUpdateStatus]      = useState<string | null>(null);
+  const [availableVersion,  setAvailableVersion]  = useState<string | null>(null);
+  const [checkingUpdate,    setCheckingUpdate]    = useState(false);
+  const [installingUpdate,  setInstallingUpdate]  = useState(false);
+
   const openChangePw = () => {
     setCurrentPw(''); setNewPw(''); setConfirmPw('');
     setShowCurrent(false); setShowNew(false); setShowConfirm(false);
@@ -381,6 +386,37 @@ export function Settings() {
       showToast('Failed to disable biometric unlock');
     } finally {
       setBioWorking(false);
+    }
+  };
+
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    setUpdateStatus(null);
+    setAvailableVersion(null);
+    try {
+      const version = await invoke<string | null>('check_for_update');
+      if (version) {
+        setAvailableVersion(version);
+        setUpdateStatus('available');
+      } else {
+        setUpdateStatus('uptodate');
+      }
+    } catch (e) {
+      showToast(String(e), 'error');
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    setInstallingUpdate(true);
+    try {
+      await invoke('install_update');
+      showToast('Update installed — restart the app to apply');
+    } catch (e) {
+      showToast(String(e), 'error');
+    } finally {
+      setInstallingUpdate(false);
     }
   };
 
@@ -590,6 +626,40 @@ export function Settings() {
               aria-label="Copy token"
             >
               <Icon name="copy" size={13} />
+            </button>
+          </div>
+        )}
+
+        <Sec title="UPDATES" />
+        <Row icon="export" label="Application Update">
+          <button
+            onClick={handleCheckUpdate}
+            disabled={checkingUpdate || installingUpdate}
+            className="h-8 px-4 bg-transparent border border-bd2 rounded-[3px] text-tx2 text-[12px] cursor-pointer font-ui font-semibold tracking-[0.06em] hover:text-tx transition-colors disabled:opacity-40 flex items-center gap-1.5"
+          >
+            {checkingUpdate
+              ? <><div className="w-2.5 h-2.5 rounded-full border-2 border-transparent border-t-current animate-spin-fast" />CHECKING…</>
+              : 'CHECK'}
+          </button>
+        </Row>
+        {updateStatus === 'uptodate' && (
+          <div className="mt-2 mb-2 px-3 py-2 rounded-[3px] border border-bd bg-raised text-[12px] font-mono text-tx3">
+            Up to date
+          </div>
+        )}
+        {updateStatus === 'available' && availableVersion && (
+          <div className="mt-2 mb-2 flex items-center gap-3 px-3 py-2 rounded-[3px] border border-accent-d bg-accent-b">
+            <span className="flex-1 text-[12px] font-mono text-accent">
+              Version {availableVersion} available
+            </span>
+            <button
+              onClick={handleInstallUpdate}
+              disabled={installingUpdate}
+              className="h-7 px-3 bg-accent border-none rounded-[3px] text-[#020504] text-[12px] font-bold tracking-[0.06em] font-ui cursor-pointer hover:opacity-90 disabled:opacity-40 flex items-center gap-1.5"
+            >
+              {installingUpdate
+                ? <><div className="w-2.5 h-2.5 rounded-full border-2 border-transparent border-t-[#020504] animate-spin-fast" />INSTALLING…</>
+                : 'INSTALL'}
             </button>
           </div>
         )}

@@ -125,6 +125,7 @@ if ($shouldRelease) {
     Write-Host "  [OK] Tagged v$NewVersion"
 
     git push origin HEAD --follow-tags
+    git push origin --tags
     if ($LASTEXITCODE -ne 0) { Write-Error "git push failed"; exit 1 }
     Write-Host "  [OK] Pushed - GitHub Actions will now build Windows, macOS, and Linux" -ForegroundColor Green
     Write-Host ""

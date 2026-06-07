@@ -1,6 +1,6 @@
 [package]
 name = "tauri-crypt-env"
-version = "0.7.1"
+version = "0.7.2"
 description = "Secure local secrets manager with AES-256-GCM encryption"
 authors = ["maosuarez"]
 edition = "2021"

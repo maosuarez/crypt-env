@@ -6042,7 +6042,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-crypt-env"
-version = "0.7.0"
+version = "0.7.2"
 dependencies = [
  "aes-gcm",
  "argon2",

@@ -113,7 +113,7 @@ if ($shouldRelease) {
     Set-Location $Root
 
     # Stage the three versioned files
-    git add src-tauri/Cargo.toml src-tauri/tauri.conf.json package.json
+    git add src-tauri/Cargo.toml src-tauri/tauri.conf.json package.json src-tauri/Cargo.lock
     if ($LASTEXITCODE -ne 0) { Write-Error "git add failed"; exit 1 }
 
     git commit -m "chore: bump version to $NewVersion"

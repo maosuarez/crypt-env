@@ -1,6 +1,7 @@
 // crypt-env-mcp.rs — Standalone MCP server over stdio.
 // Does not import from the project lib — uses only serde, serde_json, reqwest::blocking.
 // All user-facing strings are in English to match the CLI.
+#![recursion_limit = "512"]
 
 use std::io::BufRead;
 use std::io::Write;
@@ -511,6 +512,124 @@ fn tool_definitions() -> serde_json::Value {
                     "passphrase": { "type": "string", "description": "Passphrase provided by the sender" }
                 },
                 "required": ["code", "passphrase"]
+            }
+        },
+        {
+            "name": "crypt_env_share_workspace_send",
+            "description": "Share a COMPLETE workspace via internet relay: its definition PLUS the decrypted values of every referenced secret, bundled into one encrypted package. The receiver reconstructs a ready-to-inject workspace in a single step — no need to share individual items. Returns a code and passphrase. IMPORTANT: Show the code and passphrase to the user immediately; the passphrase is only shown once. Identify the workspace by name or id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Workspace ID" },
+                    "name": { "type": "string", "description": "Workspace name (case-insensitive, used if id not given)" }
+                }
+            }
+        },
+        {
+            "name": "crypt_env_share_workspace_receive",
+            "description": "Receive a complete workspace shared via internet relay using a code and passphrase from the sender. Recreates the bundled secrets in the vault and rebuilds the workspace with its variables re-linked, ready to inject into a .env with crypt_env_inject_workspace.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "code": { "type": "string", "description": "Relay code provided by the sender (e.g. X7K2-M9P4)" },
+                    "passphrase": { "type": "string", "description": "Passphrase provided by the sender" }
+                },
+                "required": ["code", "passphrase"]
+            }
+        },
+        {
+            "name": "crypt_env_list_mcp_servers",
+            "description": "List registered MCP servers from Claude config files. Returns name, command, args, and env key names — never env values.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scope": {
+                        "type": "string",
+                        "description": "Which config to read: 'global' (Claude desktop), 'project' (.claude/mcp_servers.json in cwd), or 'all' (both). Default: 'all'.",
+                        "enum": ["global", "project", "all"]
+                    }
+                }
+            }
+        },
+        {
+            "name": "crypt_env_add_mcp_server",
+            "description": "Register a new MCP server entry in the Claude config. Env keys are stored as empty placeholders — actual values come from the vault at runtime via crypt_env_inject_env.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Server name (unique key in mcpServers)" },
+                    "command": { "type": "string", "description": "Command to launch the MCP server" },
+                    "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments for the command" },
+                    "env": {
+                        "type": "object",
+                        "description": "Map of env var name to vault item name. Values are stored as empty placeholders in the config — use crypt_env_inject_env at runtime.",
+                        "additionalProperties": { "type": "string" }
+                    },
+                    "scope": { "type": "string", "description": "'global' (Claude desktop) or 'project' (.claude/mcp_servers.json). Default: 'global'.", "enum": ["global", "project"] }
+                },
+                "required": ["name", "command"]
+            }
+        },
+        {
+            "name": "crypt_env_update_mcp_server",
+            "description": "Update an existing MCP server entry by name. Only provided fields are changed; omitted fields are preserved.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Server name to update" },
+                    "command": { "type": "string", "description": "New command" },
+                    "args": { "type": "array", "items": { "type": "string" }, "description": "New args list" },
+                    "env": {
+                        "type": "object",
+                        "description": "New env map (merges with existing). Values are stored as empty placeholders.",
+                        "additionalProperties": { "type": "string" }
+                    },
+                    "scope": { "type": "string", "description": "'global' or 'project'. Default: 'global'.", "enum": ["global", "project"] }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "crypt_env_delete_mcp_server",
+            "description": "Remove an MCP server entry from the Claude config by name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Server name to remove" },
+                    "scope": { "type": "string", "description": "'global' or 'project'. Default: 'global'.", "enum": ["global", "project"] }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "crypt_env_list_workspaces_by_env",
+            "description": "List workspaces grouped by environment (production, development, staging, other), based on their template field.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "crypt_env_inject_env_by_name",
+            "description": "Inject environment variables for a project and environment combination. Finds matching workspaces or falls back to item naming conventions (ENV_KEY or category name).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_path": { "type": "string", "description": "Absolute path to the project directory" },
+                    "environment": { "type": "string", "description": "Environment name: production, development, or staging", "enum": ["production", "development", "staging"] },
+                    "output_path": { "type": "string", "description": "Absolute path for the output .env file. Defaults to {project_path}/.env" }
+                },
+                "required": ["project_path", "environment"]
+            }
+        },
+        {
+            "name": "crypt_env_import_env_file",
+            "description": "Reads a .env file from disk and imports each KEY=value pair as a secret item in the vault. Secret values are read directly by the MCP process — they never appear in this response. Returns only the list of key names and import counts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to the .env file to import, e.g. C:\\projects\\myapp\\.env" },
+                    "category": { "type": "string", "description": "Optional category name to assign to all imported items" },
+                    "overwrite": { "type": "boolean", "description": "If true, update existing vault items that have the same name. Default: false (skip duplicates)." }
+                },
+                "required": ["path"]
             }
         }
     ])
@@ -1686,6 +1805,99 @@ fn tool_relay_receive(args: &serde_json::Value, token: &str) -> serde_json::Valu
     }
 }
 
+fn tool_share_workspace_send(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    // Resolve workspace ID: use id directly, or find by name (mirrors inject_workspace).
+    let workspace_id: i64 = if let Some(id) = args.get("id").and_then(|v| v.as_i64()) {
+        id
+    } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+        let resp = match vault_get("/workspaces", token) {
+            Ok(r) => r,
+            Err(e) => return tool_err(e),
+        };
+        if resp.status().as_u16() == 403 {
+            return tool_err("vault_locked: unlock the vault first");
+        }
+        let text = match resp.text() {
+            Ok(t) => t,
+            Err(e) => return tool_err(format!("error reading workspaces: {e}")),
+        };
+        let list: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => return tool_err("error parsing workspace list"),
+        };
+        let name_lower = name.to_lowercase();
+        let found = list.as_array().and_then(|arr| {
+            arr.iter().find(|ws| {
+                ws.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.to_lowercase() == name_lower)
+                    .unwrap_or(false)
+            })
+        }).and_then(|ws| ws.get("id").and_then(|v| v.as_i64()));
+        match found {
+            Some(id) => id,
+            None => return tool_err(format!("workspace '{name}' not found")),
+        }
+    } else {
+        return tool_err("required: 'id' (integer) or 'name' (string)");
+    };
+
+    let resp = match vault_post(
+        &format!("/workspaces/{workspace_id}/relay/send"),
+        token,
+        &serde_json::json!({}),
+    ) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status == 404 { return tool_err(format!("workspace {workspace_id} not found")); }
+    if status >= 400 { return tool_err(format!("workspace share failed (HTTP {status}): {text}")); }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+fn tool_share_workspace_receive(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let code = match args.get("code").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => return tool_err("required parameter: 'code'"),
+    };
+    let passphrase = match args.get("passphrase").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return tool_err("required parameter: 'passphrase'"),
+    };
+
+    let body = serde_json::json!({ "code": code, "passphrase": passphrase });
+    let resp = match vault_post("/workspaces/relay/receive", token, &body) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status >= 400 { return tool_err(format!("workspace receive failed (HTTP {status}): {text}")); }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
 
 // ─── Category tool implementations ───────────────────────────────────────────
@@ -1831,6 +2043,821 @@ fn tool_delete_category(args: &serde_json::Value, token: &str) -> serde_json::Va
         .unwrap_or_default())
 }
 
+// ─── MCP config file helpers ──────────────────────────────────────────────────
+
+/// Returns the path to the Claude desktop MCP config file on the current platform.
+fn claude_desktop_config_path() -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("APPDATA")
+            .map(|d| {
+                std::path::PathBuf::from(d)
+                    .join("Claude")
+                    .join("claude_desktop_config.json")
+            })
+            .map_err(|_| "APPDATA environment variable not set".to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var("HOME")
+            .map(|d| {
+                std::path::PathBuf::from(d)
+                    .join("Library")
+                    .join("Application Support")
+                    .join("Claude")
+                    .join("claude_desktop_config.json")
+            })
+            .map_err(|_| "HOME environment variable not set".to_string())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::env::var("HOME")
+            .map(|d| {
+                std::path::PathBuf::from(d)
+                    .join(".config")
+                    .join("Claude")
+                    .join("claude_desktop_config.json")
+            })
+            .map_err(|_| "HOME environment variable not set".to_string())
+    }
+}
+
+/// Returns the path to the project-level MCP servers config (.claude/mcp_servers.json in cwd).
+fn project_mcp_config_path() -> Result<std::path::PathBuf, String> {
+    std::env::current_dir()
+        .map(|cwd| cwd.join(".claude").join("mcp_servers.json"))
+        .map_err(|e| format!("cannot determine current directory: {e}"))
+}
+
+/// Reads a JSON config file, returning an empty object if the file does not exist.
+fn read_json_config(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("error reading {}: {e}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|e| format!("error parsing {}: {e}", path.display()))
+}
+
+/// Writes a JSON config atomically: write to a .tmp file then rename.
+fn write_json_config_atomic(path: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create directory {}: {e}", parent.display()))?;
+    }
+    let tmp_path = path.with_extension("tmp");
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("error serializing config: {e}"))?;
+    std::fs::write(&tmp_path, &text)
+        .map_err(|e| format!("error writing temp file {}: {e}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path)
+        .map_err(|e| format!("error renaming temp file to {}: {e}", path.display()))
+}
+
+/// Strips env values from a server entry for safe output (only returns key names).
+fn safe_server_entry(name: &str, entry: &serde_json::Value) -> serde_json::Value {
+    let command = entry.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    let args: Vec<serde_json::Value> = entry.get("args")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let env_keys: Vec<String> = entry.get("env")
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    serde_json::json!({
+        "name": name,
+        "command": command,
+        "args": args,
+        "env_keys": env_keys
+    })
+}
+
+// ─── MCP server management tool implementations ───────────────────────────────
+
+fn tool_list_mcp_servers(args: &serde_json::Value, _token: &str) -> serde_json::Value {
+    let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all");
+
+    let mut result = serde_json::json!({ "global": [], "project": [] });
+
+    // Global scope
+    if scope == "global" || scope == "all" {
+        match claude_desktop_config_path() {
+            Err(e) => return tool_err(format!("cannot determine global config path: {e}")),
+            Ok(path) => {
+                match read_json_config(&path) {
+                    Err(e) => return tool_err(e),
+                    Ok(config) => {
+                        let servers: Vec<serde_json::Value> = config
+                            .get("mcpServers")
+                            .and_then(|v| v.as_object())
+                            .map(|m| {
+                                m.iter()
+                                    .map(|(name, entry)| safe_server_entry(name, entry))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        result["global"] = serde_json::json!(servers);
+                        result["global_path"] = serde_json::json!(path.to_string_lossy());
+                    }
+                }
+            }
+        }
+    }
+
+    // Project scope
+    if scope == "project" || scope == "all" {
+        match project_mcp_config_path() {
+            Err(e) => return tool_err(format!("cannot determine project config path: {e}")),
+            Ok(path) => {
+                match read_json_config(&path) {
+                    Err(e) => return tool_err(e),
+                    Ok(config) => {
+                        // Project config may be { "mcpServers": {...} } or directly the servers map
+                        let servers_map = config.get("mcpServers")
+                            .and_then(|v| v.as_object())
+                            .or_else(|| config.as_object());
+                        let servers: Vec<serde_json::Value> = servers_map
+                            .map(|m| {
+                                m.iter()
+                                    .map(|(name, entry)| safe_server_entry(name, entry))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        result["project"] = serde_json::json!(servers);
+                        result["project_path"] = serde_json::json!(path.to_string_lossy());
+                    }
+                }
+            }
+        }
+    }
+
+    tool_ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+}
+
+fn tool_add_mcp_server(args: &serde_json::Value, _token: &str) -> serde_json::Value {
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return tool_err("required parameter: 'name'"),
+    };
+    let command = match args.get("command").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => return tool_err("required parameter: 'command'"),
+    };
+    let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("global");
+
+    let cmd_args: Vec<serde_json::Value> = args.get("args")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Build env section with empty placeholders — never real values
+    let env_obj: serde_json::Map<String, serde_json::Value> = args.get("env")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.keys()
+                .map(|k| (k.clone(), serde_json::Value::String(String::new())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let config_path = match scope {
+        "project" => match project_mcp_config_path() {
+            Ok(p) => p,
+            Err(e) => return tool_err(e),
+        },
+        _ => match claude_desktop_config_path() {
+            Ok(p) => p,
+            Err(e) => return tool_err(e),
+        },
+    };
+
+    let mut config = match read_json_config(&config_path) {
+        Ok(c) => c,
+        Err(e) => return tool_err(e),
+    };
+
+    // Ensure mcpServers key exists
+    if config.get("mcpServers").is_none() {
+        config["mcpServers"] = serde_json::json!({});
+    }
+
+    let servers = match config.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+        Some(m) => m,
+        None => return tool_err("config has invalid 'mcpServers' structure"),
+    };
+
+    if servers.contains_key(&name) {
+        return tool_err(format!("server '{name}' already exists — use crypt_env_update_mcp_server to modify it"));
+    }
+
+    let mut entry = serde_json::json!({ "command": command, "args": cmd_args });
+    if !env_obj.is_empty() {
+        entry["env"] = serde_json::Value::Object(env_obj.clone());
+    }
+    servers.insert(name.clone(), entry);
+
+    if let Err(e) = write_json_config_atomic(&config_path, &config) {
+        return tool_err(e);
+    }
+
+    let env_keys: Vec<String> = env_obj.keys().cloned().collect();
+    let note = if env_keys.is_empty() {
+        "Server registered. No env vars configured.".to_string()
+    } else {
+        format!(
+            "Server registered. Env keys stored as empty placeholders: {:?}. \
+             Run 'crypt_env_inject_env' for each key before launching the MCP server.",
+            env_keys
+        )
+    };
+
+    tool_ok(serde_json::to_string_pretty(&serde_json::json!({
+        "added": true,
+        "name": name,
+        "scope": scope,
+        "config_path": config_path.to_string_lossy(),
+        "note": note
+    })).unwrap_or_default())
+}
+
+fn tool_update_mcp_server(args: &serde_json::Value, _token: &str) -> serde_json::Value {
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return tool_err("required parameter: 'name'"),
+    };
+    let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("global");
+
+    let config_path = match scope {
+        "project" => match project_mcp_config_path() {
+            Ok(p) => p,
+            Err(e) => return tool_err(e),
+        },
+        _ => match claude_desktop_config_path() {
+            Ok(p) => p,
+            Err(e) => return tool_err(e),
+        },
+    };
+
+    let mut config = match read_json_config(&config_path) {
+        Ok(c) => c,
+        Err(e) => return tool_err(e),
+    };
+
+    // Ensure mcpServers exists
+    if config.get("mcpServers").is_none() {
+        config["mcpServers"] = serde_json::json!({});
+    }
+
+    let servers = match config.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+        Some(m) => m,
+        None => return tool_err("config has invalid 'mcpServers' structure"),
+    };
+
+    if !servers.contains_key(&name) {
+        return tool_err(format!("server '{name}' not found — use crypt_env_add_mcp_server to create it"));
+    }
+
+    let entry = servers.entry(name.clone()).or_insert_with(|| serde_json::json!({}));
+
+    if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+        entry["command"] = serde_json::json!(cmd);
+    }
+    if let Some(cmd_args) = args.get("args").and_then(|v| v.as_array()) {
+        entry["args"] = serde_json::json!(cmd_args);
+    }
+    if let Some(env_map) = args.get("env").and_then(|v| v.as_object()) {
+        // Merge: existing keys preserved, new keys added as empty placeholders
+        let existing_env = entry
+            .get("env")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let mut merged = existing_env;
+        for k in env_map.keys() {
+            merged.insert(k.clone(), serde_json::Value::String(String::new()));
+        }
+        entry["env"] = serde_json::Value::Object(merged);
+    }
+
+    if let Err(e) = write_json_config_atomic(&config_path, &config) {
+        return tool_err(e);
+    }
+
+    tool_ok(serde_json::to_string_pretty(&serde_json::json!({
+        "updated": true,
+        "name": name,
+        "scope": scope,
+        "config_path": config_path.to_string_lossy()
+    })).unwrap_or_default())
+}
+
+fn tool_delete_mcp_server(args: &serde_json::Value, _token: &str) -> serde_json::Value {
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return tool_err("required parameter: 'name'"),
+    };
+    let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("global");
+
+    let config_path = match scope {
+        "project" => match project_mcp_config_path() {
+            Ok(p) => p,
+            Err(e) => return tool_err(e),
+        },
+        _ => match claude_desktop_config_path() {
+            Ok(p) => p,
+            Err(e) => return tool_err(e),
+        },
+    };
+
+    let mut config = match read_json_config(&config_path) {
+        Ok(c) => c,
+        Err(e) => return tool_err(e),
+    };
+
+    let servers = match config.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+        Some(m) => m,
+        None => return tool_err(format!("server '{name}' not found (mcpServers is empty or missing)")),
+    };
+
+    if servers.remove(&name).is_none() {
+        return tool_err(format!("server '{name}' not found"));
+    }
+
+    if let Err(e) = write_json_config_atomic(&config_path, &config) {
+        return tool_err(e);
+    }
+
+    tool_ok(serde_json::to_string_pretty(&serde_json::json!({
+        "deleted": true,
+        "name": name,
+        "scope": scope,
+        "config_path": config_path.to_string_lossy()
+    })).unwrap_or_default())
+}
+
+// ─── Environment-aware workspace injection tool implementations ───────────────
+
+fn tool_list_workspaces_by_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let resp = match vault_get("/workspaces", token) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 {
+        return tool_err("vault_locked: unlock the vault first");
+    }
+    if status >= 400 {
+        return tool_err(format!("error listing workspaces (HTTP {status}): {text}"));
+    }
+
+    let workspaces: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return tool_err("error parsing workspace list"),
+    };
+
+    let arr = match workspaces.as_array() {
+        Some(a) => a,
+        None => return tool_err("unexpected workspace response format"),
+    };
+
+    let mut groups: std::collections::HashMap<&str, Vec<&serde_json::Value>> =
+        std::collections::HashMap::new();
+    groups.insert("production", Vec::new());
+    groups.insert("development", Vec::new());
+    groups.insert("staging", Vec::new());
+    groups.insert("other", Vec::new());
+
+    for ws in arr {
+        let template = ws.get("template")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let name = ws.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let template_lower = template.to_lowercase();
+
+        let group = if template_lower.contains("production") || name.contains("production") || name.contains("prod") {
+            "production"
+        } else if template_lower.contains("staging") || name.contains("staging") || name.contains("stage") {
+            "staging"
+        } else if template_lower.contains("development") || template_lower.contains("dev")
+            || name.contains("development") || name.contains("dev") {
+            "development"
+        } else {
+            "other"
+        };
+
+        groups.entry(group).or_default().push(ws);
+    }
+
+    let result = serde_json::json!({
+        "production": groups.get("production").map(|v| serde_json::json!(v)).unwrap_or(serde_json::json!([])),
+        "development": groups.get("development").map(|v| serde_json::json!(v)).unwrap_or(serde_json::json!([])),
+        "staging": groups.get("staging").map(|v| serde_json::json!(v)).unwrap_or(serde_json::json!([])),
+        "other": groups.get("other").map(|v| serde_json::json!(v)).unwrap_or(serde_json::json!([]))
+    });
+
+    // Suppress unused variable warning — args is kept for signature consistency
+    let _ = args;
+    tool_ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+}
+
+fn tool_inject_env_by_name(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let project_path = match args.get("project_path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return tool_err("required parameter: 'project_path'"),
+    };
+    let environment = match args.get("environment").and_then(|v| v.as_str()) {
+        Some(e) => e.to_lowercase(),
+        None => return tool_err("required parameter: 'environment'"),
+    };
+    let output_path = args.get("output_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{project_path}/.env"));
+
+    // Step 1: fetch all workspaces
+    let ws_resp = match vault_get("/workspaces", token) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let ws_status = ws_resp.status().as_u16();
+    let ws_text = match ws_resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading workspaces: {e}")),
+    };
+
+    if ws_status == 403 {
+        return tool_err("vault_locked: unlock the vault first");
+    }
+    if ws_status >= 400 {
+        return tool_err(format!("error listing workspaces (HTTP {ws_status}): {ws_text}"));
+    }
+
+    let workspaces: serde_json::Value = match serde_json::from_str(&ws_text) {
+        Ok(v) => v,
+        Err(_) => return tool_err("error parsing workspace list"),
+    };
+
+    // Step 2: find a workspace whose name/template matches the environment
+    // AND whose path starts with project_path
+    let env_lower = environment.as_str();
+    let found_ws = workspaces.as_array().and_then(|arr| {
+        arr.iter().find(|ws| {
+            let name_matches = ws.get("name")
+                .and_then(|v| v.as_str())
+                .map(|n| n.to_lowercase().contains(env_lower))
+                .unwrap_or(false);
+            let template_matches = ws.get("template")
+                .and_then(|v| v.as_str())
+                .map(|t| t.to_lowercase().contains(env_lower))
+                .unwrap_or(false);
+            let path_matches = ws.get("path")
+                .and_then(|v| v.as_str())
+                .map(|p| p.starts_with(&project_path))
+                .unwrap_or(false);
+            (name_matches || template_matches) && path_matches
+        })
+    });
+
+    if let Some(ws) = found_ws {
+        // Step 3a: workspace found — inject it
+        let ws_id = match ws.get("id").and_then(|v| v.as_i64()) {
+            Some(id) => id,
+            None => return tool_err("workspace entry has no id"),
+        };
+
+        let inject_resp = match vault_post(
+            &format!("/workspaces/{ws_id}/inject"),
+            token,
+            &serde_json::json!({}),
+        ) {
+            Ok(r) => r,
+            Err(e) => return tool_err(e),
+        };
+
+        let inject_status = inject_resp.status().as_u16();
+        let inject_text = match inject_resp.text() {
+            Ok(t) => t,
+            Err(e) => return tool_err(format!("error reading inject response: {e}")),
+        };
+
+        if inject_status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+        if inject_status >= 400 { return tool_err(format!("inject failed (HTTP {inject_status}): {inject_text}")); }
+
+        let mut inject_result: serde_json::Value = serde_json::from_str(&inject_text)
+            .unwrap_or(serde_json::json!({}));
+        inject_result["method"] = serde_json::json!("workspace");
+        inject_result["workspace_id"] = serde_json::json!(ws_id);
+        inject_result["environment"] = serde_json::json!(environment);
+
+        return tool_ok(serde_json::to_string_pretty(&inject_result).unwrap_or_default());
+    }
+
+    // Step 3b: no workspace found — fallback to item naming conventions
+    // Fetch all items and match by naming convention: {ENV}_KEY or category = environment
+    let items_resp = match vault_get("/items", token) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let items_status = items_resp.status().as_u16();
+    let items_text = match items_resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading items: {e}")),
+    };
+
+    if items_status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if items_status >= 400 { return tool_err(format!("error listing items (HTTP {items_status}): {items_text}")); }
+
+    let items: serde_json::Value = match serde_json::from_str(&items_text) {
+        Ok(v) => v,
+        Err(_) => return tool_err("error parsing item list"),
+    };
+
+    // Collect items matching env prefix (ENV_KEY) or env category
+    let prefix = format!("{}_", env_lower.to_uppercase());
+    let matched_items: Vec<(String, i64)> = items.as_array()
+        .map(|arr| {
+            arr.iter().filter_map(|item| {
+                let item_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let item_id = item.get("id").and_then(|v| v.as_i64())?;
+                // Match by ENV_KEY prefix
+                let by_prefix = item_name.to_uppercase().starts_with(&prefix);
+                // Match by category name
+                let by_category = item.get("categories")
+                    .and_then(|v| v.as_array())
+                    .map(|cats| cats.iter().any(|c| {
+                        c.as_str()
+                            .or_else(|| c.get("name").and_then(|n| n.as_str()))
+                            .map(|s| s.to_lowercase() == env_lower)
+                            .unwrap_or(false)
+                    }))
+                    .unwrap_or(false);
+                if by_prefix || by_category {
+                    Some((item_name.to_string(), item_id))
+                } else {
+                    None
+                }
+            }).collect()
+        })
+        .unwrap_or_default();
+
+    if matched_items.is_empty() {
+        return tool_ok(serde_json::to_string_pretty(&serde_json::json!({
+            "method": "none",
+            "environment": environment,
+            "project_path": project_path,
+            "note": "No workspace or items matched the given environment. Create a workspace or name items with ENV_KEY prefix."
+        })).unwrap_or_default());
+    }
+
+    // Build a template from matched item names and call /fill
+    let template_lines: Vec<String> = matched_items.iter()
+        .map(|(name, _)| {
+            // Strip env prefix if present for cleaner .env keys
+            if name.to_uppercase().starts_with(&prefix) {
+                format!("{}=", &name[prefix.len()..])
+            } else {
+                format!("{name}=")
+            }
+        })
+        .collect();
+    let template = template_lines.join("\n");
+
+    let fill_resp = match vault_post(
+        "/fill",
+        token,
+        &serde_json::json!({ "template": template, "output_path": output_path }),
+    ) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let fill_status = fill_resp.status().as_u16();
+    let fill_text = match fill_resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading fill response: {e}")),
+    };
+
+    if fill_status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if fill_status >= 400 { return tool_err(format!("fill failed (HTTP {fill_status}): {fill_text}")); }
+
+    let mut fill_result: serde_json::Value = serde_json::from_str(&fill_text)
+        .unwrap_or(serde_json::json!({}));
+    fill_result["method"] = serde_json::json!("item_naming_convention");
+    fill_result["environment"] = serde_json::json!(environment);
+    fill_result["output_path"] = serde_json::json!(output_path);
+    fill_result["matched_items"] = serde_json::json!(matched_items.len());
+
+    tool_ok(serde_json::to_string_pretty(&fill_result).unwrap_or_default())
+}
+
+// ─── Import .env file tool implementation ─────────────────────────────────────
+
+fn build_item_body(id: i64, key: &str, value: &str, category: &Option<String>, now_ts: &str) -> serde_json::Value {
+    let categories = if let Some(cat) = category {
+        serde_json::json!([cat])
+    } else {
+        serde_json::json!([])
+    };
+    serde_json::json!({
+        "id": id,
+        "type": "secret",
+        "name": key,
+        "value": value,
+        "categories": categories,
+        "created": now_ts
+    })
+}
+
+fn tool_import_env_file(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return tool_err("required parameter: 'path'"),
+    };
+    let category: Option<String> = args.get("category").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => return tool_err(format!("cannot read file: {e}")),
+    };
+
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+
+    // Parse pairs from file
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut skipped_invalid: Vec<String> = Vec::new();
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        // Skip blank lines and comments
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // Split on first '=' only
+        let eq_pos = match trimmed.find('=') {
+            Some(pos) => pos,
+            None => continue,
+        };
+        let raw_key = trimmed[..eq_pos].trim();
+        let raw_val = trimmed[eq_pos + 1..].trim();
+
+        if raw_key.is_empty() {
+            continue;
+        }
+
+        // Strip surrounding quotes from value
+        let value = if (raw_val.starts_with('"') && raw_val.ends_with('"'))
+            || (raw_val.starts_with('\'') && raw_val.ends_with('\''))
+        {
+            raw_val[1..raw_val.len() - 1].to_string()
+        } else {
+            raw_val.to_string()
+        };
+
+        if !is_safe_env_key(raw_key) {
+            skipped_invalid.push(raw_key.to_string());
+            continue;
+        }
+
+        pairs.push((raw_key.to_string(), value));
+    }
+
+    let mut imported: u32 = 0;
+    let mut updated: u32 = 0;
+    let mut skipped_existing: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
+
+    for (key, value) in &pairs {
+        // Search for existing item by key name
+        let search_url = format!("/items?search={}", urlencod(key));
+        let search_resp = match vault_get(&search_url, token) {
+            Ok(r) => r,
+            Err(e) => {
+                errors.push(format!("{key}: {e}"));
+                continue;
+            }
+        };
+
+        if search_resp.status().as_u16() == 403 {
+            return tool_err("vault_locked: unlock the vault first");
+        }
+
+        let search_text = match search_resp.text() {
+            Ok(t) => t,
+            Err(e) => {
+                errors.push(format!("{key}: error reading search response: {e}"));
+                continue;
+            }
+        };
+
+        let search_val: serde_json::Value = match serde_json::from_str(&search_text) {
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(format!("{key}: error parsing search response: {e}"));
+                continue;
+            }
+        };
+
+        let key_lower = key.to_lowercase();
+        let existing = search_val.as_array().and_then(|arr| {
+            arr.iter().find(|item| {
+                item.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.to_lowercase() == key_lower)
+                    .unwrap_or(false)
+            })
+        });
+
+        if let Some(existing_item) = existing {
+            if !overwrite {
+                skipped_existing.push(key.clone());
+                continue;
+            }
+            // Update existing item
+            let existing_id = match existing_item.get("id").and_then(|v| v.as_i64()) {
+                Some(id) => id,
+                None => {
+                    errors.push(format!("{key}: existing item has no id"));
+                    continue;
+                }
+            };
+            let body = build_item_body(existing_id, key, value, &category, "");
+            let resp = match vault_put(&format!("/items/{existing_id}"), token, &body) {
+                Ok(r) => r,
+                Err(e) => {
+                    errors.push(format!("{key}: {e}"));
+                    continue;
+                }
+            };
+            let status = resp.status().as_u16();
+            if status == 403 {
+                return tool_err("vault_locked: unlock the vault first");
+            }
+            if status >= 400 {
+                let text = resp.text().unwrap_or_default();
+                errors.push(format!("{key}: update failed (HTTP {status}): {text}"));
+                continue;
+            }
+            updated += 1;
+            keys.push(key.clone());
+        } else {
+            // Create new item
+            let body = build_item_body(0, key, value, &category, &now_ts);
+            let resp = match vault_post("/items", token, &body) {
+                Ok(r) => r,
+                Err(e) => {
+                    errors.push(format!("{key}: {e}"));
+                    continue;
+                }
+            };
+            let status = resp.status().as_u16();
+            if status == 403 {
+                return tool_err("vault_locked: unlock the vault first");
+            }
+            if status >= 400 {
+                let text = resp.text().unwrap_or_default();
+                errors.push(format!("{key}: create failed (HTTP {status}): {text}"));
+                continue;
+            }
+            imported += 1;
+            keys.push(key.clone());
+        }
+    }
+
+    tool_ok(
+        serde_json::to_string_pretty(&serde_json::json!({
+            "imported": imported,
+            "updated": updated,
+            "skipped_existing": skipped_existing,
+            "skipped_invalid": skipped_invalid,
+            "errors": errors,
+            "keys": keys
+        }))
+        .unwrap_or_default(),
+    )
+}
+
 fn dispatch(
     method: &str,
     params: &serde_json::Value,
@@ -1892,6 +2919,15 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_
         "crypt_env_inject_workspace" => tool_inject_workspace(args, token),
         "crypt_env_relay_send" => tool_relay_send(args, token),
         "crypt_env_relay_receive" => tool_relay_receive(args, token),
+        "crypt_env_share_workspace_send" => tool_share_workspace_send(args, token),
+        "crypt_env_share_workspace_receive" => tool_share_workspace_receive(args, token),
+        "crypt_env_list_mcp_servers" => tool_list_mcp_servers(args, token),
+        "crypt_env_add_mcp_server" => tool_add_mcp_server(args, token),
+        "crypt_env_update_mcp_server" => tool_update_mcp_server(args, token),
+        "crypt_env_delete_mcp_server" => tool_delete_mcp_server(args, token),
+        "crypt_env_list_workspaces_by_env" => tool_list_workspaces_by_env(args, token),
+        "crypt_env_inject_env_by_name" => tool_inject_env_by_name(args, token),
+        "crypt_env_import_env_file" => tool_import_env_file(args, token),
         _ => tool_err(format!("unknown tool: {name}")),
     }
 }

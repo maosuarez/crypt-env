@@ -2406,6 +2406,449 @@ async fn handle_relay_receive(
     (StatusCode::OK, Json(RelayReceiveResponse { names })).into_response()
 }
 
+// ─── Complete-workspace relay handlers ────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct WorkspaceRelaySendResponse {
+    code: String,
+    passphrase: String,
+    workspace: String,
+    item_count: usize,
+}
+
+/// Share an entire workspace (definition + decrypted values) via the relay.
+async fn handle_workspace_relay_send(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let (supabase_url, anon_key, bundle) = {
+        let vault = state.vault.lock().await;
+        let k = match vault.key.as_ref() {
+            Some(k) => **k,
+            None => {
+                return err_json(StatusCode::FORBIDDEN, "vault locked", "VAULT_LOCKED")
+                    .into_response()
+            }
+        };
+
+        let supabase_url = match vault.db.get_setting("relay_supabase_url").await {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "relay not configured: set relay_supabase_url in Settings",
+                    "NOT_CONFIGURED",
+                )
+                .into_response()
+            }
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+        let anon_key = match vault.db.get_setting("relay_supabase_anon_key").await {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "relay not configured: set relay_supabase_anon_key in Settings",
+                    "NOT_CONFIGURED",
+                )
+                .into_response()
+            }
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+
+        let workspaces = match vault.db.list_workspaces().await {
+            Ok(w) => w,
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+        let ws = match workspaces.into_iter().find(|w| w.id == id) {
+            Some(w) => w,
+            None => {
+                return err_json(StatusCode::NOT_FOUND, "workspace not found", "NOT_FOUND")
+                    .into_response()
+            }
+        };
+        let ws_vars = match vault.db.get_workspace_vars(id).await {
+            Ok(v) => v,
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+
+        // Decrypt every vault item once, keyed by id.
+        let raw = match vault.db.list_items().await {
+            Ok(r) => r,
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+        let mut items_by_id: std::collections::HashMap<i64, VaultItem> =
+            std::collections::HashMap::new();
+        for (item_id, _, data, _) in &raw {
+            if let Ok(json) = crypto::decrypt(&k, data) {
+                if let Ok(item) = serde_json::from_slice::<VaultItem>(&json) {
+                    items_by_id.insert(*item_id, item);
+                }
+            }
+        }
+
+        // Build manifest vars + the set of bundled items (deduped by name).
+        let mut bundle_vars: Vec<relay::WorkspaceBundleVar> = Vec::with_capacity(ws_vars.len());
+        let mut bundled: std::collections::HashMap<String, PlainItem> =
+            std::collections::HashMap::new();
+        for v in &ws_vars {
+            match v.item_id {
+                Some(iid) => {
+                    let item = match items_by_id.get(&iid) {
+                        Some(it) => it,
+                        // Referenced item was deleted — skip cleanly rather than fail.
+                        None => continue,
+                    };
+                    let item_name = item.name.clone().unwrap_or_default();
+                    bundled.entry(item_name.clone()).or_insert_with(|| PlainItem {
+                        item_type: item.item_type.clone(),
+                        name: item_name.clone(),
+                        value: item.value.clone(),
+                        username: item.username.clone(),
+                        password: item.password.clone(),
+                        url: item.url.clone(),
+                        notes: item.notes.clone(),
+                        category: item.categories.clone().and_then(|c| c.into_iter().next()),
+                        command: item.command.clone(),
+                    });
+                    bundle_vars.push(relay::WorkspaceBundleVar {
+                        key: v.key.clone(),
+                        item_name: Some(item_name),
+                        literal: None,
+                    });
+                }
+                None => bundle_vars.push(relay::WorkspaceBundleVar {
+                    key: v.key.clone(),
+                    item_name: None,
+                    literal: v.literal.clone(),
+                }),
+            }
+        }
+
+        let bundle = relay::WorkspaceBundle {
+            kind: relay::WorkspaceBundle::KIND.to_string(),
+            name: ws.name.clone(),
+            description: ws.description.clone(),
+            template: ws.template.clone(),
+            vars: bundle_vars,
+            items: bundled.into_values().collect(),
+        };
+
+        (supabase_url, anon_key, bundle)
+    };
+
+    let workspace_name = bundle.name.clone();
+    let item_count = bundle.items.len();
+    let code = relay::generate_share_code();
+    let passphrase = crate::share::crypto::generate_passphrase();
+
+    let relay_key = match relay::derive_relay_key(&code, &passphrase) {
+        Ok(k) => k,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), "INTERNAL_ERROR")
+                .into_response()
+        }
+    };
+    let payload = match relay::encrypt_workspace(&bundle, &relay_key) {
+        Ok(p) => p,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), "INTERNAL_ERROR")
+                .into_response()
+        }
+    };
+
+    let code_clone = code.clone();
+    let upload_result = tokio::task::spawn_blocking(move || {
+        relay::relay_upload(&supabase_url, &anon_key, &code_clone, &payload)
+    })
+    .await;
+    match upload_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            return err_json(
+                StatusCode::BAD_GATEWAY,
+                &format!("relay upload failed: {e}"),
+                "RELAY_ERROR",
+            )
+            .into_response()
+        }
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("task error: {e}"),
+                "INTERNAL_ERROR",
+            )
+            .into_response()
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(WorkspaceRelaySendResponse {
+            code,
+            passphrase,
+            workspace: workspace_name,
+            item_count,
+        }),
+    )
+        .into_response()
+}
+
+#[derive(serde::Serialize)]
+struct WorkspaceRelayReceiveResponse {
+    workspace: String,
+    names: Vec<String>,
+}
+
+/// Receive a complete workspace shared via the relay: recreate the bundled items,
+/// then recreate the workspace and re-link its variables to the new items by name.
+async fn handle_workspace_relay_receive(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<RelayReceiveBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    if body.code.is_empty() || body.passphrase.is_empty() {
+        return err_json(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "code and passphrase are required",
+            "VALIDATION_ERROR",
+        )
+        .into_response();
+    }
+
+    let relay_key = match relay::derive_relay_key(&body.code, &body.passphrase) {
+        Ok(k) => k,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), "INTERNAL_ERROR")
+                .into_response()
+        }
+    };
+
+    let (vault_key, supabase_url, anon_key) = {
+        let vault = state.vault.lock().await;
+        let k = match vault.key.as_ref() {
+            Some(k) => **k,
+            None => {
+                return err_json(StatusCode::FORBIDDEN, "vault locked", "VAULT_LOCKED")
+                    .into_response()
+            }
+        };
+        let supabase_url = match vault.db.get_setting("relay_supabase_url").await {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "relay not configured: set relay_supabase_url in Settings",
+                    "NOT_CONFIGURED",
+                )
+                .into_response()
+            }
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+        let anon_key = match vault.db.get_setting("relay_supabase_anon_key").await {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "relay not configured: set relay_supabase_anon_key in Settings",
+                    "NOT_CONFIGURED",
+                )
+                .into_response()
+            }
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        };
+        (k, supabase_url, anon_key)
+    };
+
+    let url_clone = supabase_url.clone();
+    let key_clone = anon_key.clone();
+    let code_clone = body.code.clone();
+    let download_result = tokio::task::spawn_blocking(move || {
+        relay::relay_download(&url_clone, &key_clone, &code_clone)
+    })
+    .await;
+    let payload = match download_result {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => {
+            return err_json(
+                StatusCode::BAD_GATEWAY,
+                &format!("relay download failed: {e}"),
+                "RELAY_ERROR",
+            )
+            .into_response()
+        }
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("task error: {e}"),
+                "INTERNAL_ERROR",
+            )
+            .into_response()
+        }
+    };
+
+    let bundle = match relay::decrypt_workspace(&payload, &relay_key) {
+        Ok(b) => b,
+        Err(e) => {
+            return err_json(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("decrypt failed (wrong passphrase or not a workspace?): {e}"),
+                "DECRYPT_ERROR",
+            )
+            .into_response()
+        }
+    };
+
+    // Burn-after-read (best-effort).
+    let url_clone2 = supabase_url.clone();
+    let key_clone2 = anon_key.clone();
+    let code_clone2 = body.code.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        relay::relay_delete(&url_clone2, &key_clone2, &code_clone2)
+    })
+    .await;
+
+    let vault = state.vault.lock().await;
+    let now_ts = now_ts_str();
+
+    // 1. Import bundled items, tracking name → new id so vars can re-link.
+    let mut id_by_name: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut names: Vec<String> = Vec::new();
+    for plain in &bundle.items {
+        let vault_item = VaultItem {
+            id: 0,
+            item_type: plain.item_type.clone(),
+            name: Some(plain.name.clone()),
+            value: plain.value.clone(),
+            username: plain.username.clone(),
+            password: plain.password.clone(),
+            url: plain.url.clone(),
+            notes: plain.notes.clone(),
+            title: None,
+            description: None,
+            command: plain.command.clone(),
+            shell: None,
+            content: None,
+            categories: Some(plain.category.iter().cloned().collect()),
+            created: now_ts.clone(),
+        };
+        let json = match serde_json::to_vec(&vault_item) {
+            Ok(j) => j,
+            Err(e) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("serialize item: {e}"),
+                    "INTERNAL_ERROR",
+                )
+                .into_response()
+            }
+        };
+        let encrypted = match crypto::encrypt(&vault_key, &json) {
+            Ok(e) => e,
+            Err(e) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("encrypt item: {e}"),
+                    "INTERNAL_ERROR",
+                )
+                .into_response()
+            }
+        };
+        match vault
+            .db
+            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created)
+            .await
+        {
+            Ok(new_id) => {
+                id_by_name.insert(plain.name.clone(), new_id);
+                names.push(plain.name.clone());
+            }
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                    .into_response()
+            }
+        }
+    }
+
+    // 2. Recreate the workspace (no paths — receiver sets their own .env targets).
+    let ws_id = match vault
+        .db
+        .upsert_workspace(0, &bundle.name, bundle.description.as_deref(), &bundle.template)
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
+                .into_response()
+        }
+    };
+
+    // 3. Re-link vars to the newly imported items by name.
+    let db_vars: Vec<DbWorkspaceVar> = bundle
+        .vars
+        .iter()
+        .map(|v| DbWorkspaceVar {
+            id: 0,
+            workspace_id: ws_id,
+            key: v.key.clone(),
+            item_id: v.item_name.as_ref().and_then(|n| id_by_name.get(n).copied()),
+            literal: v.literal.clone(),
+        })
+        .collect();
+    if let Err(e) = vault.db.set_workspace_vars(ws_id, &db_vars).await {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(WorkspaceRelayReceiveResponse {
+            workspace: bundle.name,
+            names,
+        }),
+    )
+        .into_response()
+}
+
 // ─── Función pública de arranque ──────────────────────────────────────────────
 
 pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
@@ -2451,6 +2894,8 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         .route("/workspaces/:id/inject", post(handle_inject_workspace))
         .route("/relay/send", post(handle_relay_send))
         .route("/relay/receive", post(handle_relay_receive))
+        .route("/workspaces/:id/relay/send", post(handle_workspace_relay_send))
+        .route("/workspaces/relay/receive", post(handle_workspace_relay_receive))
         .with_state(api_state)
         .layer(middleware::from_fn(cors_guard));
 

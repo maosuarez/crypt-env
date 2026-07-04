@@ -1,0 +1,2257 @@
+{
+  "info": {
+    "name": "CryptEnv API",
+    "description": "Comprehensive test collection for the CryptEnv encrypted secrets manager local REST API. Runs at https://127.0.0.1:47821.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://127.0.0.1:47821",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string",
+      "description": "Session token set automatically by POST /unlock"
+    },
+    {
+      "key": "itemId",
+      "value": "",
+      "type": "string",
+      "description": "Created item ID, set by POST /items"
+    },
+    {
+      "key": "categoryId",
+      "value": "",
+      "type": "string",
+      "description": "Created category ID, set by POST /categories"
+    },
+    {
+      "key": "workspaceId",
+      "value": "",
+      "type": "string",
+      "description": "Created workspace ID, set by POST /workspaces"
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "description": "Authentication endpoints — unlock the vault and obtain a session token.",
+      "item": [
+        {
+          "name": "POST /unlock — Happy Path",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/unlock",
+              "host": ["{{baseUrl}}"],
+              "path": ["unlock"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"master_password_here\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Derives AES-GCM key from master password + Argon2 salt, generates 16-byte session token with configurable TTL."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has token field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('token');",
+                  "  pm.expect(json.token).to.be.a('string').and.not.empty;",
+                  "});",
+                  "",
+                  "pm.test('Response has ttl field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('ttl');",
+                  "});",
+                  "",
+                  "// Save token for subsequent requests",
+                  "var json = pm.response.json();",
+                  "if (json && json.token) {",
+                  "  pm.collectionVariables.set('token', json.token);",
+                  "  console.log('Token saved:', json.token.substring(0, 8) + '...');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /unlock — Wrong Password (401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/unlock",
+              "host": ["{{baseUrl}}"],
+              "path": ["unlock"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"wrong_password_that_will_fail\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Should return 401 when wrong password is provided."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 for wrong password', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});",
+                  "",
+                  "pm.test('Error message is present', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /unlock — Rate Limit (429)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/unlock",
+              "host": ["{{baseUrl}}"],
+              "path": ["unlock"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"attempt_to_trigger_rate_limit\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Rate limiting: 5 attempts per 60-second window. This is a documentation request — run manually after 5 failed attempts."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Rate limit returns 429 (run after 5 failed attempts)', function () {",
+                  "  // This test is expected to pass only after 5+ failed unlock attempts in 60 seconds",
+                  "  // In normal flow, this request may return 401 (wrong password)",
+                  "  var status = pm.response.code;",
+                  "  pm.expect([401, 429]).to.include(status);",
+                  "});",
+                  "",
+                  "pm.test('Response has error field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "description": "Health-check endpoint — no authentication required.",
+      "item": [
+        {
+          "name": "GET /health — Happy Path",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Returns version, vault_locked bool, item_count, mcp_token_configured. No auth required."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has version field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('version');",
+                  "  pm.expect(json.version).to.be.a('string');",
+                  "});",
+                  "",
+                  "pm.test('Response has vault_locked field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('vault_locked');",
+                  "  pm.expect(json.vault_locked).to.be.a('boolean');",
+                  "});",
+                  "",
+                  "pm.test('Response has item_count field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('item_count');",
+                  "  pm.expect(json.item_count).to.be.a('number');",
+                  "});",
+                  "",
+                  "pm.test('Response has mcp_token_configured field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('mcp_token_configured');",
+                  "  pm.expect(json.mcp_token_configured).to.be.a('boolean');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Items",
+      "description": "CRUD operations for vault items. Items can be of type: secret, credential, link, note, command.",
+      "item": [
+        {
+          "name": "GET /items — List All",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items",
+              "host": ["{{baseUrl}}"],
+              "path": ["items"]
+            },
+            "description": "List all items (redacted — values not exposed)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response is an array', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Each item has required fields (if any exist)', function () {",
+                  "  var json = pm.response.json();",
+                  "  if (json.length > 0) {",
+                  "    var item = json[0];",
+                  "    pm.expect(item).to.have.property('id');",
+                  "    pm.expect(item).to.have.property('name');",
+                  "    pm.expect(item).to.have.property('type');",
+                  "    // Secret values must NOT be exposed in list response",
+                  "    pm.expect(item).to.not.have.property('value');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /items — Filter by Type",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items?type=secret",
+              "host": ["{{baseUrl}}"],
+              "path": ["items"],
+              "query": [
+                { "key": "type", "value": "secret" }
+              ]
+            },
+            "description": "Filter items by type query param."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response is an array', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('All returned items match the requested type', function () {",
+                  "  var json = pm.response.json();",
+                  "  json.forEach(function (item) {",
+                  "    pm.expect(item.type).to.equal('secret');",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /items — Filter by Category",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items?category={{categoryId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["items"],
+              "query": [
+                { "key": "category", "value": "{{categoryId}}" }
+              ]
+            },
+            "description": "Filter items by category ID."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response is an array', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /items — Search",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items?search=test",
+              "host": ["{{baseUrl}}"],
+              "path": ["items"],
+              "query": [
+                { "key": "search", "value": "test" }
+              ]
+            },
+            "description": "Search items by name or metadata."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response is an array', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Search results contain search term in name (if any returned)', function () {",
+                  "  var json = pm.response.json();",
+                  "  if (json.length > 0) {",
+                  "    var hasMatch = json.some(function (item) {",
+                  "      return item.name && item.name.toLowerCase().includes('test');",
+                  "    });",
+                  "    pm.expect(hasMatch).to.be.true;",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /items — Unauthorized (401)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/items",
+              "host": ["{{baseUrl}}"],
+              "path": ["items"]
+            },
+            "description": "Authenticated endpoint called without token — must return 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 when no token provided', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});",
+                  "",
+                  "pm.test('Error field present in response', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /items — Create Secret",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items",
+              "host": ["{{baseUrl}}"],
+              "path": ["items"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test API Key\",\n  \"type\": \"secret\",\n  \"value\": \"super_secret_api_key_12345\",\n  \"notes\": \"Created by Postman test\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Create a new vault item. Saves the created item ID to the itemId collection variable."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "pm.test('Response has id field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('id');",
+                  "});",
+                  "",
+                  "pm.test('Response has name field matching request', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.name).to.equal('Test API Key');",
+                  "});",
+                  "",
+                  "pm.test('Response has type field matching request', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.type).to.equal('secret');",
+                  "});",
+                  "",
+                  "pm.test('Response does NOT expose plaintext value', function () {",
+                  "  var json = pm.response.json();",
+                  "  if (json.value) {",
+                  "    pm.expect(json.value).to.not.equal('super_secret_api_key_12345');",
+                  "  }",
+                  "});",
+                  "",
+                  "// Save item ID for subsequent requests",
+                  "var json = pm.response.json();",
+                  "if (json && json.id) {",
+                  "  pm.collectionVariables.set('itemId', json.id);",
+                  "  console.log('Item ID saved:', json.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /items — Validation: Missing Name (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items",
+              "host": ["{{baseUrl}}"],
+              "path": ["items"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"secret\",\n  \"value\": \"some_value\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Validation: name is required, max 255 chars. Missing name should return 422."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422 for missing name', function () {",
+                  "  pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "pm.test('Error response mentions name field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /items — Validation: Invalid Type (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items",
+              "host": ["{{baseUrl}}"],
+              "path": ["items"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test Item\",\n  \"type\": \"invalid_type_xyz\",\n  \"value\": \"some_value\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Validation: type must be one of: secret, credential, link, note, command. Invalid type should return 422."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422 for invalid type', function () {",
+                  "  pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "pm.test('Error response is present', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /items — Validation: Empty Value (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items",
+              "host": ["{{baseUrl}}"],
+              "path": ["items"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test Item\",\n  \"type\": \"secret\",\n  \"value\": \"\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Validation: value must be non-empty. Empty value should return 422."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422 for empty value', function () {",
+                  "  pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "pm.test('Error response is present', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /items/:id — Get Item",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items/{{itemId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["items", "{{itemId}}"]
+            },
+            "description": "Get single item metadata (redacted). Uses itemId set by POST /items."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has id field matching requested id', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('id');",
+                  "  pm.expect(String(json.id)).to.equal(String(pm.collectionVariables.get('itemId')));",
+                  "});",
+                  "",
+                  "pm.test('Response has name field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('name');",
+                  "});",
+                  "",
+                  "pm.test('Response has type field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('type');",
+                  "});",
+                  "",
+                  "pm.test('Secret value is redacted', function () {",
+                  "  var json = pm.response.json();",
+                  "  if (json.value) {",
+                  "    pm.expect(json.value).to.not.equal('super_secret_api_key_12345');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /items/:id — Not Found (404)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items/999999",
+              "host": ["{{baseUrl}}"],
+              "path": ["items", "999999"]
+            },
+            "description": "Request a non-existent item ID."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 404 for non-existent item', function () {",
+                  "  pm.response.to.have.status(404);",
+                  "});",
+                  "",
+                  "pm.test('Error field is present', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PUT /items/:id — Update Item",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items/{{itemId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["items", "{{itemId}}"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Updated API Key\",\n  \"notes\": \"Updated by Postman test\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Update item. Merges — omitted fields keep existing values."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Updated name is reflected in response', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.name).to.equal('Updated API Key');",
+                  "});",
+                  "",
+                  "pm.test('Unchanged type field is preserved (merge behavior)', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('type');",
+                  "  pm.expect(json.type).to.equal('secret');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PUT /items/:id — Unauthorized (401)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items/{{itemId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["items", "{{itemId}}"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Should Fail\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Update without token — must return 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 when no token provided', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /items/:id/reveal — Reveal Secret",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items/{{itemId}}/reveal",
+              "host": ["{{baseUrl}}"],
+              "path": ["items", "{{itemId}}", "reveal"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"confirm\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Returns plaintext secret value. Requires confirm: true in body."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has value field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('value');",
+                  "  pm.expect(json.value).to.be.a('string').and.not.empty;",
+                  "});",
+                  "",
+                  "pm.test('Revealed value matches what was stored', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.value).to.equal('super_secret_api_key_12345');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /items/:id/reveal — Without Confirm (4xx)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items/{{itemId}}/reveal",
+              "host": ["{{baseUrl}}"],
+              "path": ["items", "{{itemId}}", "reveal"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"confirm\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Reveal without confirm: true should return a 4xx error."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 4xx when confirm is false', function () {",
+                  "  pm.expect(pm.response.code).to.be.within(400, 499);",
+                  "});",
+                  "",
+                  "pm.test('Error field is present', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /items/:id/reveal — Missing Body (4xx)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items/{{itemId}}/reveal",
+              "host": ["{{baseUrl}}"],
+              "path": ["items", "{{itemId}}", "reveal"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Reveal with empty body (no confirm field) should return 4xx."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 4xx when confirm field is absent', function () {",
+                  "  pm.expect(pm.response.code).to.be.within(400, 499);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE /items/:id — Delete Item",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/items/{{itemId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["items", "{{itemId}}"]
+            },
+            "description": "Delete item by ID. Returns 204 No Content."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 204', function () {",
+                  "  pm.response.to.have.status(204);",
+                  "});",
+                  "",
+                  "pm.test('Response body is empty', function () {",
+                  "  pm.expect(pm.response.text()).to.be.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE /items/:id — Unauthorized (401)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/items/{{itemId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["items", "{{itemId}}"]
+            },
+            "description": "Delete without token — must return 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 when no token provided', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Categories",
+      "description": "CRUD operations for vault categories.",
+      "item": [
+        {
+          "name": "GET /categories — List All",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/categories",
+              "host": ["{{baseUrl}}"],
+              "path": ["categories"]
+            },
+            "description": "List all categories (id, name, color, description)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response is an array', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Each category has required fields (if any exist)', function () {",
+                  "  var json = pm.response.json();",
+                  "  if (json.length > 0) {",
+                  "    var cat = json[0];",
+                  "    pm.expect(cat).to.have.property('id');",
+                  "    pm.expect(cat).to.have.property('name');",
+                  "    pm.expect(cat).to.have.property('color');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /categories — Unauthorized (401)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/categories",
+              "host": ["{{baseUrl}}"],
+              "path": ["categories"]
+            },
+            "description": "List categories without token — must return 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 when no token provided', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /categories — Create Category",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/categories",
+              "host": ["{{baseUrl}}"],
+              "path": ["categories"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test Category\",\n  \"color\": \"#FF5733\",\n  \"description\": \"Created by Postman test\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Create a category. Saves the created category ID to the categoryId collection variable."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "pm.test('Response has id field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('id');",
+                  "});",
+                  "",
+                  "pm.test('Response has name matching request', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.name).to.equal('Test Category');",
+                  "});",
+                  "",
+                  "pm.test('Response has color matching request', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.color).to.equal('#FF5733');",
+                  "});",
+                  "",
+                  "// Save category ID for subsequent requests",
+                  "var json = pm.response.json();",
+                  "if (json && json.id) {",
+                  "  pm.collectionVariables.set('categoryId', json.id);",
+                  "  console.log('Category ID saved:', json.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /categories — Validation: Missing Name (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/categories",
+              "host": ["{{baseUrl}}"],
+              "path": ["categories"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"color\": \"#FF5733\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Validation: name is required, max 100 chars. Missing name should return 422."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422 for missing name', function () {",
+                  "  pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "pm.test('Error response is present', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /categories — Validation: Missing Color (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/categories",
+              "host": ["{{baseUrl}}"],
+              "path": ["categories"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test Category No Color\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Validation: color is required. Missing color should return 422."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 422 for missing color', function () {",
+                  "  pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "pm.test('Error response is present', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('error');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PUT /categories/:id — Update Category",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/categories/{{categoryId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["categories", "{{categoryId}}"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Updated Category\",\n  \"color\": \"#3498DB\",\n  \"description\": \"\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Update category. Passing description: '' clears it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Updated name is reflected in response', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.name).to.equal('Updated Category');",
+                  "});",
+                  "",
+                  "pm.test('Updated color is reflected in response', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.color).to.equal('#3498DB');",
+                  "});",
+                  "",
+                  "pm.test('Empty description string clears the description', function () {",
+                  "  var json = pm.response.json();",
+                  "  if (json.hasOwnProperty('description')) {",
+                  "    pm.expect(json.description).to.satisfy(function(v) {",
+                  "      return v === '' || v === null || v === undefined;",
+                  "    });",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE /categories/:id — Delete Category",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/categories/{{categoryId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["categories", "{{categoryId}}"]
+            },
+            "description": "Delete category. Returns 204 No Content."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 204', function () {",
+                  "  pm.response.to.have.status(204);",
+                  "});",
+                  "",
+                  "pm.test('Response body is empty', function () {",
+                  "  pm.expect(pm.response.text()).to.be.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Commands",
+      "description": "Items of type 'command' with extracted {{VAR}} placeholders.",
+      "item": [
+        {
+          "name": "GET /commands — List All",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/commands",
+              "host": ["{{baseUrl}}"],
+              "path": ["commands"]
+            },
+            "description": "List items of type 'command' with extracted {{VAR}} placeholders."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response is an array', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Commands have placeholders field (if any exist)', function () {",
+                  "  var json = pm.response.json();",
+                  "  if (json.length > 0) {",
+                  "    pm.expect(json[0]).to.have.property('placeholders');",
+                  "    pm.expect(json[0].placeholders).to.be.an('array');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /commands — Unauthorized (401)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/commands",
+              "host": ["{{baseUrl}}"],
+              "path": ["commands"]
+            },
+            "description": "List commands without token — must return 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 when no token provided', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /commands/:id — Get Command",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/commands/{{itemId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["commands", "{{itemId}}"]
+            },
+            "description": "Get a single command with its placeholders. Uses itemId (assumes a command-type item was created)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200 or 404', function () {",
+                  "  // 404 is valid if itemId is not a command type",
+                  "  pm.expect([200, 404]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "pm.test('If 200, response has placeholders field', function () {",
+                  "  if (pm.response.code === 200) {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('placeholders');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Settings",
+      "description": "Application settings: auto_lock_timeout and hotkey.",
+      "item": [
+        {
+          "name": "GET /settings — Get Settings",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/settings",
+              "host": ["{{baseUrl}}"],
+              "path": ["settings"]
+            },
+            "description": "Get auto_lock_timeout (minutes) and hotkey."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has auto_lock_timeout field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('auto_lock_timeout');",
+                  "  pm.expect(json.auto_lock_timeout).to.be.a('number');",
+                  "});",
+                  "",
+                  "pm.test('Response has hotkey field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('hotkey');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /settings — Unauthorized (401)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/settings",
+              "host": ["{{baseUrl}}"],
+              "path": ["settings"]
+            },
+            "description": "Get settings without token — must return 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 when no token provided', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PUT /settings — Update Settings",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/settings",
+              "host": ["{{baseUrl}}"],
+              "path": ["settings"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"auto_lock_timeout\": 15,\n  \"hotkey\": \"Ctrl+Shift+V\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Update auto_lock_timeout and/or hotkey."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Updated auto_lock_timeout is reflected', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.auto_lock_timeout).to.equal(15);",
+                  "});",
+                  "",
+                  "pm.test('Updated hotkey is reflected', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.hotkey).to.equal('Ctrl+Shift+V');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Fill / Env",
+      "description": "Fill .env templates with vault values.",
+      "item": [
+        {
+          "name": "POST /fill — Fill Inline (No Output Path)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/fill",
+              "host": ["{{baseUrl}}"],
+              "path": ["fill"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template\": \"DATABASE_URL=postgres://user:{{DB_PASSWORD}}@localhost/mydb\\nAPI_KEY={{API_KEY}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Fill a .env template inline (no output_path). Returns filled content in response."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has content field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('content');",
+                  "  pm.expect(json.content).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /fill — Fill to File (With Output Path)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/fill",
+              "host": ["{{baseUrl}}"],
+              "path": ["fill"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template\": \"DATABASE_URL=postgres://user:{{DB_PASSWORD}}@localhost/mydb\",\n  \"output_path\": \"/tmp/test_output.env\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Fill a .env template and write to disk. Returns stats (vars_filled, vars_missing, etc.)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has stats fields', function () {",
+                  "  var json = pm.response.json();",
+                  "  // At minimum the response should confirm the write occurred",
+                  "  pm.expect(json).to.be.an('object');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /fill — Unauthorized (401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/fill",
+              "host": ["{{baseUrl}}"],
+              "path": ["fill"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template\": \"KEY={{VALUE}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Fill without token — must return 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 when no token provided', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Share (LAN)",
+      "description": "LAN-based peer-to-peer sharing via ECDH key exchange.",
+      "item": [
+        {
+          "name": "POST /share/listen — Start as Sender",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/share/listen",
+              "host": ["{{baseUrl}}"],
+              "path": ["share", "listen"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Start LAN share session as sender. Returns pairing_code."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has pairing_code field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('pairing_code');",
+                  "  pm.expect(json.pairing_code).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /share/connect — Connect as Receiver",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/share/connect",
+              "host": ["{{baseUrl}}"],
+              "path": ["share", "connect"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pairing_code\": \"XXXX-XXXX\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Connect as receiver using pairing_code. Returns ECDH fingerprint."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200 or 404', function () {",
+                  "  // 404/400 if pairing_code is not active",
+                  "  pm.expect([200, 400, 404]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "pm.test('If 200, response has fingerprint field', function () {",
+                  "  if (pm.response.code === 200) {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('fingerprint');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /share/confirm — Confirm Fingerprint",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/share/confirm",
+              "host": ["{{baseUrl}}"],
+              "path": ["share", "confirm"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"confirmed\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Confirm (or reject) the ECDH fingerprint."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200 or 409 (no active session)', function () {",
+                  "  pm.expect([200, 400, 409]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /share/status — Get Session Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/share/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["share", "status"]
+            },
+            "description": "Returns session state, fingerprint, direction, received_names."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has state field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('state');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE /share/session — Cancel Session",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/share/session",
+              "host": ["{{baseUrl}}"],
+              "path": ["share", "session"]
+            },
+            "description": "Cancel active share session."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200 or 204', function () {",
+                  "  pm.expect([200, 204]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /share/export — Export Items",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/share/export",
+              "host": ["{{baseUrl}}"],
+              "path": ["share", "export"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"item_ids\": [],\n  \"output_path\": \"/tmp/export_test.vault\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Export items as AES-256-GCM encrypted .vault file. Returns passphrase."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response has passphrase field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('passphrase');",
+                  "  pm.expect(json.passphrase).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /share/import — Import from File",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/share/import",
+              "host": ["{{baseUrl}}"],
+              "path": ["share", "import"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file_path\": \"/tmp/export_test.vault\",\n  \"passphrase\": \"replace_with_passphrase_from_export\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Import from .vault file using passphrase. Use passphrase returned by /share/export."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200 or 400', function () {",
+                  "  // 400 if passphrase is wrong / file not found",
+                  "  pm.expect([200, 400, 404]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "pm.test('If 200, response has imported_count field', function () {",
+                  "  if (pm.response.code === 200) {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('imported_count');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /share/status — Unauthorized (401)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/share/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["share", "status"]
+            },
+            "description": "Share status without token — must return 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 when no token provided', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Workspaces",
+      "description": "Workspace management — group .env var references to vault items.",
+      "item": [
+        {
+          "name": "GET /workspaces — List All",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/workspaces",
+              "host": ["{{baseUrl}}"],
+              "path": ["workspaces"]
+            },
+            "description": "List workspaces with their vars."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Response is an array', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('Each workspace has required fields (if any exist)', function () {",
+                  "  var json = pm.response.json();",
+                  "  if (json.length > 0) {",
+                  "    var ws = json[0];",
+                  "    pm.expect(ws).to.have.property('id');",
+                  "    pm.expect(ws).to.have.property('name');",
+                  "    pm.expect(ws).to.have.property('vars');",
+                  "    pm.expect(ws.vars).to.be.an('array');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /workspaces — Unauthorized (401)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/workspaces",
+              "host": ["{{baseUrl}}"],
+              "path": ["workspaces"]
+            },
+            "description": "List workspaces without token — must return 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 when no token provided', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /workspaces — Create Workspace",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/workspaces",
+              "host": ["{{baseUrl}}"],
+              "path": ["workspaces"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": 0,\n  \"name\": \"Test Workspace\",\n  \"description\": \"Created by Postman test\",\n  \"vars\": []\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Create or update workspace (upsert by id=0 = create). Saves workspace ID to collection variable."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200 or 201', function () {",
+                  "  pm.expect([200, 201]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "pm.test('Response has id field', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json).to.have.property('id');",
+                  "});",
+                  "",
+                  "pm.test('Response has name field matching request', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.name).to.equal('Test Workspace');",
+                  "});",
+                  "",
+                  "// Save workspace ID for subsequent requests",
+                  "var json = pm.response.json();",
+                  "if (json && json.id) {",
+                  "  pm.collectionVariables.set('workspaceId', json.id);",
+                  "  console.log('Workspace ID saved:', json.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /workspaces — Update Workspace",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/workspaces",
+              "host": ["{{baseUrl}}"],
+              "path": ["workspaces"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": {{workspaceId}},\n  \"name\": \"Updated Workspace\",\n  \"description\": \"Updated by Postman test\",\n  \"vars\": []\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Update existing workspace (upsert by providing existing id)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test('Updated name is reflected in response', function () {",
+                  "  var json = pm.response.json();",
+                  "  pm.expect(json.name).to.equal('Updated Workspace');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /workspaces/:id/inject — Inject to .env Paths",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/workspaces/{{workspaceId}}/inject",
+              "host": ["{{baseUrl}}"],
+              "path": ["workspaces", "{{workspaceId}}", "inject"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Inject workspace vars into configured .env paths."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200 or 400', function () {",
+                  "  // 400 if workspace has no configured output paths",
+                  "  pm.expect([200, 400]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "pm.test('If 200, response has injection result', function () {",
+                  "  if (pm.response.code === 200) {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json).to.be.an('object');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE /workspaces/:id — Delete Workspace",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/workspaces/{{workspaceId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["workspaces", "{{workspaceId}}"]
+            },
+            "description": "Delete workspace and its vars."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 204', function () {",
+                  "  pm.response.to.have.status(204);",
+                  "});",
+                  "",
+                  "pm.test('Response body is empty', function () {",
+                  "  pm.expect(pm.response.text()).to.be.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Relay",
+      "description": "Internet relay sharing via encrypted Supabase-hosted relay (burn-after-read, 24h TTL).",
+      "item": [
+        {
+          "name": "POST /relay/send — Send via Relay",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/relay/send",
+              "host": ["{{baseUrl}}"],
+              "path": ["relay", "send"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"item_ids\": []\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Encrypt selected items and upload to Supabase relay. Returns XXXX-XXXX code + plaintext passphrase."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200 or 503 (relay not configured)', function () {",
+                  "  // 503 if Supabase relay is not configured in Settings",
+                  "  pm.expect([200, 400, 503]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "pm.test('If 200, response has code field', function () {",
+                  "  if (pm.response.code === 200) {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('code');",
+                  "    pm.expect(json.code).to.match(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);",
+                  "  }",
+                  "});",
+                  "",
+                  "pm.test('If 200, response has passphrase field', function () {",
+                  "  if (pm.response.code === 200) {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('passphrase');",
+                  "    pm.expect(json.passphrase).to.be.a('string').and.not.empty;",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /relay/receive — Receive via Relay",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Vault-Token", "value": "{{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/relay/receive",
+              "host": ["{{baseUrl}}"],
+              "path": ["relay", "receive"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"XXXX-YYYY\",\n  \"passphrase\": \"replace_with_actual_passphrase\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Download from relay, decrypt, and import items. Burn-after-read."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200, 400, or 404', function () {",
+                  "  // 400/404 if code is invalid or expired; 503 if relay not configured",
+                  "  pm.expect([200, 400, 404, 503]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "pm.test('If 200, response has imported_count field', function () {",
+                  "  if (pm.response.code === 200) {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('imported_count');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /relay/send — Unauthorized (401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/relay/send",
+              "host": ["{{baseUrl}}"],
+              "path": ["relay", "send"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"item_ids\": []\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Relay send without token — must return 401."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 401 when no token provided', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

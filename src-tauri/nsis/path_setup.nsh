@@ -13,6 +13,13 @@ Function AddToUserPath
 
   ReadRegStr $PathOld HKCU "Environment" "Path"
 
+  ; SAFETY GUARD — default NSIS build caps strings at NSIS_MAX_STRLEN (1024) and
+  ; ReadRegStr silently truncates longer PATHs. Writing a truncated value back
+  ; destroys the user's PATH. Refuse to modify it when truncation is detected.
+  StrLen $R1 $PathOld
+  IntCmp $R1 1000 path_too_long path_ok path_too_long
+
+  path_ok:
   ; Check if already present (case-insensitive substring search).
   ${WordFind} "$PathOld" "$INSTDIR" "E+1{" $R0
   IfErrors 0 already_present
@@ -27,6 +34,10 @@ Function AddToUserPath
     WriteRegExpandStr HKCU "Environment" "Path" "$PathNew"
     ; Notify all windows (Explorer, open shells) that the environment changed.
     SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
+    Goto already_present
+
+  path_too_long:
+    MessageBox MB_OK|MB_ICONINFORMATION "CryptEnv did NOT modify your PATH because it is too long to edit safely.$\r$\nAdd this folder to your PATH manually:$\r$\n$\r$\n$INSTDIR"
 
   already_present:
 FunctionEnd
@@ -38,6 +49,11 @@ Function un.RemoveFromUserPath
 
   ReadRegStr $UnPathOld HKCU "Environment" "Path"
 
+  ; SAFETY GUARD — see AddToUserPath. Skip cleanup if PATH was truncated on read.
+  StrLen $R1 $UnPathOld
+  IntCmp $R1 1000 un_path_done un_path_ok un_path_done
+
+  un_path_ok:
   ; Remove all occurrences of $INSTDIR (with surrounding semicolons).
   ${WordReplace} "$UnPathOld" "$INSTDIR" "" "+" $UnPathNew
 
@@ -57,6 +73,8 @@ Function un.RemoveFromUserPath
 
   WriteRegExpandStr HKCU "Environment" "Path" "$UnPathNew"
   SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
+
+  un_path_done:
 FunctionEnd
 
 !endif ; PATH_SETUP_NSH

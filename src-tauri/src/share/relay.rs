@@ -54,6 +54,61 @@ pub fn decrypt_payload(payload: &str, key: &[u8; 32]) -> Result<Vec<PlainItem>, 
     serde_json::from_slice(&plaintext).map_err(|e| ShareError::Protocol(e.to_string()))
 }
 
+// ─── Complete-workspace bundle (template + values) ────────────────────────────
+// A workspace bundle carries the workspace definition AND the decrypted values of
+// every referenced vault item, so a teammate can reconstruct a ready-to-inject
+// workspace in one step. It rides on the same relay encryption as plain items.
+
+/// One variable in a shared workspace. Either references a bundled item (by name)
+/// or carries an inline literal value — never both.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct WorkspaceBundleVar {
+    pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub literal: Option<String>,
+}
+
+/// A complete, self-contained workspace ready to import.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct WorkspaceBundle {
+    /// Discriminator so a workspace payload is never mistaken for a bare item list.
+    pub kind: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub template: String,
+    pub vars: Vec<WorkspaceBundleVar>,
+    /// Decrypted values for the item-backed vars. Matched to vars by `name`.
+    pub items: Vec<PlainItem>,
+}
+
+impl WorkspaceBundle {
+    pub const KIND: &'static str = "workspace";
+}
+
+pub fn encrypt_workspace(bundle: &WorkspaceBundle, key: &[u8; 32]) -> Result<String, ShareError> {
+    let json = serde_json::to_vec(bundle).map_err(|e| ShareError::Protocol(e.to_string()))?;
+    let ciphertext = encrypt_message(key, &json);
+    Ok(B64.encode(&ciphertext))
+}
+
+pub fn decrypt_workspace(payload: &str, key: &[u8; 32]) -> Result<WorkspaceBundle, ShareError> {
+    let ciphertext = B64
+        .decode(payload)
+        .map_err(|e| ShareError::Protocol(format!("base64 decode: {e}")))?;
+    let plaintext = decrypt_message(key, &ciphertext)?;
+    let bundle: WorkspaceBundle =
+        serde_json::from_slice(&plaintext).map_err(|e| ShareError::Protocol(e.to_string()))?;
+    if bundle.kind != WorkspaceBundle::KIND {
+        return Err(ShareError::Protocol(
+            "this code is not a workspace package (use the items receive flow instead)".into(),
+        ));
+    }
+    Ok(bundle)
+}
+
 // ─── Code generation ──────────────────────────────────────────────────────────
 
 pub fn generate_share_code() -> String {

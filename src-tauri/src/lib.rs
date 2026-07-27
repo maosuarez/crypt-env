@@ -7,10 +7,10 @@ pub mod cli;
 pub mod crypto;
 pub mod db;
 pub mod mcp;
+pub mod project;
 pub mod share;
 pub mod tls;
 pub mod vault;
-pub mod workspace;
 
 use vault::{
     app_complete_setup, app_generate_mcp_config, app_is_first_run,
@@ -26,7 +26,10 @@ use vault::share_commands::{
     share_poll_status, share_relay_receive, share_relay_send, share_start_receive,
     share_start_send, SharedShareState,
 };
-use workspace::{workspace_delete, workspace_export, workspace_import, workspace_inject, workspace_list, workspace_pick_env_path, workspace_save};
+use project::{
+    environment_delete, environment_inject, environment_save, project_delete, project_export,
+    project_import, project_list, project_pick_env_path, project_save,
+};
 
 struct PendingUpdate(std::sync::Mutex<Option<tauri_plugin_updater::Update>>);
 
@@ -197,13 +200,15 @@ pub fn run() {
             share_import_file,
             share_relay_send,
             share_relay_receive,
-            workspace_list,
-            workspace_save,
-            workspace_delete,
-            workspace_inject,
-            workspace_pick_env_path,
-            workspace_export,
-            workspace_import,
+            project_list,
+            project_save,
+            project_delete,
+            project_export,
+            project_import,
+            project_pick_env_path,
+            environment_save,
+            environment_delete,
+            environment_inject,
             check_for_update,
             install_update,
             app_is_first_run,

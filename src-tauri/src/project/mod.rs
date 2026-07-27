@@ -1,0 +1,398 @@
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use tauri::State;
+
+use crate::db::{DbEnvironmentVar, VaultDb};
+use crate::vault::SharedState;
+
+// ─── Frontend-facing types ────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct EnvironmentVar {
+    #[serde(default)]
+    pub id: i64,
+    pub key: String,
+    #[serde(rename = "itemId", skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub literal: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Environment {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(rename = "projectId")]
+    pub project_id: i64,
+    pub name: String,
+    #[serde(rename = "isDefault")]
+    pub is_default: bool,
+    pub paths: Vec<String>,
+    pub vars: Vec<EnvironmentVar>,
+    pub created: String,
+    pub updated: String,
+}
+
+#[derive(Deserialize)]
+pub struct EnvironmentInput {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(rename = "projectId")]
+    pub project_id: i64,
+    pub name: String,
+    #[serde(default, rename = "isDefault")]
+    pub is_default: bool,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub vars: Vec<EnvironmentVar>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Project {
+    #[serde(default)]
+    pub id: i64,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub template: String,
+    pub created: String,
+    pub updated: String,
+    pub environments: Vec<Environment>,
+}
+
+#[derive(Deserialize)]
+pub struct ProjectInput {
+    #[serde(default)]
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub template: String,
+}
+
+#[derive(Serialize)]
+pub struct InjectResult {
+    pub paths: Vec<String>,
+    pub written: Vec<String>,
+}
+
+// ─── Pure logic (no Tauri/Axum coupling) ──────────────────────────────────────
+// Shared by the Tauri commands below and the HTTP handlers in `api::mod`, which
+// previously duplicated this logic almost verbatim.
+
+pub async fn list_projects(db: &VaultDb) -> Result<Vec<Project>, String> {
+    let db_projects = db.list_projects().await?;
+    let mut result = Vec::with_capacity(db_projects.len());
+    for p in db_projects {
+        let db_envs = db.list_environments(p.id).await?;
+        let mut environments = Vec::with_capacity(db_envs.len());
+        for e in db_envs {
+            let db_vars = db.get_environment_vars(e.id).await?;
+            environments.push(Environment {
+                id: e.id,
+                project_id: e.project_id,
+                name: e.name,
+                is_default: e.is_default,
+                paths: e.paths,
+                vars: db_vars
+                    .into_iter()
+                    .map(|v| EnvironmentVar { id: v.id, key: v.key, item_id: v.item_id, literal: v.literal })
+                    .collect(),
+                created: e.created,
+                updated: e.updated,
+            });
+        }
+        result.push(Project {
+            id: p.id,
+            name: p.name,
+            description: p.description,
+            template: p.template,
+            created: p.created,
+            updated: p.updated,
+            environments,
+        });
+    }
+    Ok(result)
+}
+
+/// Creates (id = 0) or updates (id > 0) a project's metadata. A newly created
+/// project always gets one 'default' environment so it's immediately usable.
+pub async fn save_project(db: &VaultDb, input: ProjectInput) -> Result<i64, String> {
+    let is_new = input.id == 0;
+    let project_id = db
+        .upsert_project(input.id, &input.name, input.description.as_deref(), &input.template)
+        .await?;
+    if is_new {
+        db.upsert_environment(0, project_id, "default", true).await?;
+    }
+    Ok(project_id)
+}
+
+pub async fn delete_project(db: &VaultDb, id: i64) -> Result<(), String> {
+    db.delete_project(id).await
+}
+
+pub async fn save_environment(db: &VaultDb, input: EnvironmentInput) -> Result<i64, String> {
+    let env_id = db
+        .upsert_environment(input.id, input.project_id, &input.name, input.is_default)
+        .await?;
+
+    db.set_environment_paths(env_id, &input.paths).await?;
+
+    let db_vars: Vec<DbEnvironmentVar> = input
+        .vars
+        .into_iter()
+        .map(|v| DbEnvironmentVar { id: 0, environment_id: env_id, key: v.key, item_id: v.item_id, literal: v.literal })
+        .collect();
+
+    db.set_environment_vars(env_id, &db_vars).await?;
+    Ok(env_id)
+}
+
+pub async fn delete_environment(db: &VaultDb, id: i64) -> Result<(), String> {
+    db.delete_environment(id).await
+}
+
+/// Decrypt referenced vault items and write KEY=VALUE pairs into every path
+/// configured on this environment. Merges with existing file content (existing
+/// keys not in the environment are preserved). `written` reports the union of
+/// keys touched across ALL paths, not just the first one.
+pub async fn inject_environment(
+    db: &VaultDb,
+    vault_key: &[u8; 32],
+    environment_id: i64,
+) -> Result<InjectResult, String> {
+    let env = db
+        .get_environment(environment_id)
+        .await?
+        .ok_or("environment not found")?;
+
+    if env.paths.is_empty() {
+        return Err("environment has no paths configured".into());
+    }
+
+    let vars = db.get_environment_vars(environment_id).await?;
+
+    if vars.is_empty() {
+        return Ok(InjectResult { paths: env.paths, written: vec![] });
+    }
+
+    // Decrypt vault items needed
+    let raw_items = db.list_items().await?;
+    let mut item_values: HashMap<i64, String> = HashMap::new();
+    for (item_id, _, data, _) in &raw_items {
+        let json = crate::crypto::decrypt(vault_key, data)?;
+        let item: crate::vault::VaultItem =
+            serde_json::from_slice(&json).map_err(|e| format!("parse item: {e}"))?;
+        let value = item.value.or(item.password).or(item.content).unwrap_or_default();
+        item_values.insert(*item_id, value);
+    }
+
+    // Build key → value map for this environment
+    let mut inject_map: HashMap<String, String> = HashMap::new();
+    for v in &vars {
+        let value = if let Some(iid) = v.item_id {
+            item_values.get(&iid).cloned().unwrap_or_default()
+        } else {
+            v.literal.clone().unwrap_or_default()
+        };
+        inject_map.insert(v.key.clone(), value);
+    }
+
+    // Write inject_map into each configured .env path
+    let mut written: HashSet<String> = HashSet::new();
+
+    for path in &env.paths {
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        let mut lines: Vec<String> = existing.lines().map(String::from).collect();
+        let mut updated_keys: HashSet<String> = HashSet::new();
+
+        for line in &mut lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') || !trimmed.contains('=') {
+                continue;
+            }
+            let eq_pos = match trimmed.find('=') {
+                Some(p) => p,
+                None => continue,
+            };
+            let existing_key = trimmed[..eq_pos].trim().to_string();
+            if let Some(new_val) = inject_map.get(&existing_key) {
+                *line = format!("{}={}", existing_key, new_val);
+                updated_keys.insert(existing_key.clone());
+                written.insert(existing_key);
+            }
+        }
+
+        for (k, v) in &inject_map {
+            if !updated_keys.contains(k) {
+                lines.push(format!("{}={}", k, v));
+                written.insert(k.clone());
+            }
+        }
+
+        let content = lines.join("\n") + "\n";
+        std::fs::write(path, content).map_err(|e| format!("write .env ({}): {e}", path))?;
+    }
+
+    let mut written_keys: Vec<String> = written.into_iter().collect();
+    written_keys.sort();
+
+    Ok(InjectResult { paths: env.paths, written: written_keys })
+}
+
+// ─── Tauri commands ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn project_list(state: State<'_, SharedState>) -> Result<Vec<Project>, String> {
+    let s = state.lock().await;
+    list_projects(&s.db).await
+}
+
+#[tauri::command]
+pub async fn project_save(state: State<'_, SharedState>, project: ProjectInput) -> Result<i64, String> {
+    let s = state.lock().await;
+    save_project(&s.db, project).await
+}
+
+#[tauri::command]
+pub async fn project_delete(state: State<'_, SharedState>, id: i64) -> Result<(), String> {
+    let s = state.lock().await;
+    delete_project(&s.db, id).await
+}
+
+#[tauri::command]
+pub async fn environment_save(
+    state: State<'_, SharedState>,
+    environment: EnvironmentInput,
+) -> Result<i64, String> {
+    let s = state.lock().await;
+    save_environment(&s.db, environment).await
+}
+
+#[tauri::command]
+pub async fn environment_delete(state: State<'_, SharedState>, id: i64) -> Result<(), String> {
+    let s = state.lock().await;
+    delete_environment(&s.db, id).await
+}
+
+#[tauri::command]
+pub async fn environment_inject(state: State<'_, SharedState>, id: i64) -> Result<InjectResult, String> {
+    let s = state.lock().await;
+    let key = s.key.as_ref().ok_or("vault is locked")?;
+    let vault_key: [u8; 32] = **key;
+    inject_environment(&s.db, &vault_key, id).await
+}
+
+#[tauri::command]
+pub async fn project_pick_env_path() -> Result<Option<String>, String> {
+    let result = tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("Select .env file")
+            .add_filter("All files", &["*"])
+            .add_filter("Env files", &["env"])
+            .pick_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(result.map(|p| p.to_string_lossy().into_owned()))
+}
+
+// ─── Export / Import ──────────────────────────────────────────────────────────
+// Exports a whole project (all its environments) as a reusable template. Paths
+// are machine-specific and intentionally dropped; item references can't cross
+// vaults either, so only literal values survive the round-trip.
+
+#[derive(Serialize, Deserialize)]
+pub struct ExportedEnvironmentVar {
+    pub key: String,
+    pub literal: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ExportedEnvironment {
+    pub name: String,
+    #[serde(rename = "isDefault")]
+    pub is_default: bool,
+    pub vars: Vec<ExportedEnvironmentVar>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ExportedProject {
+    pub version: u8,
+    pub name: String,
+    pub description: Option<String>,
+    pub template: String,
+    pub environments: Vec<ExportedEnvironment>,
+}
+
+#[tauri::command]
+pub async fn project_export(project_id: i64, state: State<'_, SharedState>) -> Result<(), String> {
+    let s = state.lock().await;
+    let project = list_projects(&s.db)
+        .await?
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or("project not found")?;
+
+    let exported = ExportedProject {
+        version: 1,
+        name: project.name.clone(),
+        description: project.description.clone(),
+        template: project.template.clone(),
+        environments: project
+            .environments
+            .into_iter()
+            .map(|e| ExportedEnvironment {
+                name: e.name,
+                is_default: e.is_default,
+                vars: e
+                    .vars
+                    .into_iter()
+                    .map(|v| ExportedEnvironmentVar {
+                        key: v.key,
+                        literal: if v.item_id.is_some() { None } else { v.literal },
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+
+    let json = serde_json::to_vec_pretty(&exported).map_err(|e| e.to_string())?;
+
+    let safe_name = project.name.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
+    let default_name = format!("{}.cryptenv-proj", safe_name);
+
+    let path = tokio::task::spawn_blocking(move || {
+        rfd::FileDialog::new()
+            .set_title("Save project template")
+            .set_file_name(&default_name)
+            .add_filter("CryptEnv Project", &["cryptenv-proj"])
+            .save_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "cancelled".to_string())?;
+
+    std::fs::write(&path, &json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn project_import() -> Result<ExportedProject, String> {
+    let path = tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("Load project template")
+            .add_filter("CryptEnv Project", &["cryptenv-proj"])
+            .pick_file()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "cancelled".to_string())?;
+
+    let json = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let project: ExportedProject = serde_json::from_slice(&json).map_err(|e| format!("invalid file: {e}"))?;
+    Ok(project)
+}

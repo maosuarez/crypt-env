@@ -14,12 +14,12 @@ use zeroize::Zeroizing;
 
 use crate::crypto;
 use crate::db::{DbCategory, DbWorkspaceVar};
+use crate::project::{self, EnvironmentInput, ProjectInput};
 use crate::share::{ShareState, ShareSessionState};
 use crate::share::relay;
 use crate::share::package::PlainItem;
 use crate::tls;
 use crate::vault::{SharedState, VaultItem};
-use crate::workspace::{InjectResult, Workspace, WorkspaceInput, WorkspaceVar};
 
 // ─── Estado compartido de la API ──────────────────────────────────────────────
 
@@ -1732,7 +1732,7 @@ async fn handle_share_import(
 
 // ─── Workspace handlers ───────────────────────────────────────────────────────
 
-async fn handle_list_workspaces(
+async fn handle_list_projects(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
@@ -1746,46 +1746,16 @@ async fn handle_list_workspaces(
     }
 
     let vault = state.vault.lock().await;
-    let db_workspaces = match vault.db.list_workspaces().await {
-        Ok(ws) => ws,
-        Err(e) => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                .into_response()
-        }
-    };
-
-    let mut result: Vec<Workspace> = Vec::with_capacity(db_workspaces.len());
-    for ws in db_workspaces {
-        let db_vars = match vault.db.get_workspace_vars(ws.id).await {
-            Ok(v) => v,
-            Err(e) => {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                    .into_response()
-            }
-        };
-        let vars: Vec<WorkspaceVar> = db_vars
-            .into_iter()
-            .map(|v| WorkspaceVar { id: v.id, key: v.key, item_id: v.item_id, literal: v.literal })
-            .collect();
-        result.push(Workspace {
-            id: ws.id,
-            name: ws.name,
-            description: ws.description,
-            paths: ws.paths,
-            template: ws.template,
-            created: ws.created,
-            updated: ws.updated,
-            vars,
-        });
+    match project::list_projects(&vault.db).await {
+        Ok(projects) => (StatusCode::OK, Json(projects)).into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
-
-    (StatusCode::OK, Json(result)).into_response()
 }
 
-async fn handle_save_workspace(
+async fn handle_save_project(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
-    Json(body): Json<WorkspaceInput>,
+    Json(body): Json<ProjectInput>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
         let (msg, err_code) = match code {
@@ -1801,51 +1771,18 @@ async fn handle_save_workspace(
             .into_response();
     }
 
+    let is_new = body.id == 0;
     let vault = state.vault.lock().await;
-    let ws_id = match vault
-        .db
-        .upsert_workspace(
-            body.id,
-            &body.name,
-            body.description.as_deref(),
-            &body.template,
-        )
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                .into_response()
+    match project::save_project(&vault.db, body).await {
+        Ok(id) => {
+            let status = if is_new { StatusCode::CREATED } else { StatusCode::OK };
+            (status, Json(serde_json::json!({ "id": id }))).into_response()
         }
-    };
-
-    if let Err(e) = vault.db.set_workspace_paths(ws_id, &body.paths).await {
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-            .into_response();
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
-
-    let db_vars: Vec<DbWorkspaceVar> = body
-        .vars
-        .into_iter()
-        .map(|v| DbWorkspaceVar {
-            id: 0,
-            workspace_id: ws_id,
-            key: v.key,
-            item_id: v.item_id,
-            literal: v.literal,
-        })
-        .collect();
-
-    if let Err(e) = vault.db.set_workspace_vars(ws_id, &db_vars).await {
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-            .into_response();
-    }
-
-    let status = if body.id == 0 { StatusCode::CREATED } else { StatusCode::OK };
-    (status, Json(serde_json::json!({ "id": ws_id }))).into_response()
 }
 
-async fn handle_delete_workspace(
+async fn handle_delete_project(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
@@ -1861,25 +1798,74 @@ async fn handle_delete_workspace(
 
     let vault = state.vault.lock().await;
 
-    // Verify workspace exists
-    let workspaces = match vault.db.list_workspaces().await {
-        Ok(ws) => ws,
+    let projects = match project::list_projects(&vault.db).await {
+        Ok(p) => p,
         Err(e) => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                .into_response()
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response()
         }
     };
-    if workspaces.iter().find(|ws| ws.id == id).is_none() {
-        return err_json(StatusCode::NOT_FOUND, "workspace not found", "NOT_FOUND").into_response();
+    if projects.iter().find(|p| p.id == id).is_none() {
+        return err_json(StatusCode::NOT_FOUND, "project not found", "NOT_FOUND").into_response();
     }
 
-    match vault.db.delete_workspace(id).await {
+    match project::delete_project(&vault.db, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
 }
 
-async fn handle_inject_workspace(
+async fn handle_save_environment(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<EnvironmentInput>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    if body.name.is_empty() {
+        return err_json(StatusCode::UNPROCESSABLE_ENTITY, "name: required and must not be empty", "VALIDATION_ERROR")
+            .into_response();
+    }
+
+    let is_new = body.id == 0;
+    let vault = state.vault.lock().await;
+    match project::save_environment(&vault.db, body).await {
+        Ok(id) => {
+            let status = if is_new { StatusCode::CREATED } else { StatusCode::OK };
+            (status, Json(serde_json::json!({ "id": id }))).into_response()
+        }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+    }
+}
+
+async fn handle_delete_environment(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let vault = state.vault.lock().await;
+    match project::delete_environment(&vault.db, id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+    }
+}
+
+async fn handle_inject_environment(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
@@ -1902,128 +1888,16 @@ async fn handle_inject_workspace(
         }
     };
 
-    let workspaces = match vault.db.list_workspaces().await {
-        Ok(ws) => ws,
-        Err(e) => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                .into_response()
+    match project::inject_environment(&vault.db, &vault_key, id).await {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(e) if e == "environment not found" => {
+            err_json(StatusCode::NOT_FOUND, &e, "NOT_FOUND").into_response()
         }
-    };
-    let ws = match workspaces.into_iter().find(|w| w.id == id) {
-        Some(w) => w,
-        None => {
-            return err_json(StatusCode::NOT_FOUND, "workspace not found", "NOT_FOUND")
-                .into_response()
+        Err(e) if e == "environment has no paths configured" => {
+            err_json(StatusCode::UNPROCESSABLE_ENTITY, &e, "VALIDATION_ERROR").into_response()
         }
-    };
-
-    if ws.paths.is_empty() {
-        return err_json(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "workspace has no paths configured",
-            "VALIDATION_ERROR",
-        )
-        .into_response();
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
-
-    let vars = match vault.db.get_workspace_vars(id).await {
-        Ok(v) => v,
-        Err(e) => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                .into_response()
-        }
-    };
-
-    if vars.is_empty() {
-        return (StatusCode::OK, Json(InjectResult { paths: ws.paths, written: vec![] })).into_response();
-    }
-
-    // Decrypt vault items needed for this workspace
-    let raw_items = match vault.db.list_items().await {
-        Ok(items) => items,
-        Err(e) => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                .into_response()
-        }
-    };
-
-    let mut item_values: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
-    for (item_id, _, data, _) in &raw_items {
-        let json = match crypto::decrypt(&vault_key, data) {
-            Ok(j) => j,
-            Err(_) => continue,
-        };
-        let item: VaultItem = match serde_json::from_slice(&json) {
-            Ok(i) => i,
-            Err(_) => continue,
-        };
-        let value = item.value.or(item.password).or(item.content).unwrap_or_default();
-        item_values.insert(*item_id, value);
-    }
-
-    // Build key → value map for this workspace
-    let mut inject_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for v in &vars {
-        let value = if let Some(iid) = v.item_id {
-            item_values.get(&iid).cloned().unwrap_or_default()
-        } else {
-            v.literal.clone().unwrap_or_default()
-        };
-        inject_map.insert(v.key.clone(), value);
-    }
-
-    // Write inject_map into each configured .env path
-    let mut written_keys: Vec<String> = Vec::new();
-    let mut written_once = false;
-
-    for path in &ws.paths {
-        let existing = std::fs::read_to_string(path).unwrap_or_default();
-        let mut lines: Vec<String> = existing.lines().map(String::from).collect();
-        let mut updated_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut written: Vec<String> = Vec::new();
-
-        for line in &mut lines {
-            let trimmed = line.trim();
-            if trimmed.starts_with('#') || !trimmed.contains('=') {
-                continue;
-            }
-            let eq_pos = match trimmed.find('=') {
-                Some(p) => p,
-                None => continue,
-            };
-            let existing_key = trimmed[..eq_pos].trim().to_string();
-            if let Some(new_val) = inject_map.get(&existing_key) {
-                *line = format!("{}={}", existing_key, new_val);
-                updated_keys.insert(existing_key.clone());
-                written.push(existing_key);
-            }
-        }
-
-        for (k, v) in &inject_map {
-            if !updated_keys.contains(k) {
-                lines.push(format!("{}={}", k, v));
-                written.push(k.clone());
-            }
-        }
-
-        let content = lines.join("\n") + "\n";
-        if let Err(e) = std::fs::write(path, content) {
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("write .env ({}): {e}", path),
-                "INTERNAL_ERROR",
-            )
-            .into_response();
-        }
-
-        if !written_once {
-            written.sort();
-            written_keys = written;
-            written_once = true;
-        }
-    }
-
-    (StatusCode::OK, Json(InjectResult { paths: ws.paths, written: written_keys })).into_response()
 }
 
 // ─── Relay handlers ───────────────────────────────────────────────────────────
@@ -2888,10 +2762,12 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         .route("/share/session", delete(handle_share_cancel))
         .route("/share/export", post(handle_share_export))
         .route("/share/import", post(handle_share_import))
-        .route("/workspaces", get(handle_list_workspaces))
-        .route("/workspaces", post(handle_save_workspace))
-        .route("/workspaces/:id", delete(handle_delete_workspace))
-        .route("/workspaces/:id/inject", post(handle_inject_workspace))
+        .route("/projects", get(handle_list_projects))
+        .route("/projects", post(handle_save_project))
+        .route("/projects/:id", delete(handle_delete_project))
+        .route("/environments", post(handle_save_environment))
+        .route("/environments/:id", delete(handle_delete_environment))
+        .route("/environments/:id/inject", post(handle_inject_environment))
         .route("/relay/send", post(handle_relay_send))
         .route("/relay/receive", post(handle_relay_receive))
         .route("/workspaces/:id/relay/send", post(handle_workspace_relay_send))

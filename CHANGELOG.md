@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [1.0.0] - 2026-07-28
 
 ### Changed
 
@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **MCP Server**: Renamed tools: `crypt_env_list_projects`, `crypt_env_inject_environment`, `crypt_env_list_environments_by_name`, `crypt_env_inject_env_by_name`. Legacy `crypt_env_share_workspace_send/receive` unchanged (out of scope, workspace-table-backed).
   - **Types**: `Workspace` → `Project` + `Environment`. `WorkspaceVar` → `EnvironmentVar`. `workspaceStore.ts` → `projectStore.ts`.
   - **Config**: Added `pnpm-workspace.yaml` for monorepo configuration (esbuild disabled).
+
+- **Mandatory Project + Environment Scoping** — All interfaces that operate on vault items now require an explicit project + environment scope. Scope is a filter over linked variables, not access control.
+  - **REST API**: Scoped endpoints (`GET`/`POST /items`, `GET /commands`, `POST /fill`, `POST /share/listen`, `POST /share/connect`, `POST /share/import`, `POST /relay/receive`) require either `environment_id` (i64) or both `project` and `environment` (case-insensitive names) as query params. Missing or unresolvable scope returns `422 VALIDATION_ERROR`. `GET`/`PUT`/`DELETE /items/:id` and `POST /items/:id/reveal` remain unscoped by design. New `POST /environments/:id/example` generates placeholder-only env files. `POST /environments/:id/inject` now takes a JSON body `{output_path, output_dir}`.
+  - **CLI**: New shared scope resolver (`commands/scope.rs`) applied across all scoped commands. Resolution order per field: CLI flags (`--project`, `--env`) → `crypt-env.json` (searched upward from cwd) → cwd folder name + the project's default environment. Auto-creation of projects is restricted to `add`; every other command errors clearly if the project is missing. `--project`/`--env` added to `add`, `fill`, `inject`, `set`, `search`, `exec`, `list`, `cmd`, `sync`, `share send/receive`, `relay receive`, and `tui`.
+  - **TUI**: Top bar shows the resolved project/environment; the item list is scoped to that environment's linked variables.
+  - **MCP Server**: 14 tools gained matching `environment_id` / `project` / `environment` parameters in schema and docs, plus new `crypt_env_generate_example_env`.
+  - **Docs**: `docs/reference.md` rewritten with the updated endpoint table, the scoping contract, the single-user vault access model, and known limitations.
+
+### Fixed
+
+- **`fill` no longer blanks unmatched keys** — When a key in the target `.env` is not found among the resolved environment's linked variables, the original line is now preserved intact and the key is reported as a warning. Previously unmatched keys were rewritten as `KEY=`, silently destroying existing values in plain (non-example) `.env` files.
+- **Project name collision race** — Added a case-insensitive `UNIQUE` index on `projects.name` (`idx_projects_name_nocase`). Concurrent CLI auto-create now resolves deterministically: `POST /projects` returns `409 Conflict` on collision, and the loser re-fetches and reuses the winning project instead of failing. When `add` creates a project it re-reads the actual default environment name rather than assuming a literal.
+- **Share/relay key hijack** — Imports from LAN share, internet relay, or `.vault` files no longer overwrite an existing variable link when an incoming item's name collides with a key already linked in the target environment. Collisions are skipped and surfaced via `skipped_keys` in `/share/status` and CLI warnings, preventing a peer from silently repointing the receiver's links with crafted item names.
+- **Invisible imported items** — Items imported via `/share/import` and `/relay/receive` with a scope provided are now both owned by the project and linked into the environment (matching `add_item` / `POST /items`). Previously they were owned but never linked, making them invisible to scoped `GET /items` and `crypt_env` list queries. MCP `share_import` and `relay_receive` now build scoped query strings when calling those endpoints.
 
 ### Known Limitations (Carried Forward)
 

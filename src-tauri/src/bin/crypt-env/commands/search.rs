@@ -1,14 +1,28 @@
 use clap::Args;
 use crate::client::{self, CliError, ItemSummary};
+use crate::commands::scope;
 
 #[derive(Args)]
 pub struct SearchArgs {
     /// Text to search for
     pub query: String,
+
+    /// Project name (defaults to crypt-env.json or the cwd folder name)
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Environment name (defaults to crypt-env.json or the project's default environment)
+    #[arg(long = "env")]
+    pub env: Option<String>,
 }
 
 pub fn run(args: SearchArgs) -> Result<(), CliError> {
-    let url = format!("{}/items?search={}", client::API_BASE, client::urlencod(&args.query));
+    let resolved_scope = scope::resolve(args.project.as_deref(), args.env.as_deref(), false)?;
+    let url = resolved_scope.append_query(&format!(
+        "{}/items?search={}",
+        client::API_BASE,
+        client::urlencod(&args.query)
+    ));
     let resp = client::authenticated_get(&url)?;
 
     if resp.status() == reqwest::StatusCode::FORBIDDEN {

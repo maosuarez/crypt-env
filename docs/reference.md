@@ -9,51 +9,67 @@ Authentication: Header `X-Vault-Token` containing either a session token (from P
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | POST | /unlock | none | Derives AES-GCM key from master password + Argon2 salt, generates 16-byte session token with configurable TTL |
-| GET | /health | none | Returns version, vault_locked bool, item_count, mcp_token_configured |
-| GET | /items | token | List items (redacted — no secret values). Query params: `type`, `category`, `search` |
-| POST | /items | token | Create item. Validates: name (req, max 255), type (one of: secret/credential/link/note/command), value (req non-empty). Encrypts with AES-GCM before storing. Returns 422 on validation failure |
-| GET | /items/:id | token | Get single item metadata (redacted) |
-| PUT | /items/:id | token | Update item. Merges — omitted fields keep existing values including secret fields |
-| DELETE | /items/:id | token | Delete item. Returns 204 |
-| POST | /items/:id/reveal | token | Returns plaintext secret value. Requires `{"confirm": true}` in body. Logs access to stderr |
-| GET | /categories | token | List categories (id, name, color, description) |
+| GET | /health | none | Returns version, status, vault_locked bool, mcp_token_configured. No longer returns item_count (removed — see Notes) |
+| GET | /items | token | List items (redacted — no secret values), **scoped**: requires `environment_id`, or `project`+`environment` (case-insensitive names) query params — 422 `VALIDATION_ERROR` if unresolvable. Returns only items linked in that environment's `environment_vars`. `type`/`category`/`search` filters apply on top |
+| POST | /items | token | Create item, **scoped** (same query params as GET /items). Validates: name (req, max 255), type (one of: secret/credential/link/note/command), value (req non-empty). Body accepts optional `key` (environment-var key, defaults to `name`). Creates the item, owns it in the resolved project, links it into the resolved environment under `key`. Caller-supplied `isGlobal` is ignored — items created this way are always `isGlobal:false`. Encrypts with AES-GCM before storing. Returns 422 on validation/scope failure |
+| GET | /items/:id | token | Get single item metadata (redacted). **Unscoped** — reachable by id regardless of project/environment (scope is a display filter, not an access boundary; see Notes) |
+| PUT | /items/:id | token | Update item. Merges — omitted fields keep existing values including secret fields. Unscoped, same as GET /items/:id |
+| DELETE | /items/:id | token | Delete item. Returns 204. Unscoped |
+| POST | /items/:id/reveal | token | Returns plaintext secret value. Requires `{"confirm": true}` in body. Logs access to stderr. Unscoped |
+| GET | /categories | token | List categories (id, name, color, description). Unscoped — categories are global |
 | POST | /categories | token | Create category. Validates name (req, max 100) and color (req). Generates random hex cid |
 | PUT | /categories/:id | token | Update category fields. Passing `description: ""` clears it |
 | DELETE | /categories/:id | token | Delete category. Returns 204 |
-| GET | /commands | token | List items of type "command" with extracted `{{VAR}}` placeholders |
-| GET | /commands/:id | token | Get single command with placeholders |
-| GET | /settings | token | Get auto_lock_timeout (minutes) and hotkey |
+| GET | /commands | token | List items of type "command" with extracted `{{VAR}}` placeholders, **scoped** (same query params as GET /items) — limited to commands linked in the resolved environment |
+| GET | /commands/:id | token | Get single command with placeholders. Unscoped |
+| GET | /settings | token | Get auto_lock_timeout (minutes) and hotkey. Unscoped — settings are global |
 | PUT | /settings | token | Update auto_lock_timeout and/or hotkey |
-| POST | /fill | token | Fill a .env template with real values. If `output_path` given: writes to disk with RAII TempEnvFile guard (zeros + deletes on error), returns stats only — no secret in response. If no output_path: returns filled content inline |
-| POST | /share/listen | token | Start LAN share session as sender. Registers mDNS, returns `pairing_code` |
-| POST | /share/connect | token | Connect as receiver using pairing_code. Returns ECDH fingerprint |
+| POST | /fill | token | Fill a .env template with real values, **scoped** (same query params as GET /items). Matches template keys against the resolved environment's `environment_vars.key` (not a vault-wide name search). A template key not found in scope has its **original line preserved unchanged** (not blanked) and is reported as a warning. `output_path` given: writes there with the RAII `TempEnvFile` guard, returns stats only — no secret in response. No `output_path` but `output_dir` given: writes `{output_dir}/.env.<environment-name>`. Neither: returns filled content inline |
+| POST | /environments/:id/example | token | Generate a placeholder-only env file/content for the environment (`environment_id` in URL path, same convention as `/environments/:id/inject`) — `KEY=` for every linked var key, values always empty, explicitly safe to commit. Never decrypts or reads item values. Body `{output_path?, output_dir?}`: `output_path` writes there; `output_dir` writes `{output_dir}/.env.example.<environment-name>`; neither returns `{content, keys}` inline. 404 if the environment doesn't resolve |
+| POST | /share/listen | token | Start LAN share session as sender, **scoped** (same query params as GET /items). Every id in `items` must already be linked into the resolved environment or the call 422s. Registers mDNS, returns `pairing_code` |
+| POST | /share/connect | token | Connect as receiver using pairing_code, **scoped** (same query params as GET /items). On successful transfer, received items are owned by the resolved project and linked into the resolved environment under the sender's item names — **except** where that name collides with a key already linked in the target environment, in which case the item is still imported/owned but the existing link is left untouched and the collision is reported (see `/share/status`'s `skipped_keys`, and Notes). Returns ECDH fingerprint |
 | POST | /share/confirm | token | Confirm (or reject) fingerprint. Both sides must call this |
-| GET | /share/status | token | Returns session state, fingerprint, direction, received_names |
+| GET | /share/status | token | Returns session state, fingerprint, direction, received_names, skipped_keys (env-var keys NOT linked due to a collision with an existing link — see /share/connect) |
 | DELETE | /share/session | token | Cancel active share session |
-| POST | /share/export | token | Export items as AES-256-GCM encrypted `.vault` file. Returns passphrase in response |
-| POST | /share/import | token | Import from `.vault` file using passphrase |
-| GET | /workspaces | token | List workspaces with vars |
-| POST | /workspaces | token | Create or update workspace (upsert by id=0 = create). Sets paths and vars atomically |
-| DELETE | /workspaces/:id | token | Delete workspace and vars |
-| POST | /workspaces/:id/inject | token | Decrypt vault items for workspace vars and write to all configured .env paths. Only updates/appends keys found in inject_map |
+| POST | /share/export | token | Export items as AES-256-GCM encrypted `.vault` file. Returns passphrase in response. Unscoped (operates on item IDs directly) |
+| POST | /share/import | token | Import from `.vault` file using passphrase, **scoped** (same query params as GET /items). Imported items are owned by the resolved project and linked into the resolved environment, with the same collision-skip behavior as `/share/connect`. (The Tauri GUI command for this import path still passes no scope — items land ownerless/unlinked from the GUI, same pre-existing gap as before, not addressed this pass) |
+| GET | /projects | token | List all projects with their typed environments (name, template, paths, variable count) |
+| POST | /projects | token | Create or update project. Returns project ID (upsert by id=0 for creation). `name` is unique case-insensitively at the DB level — creating with a name that already exists (any case) returns 409 CONFLICT instead of creating a duplicate |
+| DELETE | /projects/:id | token | Delete project and all its environments. Returns impact summary |
+| GET | /projects/:id/preview-delete | token | Show what will be deleted (impact preview) without performing the deletion |
+| POST | /environments | token | Create or update environment within a project. `projectId` is now required and validated to reference an existing project — 422 if missing/invalid. Returns environment ID (upsert by id=0 for creation) |
+| DELETE | /environments/:id | token | Delete a single environment. Returns 204 |
+| POST | /environments/:id/inject | token | Inject environment's variables into its configured .env path(s). Takes a JSON body `{output_path?, output_dir?}` (previously bodyless — an empty `{}` body preserves the old behavior). `output_path`, if given, is added to (not a replacement for) the environment's configured `paths[]` — all get written. If `paths[]` is empty and no `output_path`, falls back to `{output_dir}/.env.<environment-name>`. Returns paths written and keys injected |
 | POST | /relay/send | token | Encrypt selected items with Argon2id-derived key and upload to Supabase relay. Returns code + passphrase. Requires relay_supabase_url and relay_supabase_anon_key in settings |
-| POST | /relay/receive | token | Download from Supabase relay, decrypt with key+passphrase, import items. Burns after read (best-effort delete) |
+| POST | /relay/receive | token | Download from Supabase relay, decrypt with key+passphrase, import items, **scoped** (same query params as GET /items). Imported items are owned by the resolved project and linked into the resolved environment, with the same collision-skip behavior as `/share/connect`. Burns after read (best-effort delete) |
+| POST | /workspaces/:id/relay/send | token | Share complete workspace (definition + all decrypted referenced secrets) via relay. Returns code + passphrase. Legacy, workspace-table-backed, out of scope for the projects/environments migration |
+| POST | /workspaces/relay/receive | token | Receive shared workspace from relay. Recreates secrets and rebuilds workspace with variables re-linked. Legacy, same as above — items imported this way are NOT linked into any project/environment and are invisible to the scoped endpoints above |
 
 ### Notes
 
-`decrypt_all_items` decrypts the entire vault on every authenticated request (no caching, no index), making every GET /items a full decryption pass — O(n) per request regardless of filters.
+`decrypt_all_items` decrypts the entire vault on every authenticated request (no caching, no index), making every GET /items a full decryption pass — O(n) per request regardless of filters. Scoped endpoints add a second cost on top: `resolve_scope` loads the full project→environment→vars graph (`GET /projects`-equivalent) before the item decryption pass, so every scoped request is now O(vault) + O(project graph).
 
 `handle_delete_item` and `handle_update_item` each acquire the vault lock twice: once to read/verify existence and once to commit changes, with full AES-GCM re-encryption of the item held between acquisitions.
 
 Session token design uses a single `token_expires` slot (Instant monotonic), allowing only one active session per vault — concurrent client connections with different tokens will collide.
 
-`/health` returns `item_count` without authentication, leaking the vault's size to unauthenticated callers; the value is only meaningful after unlock so the endpoint reveals whether the vault is currently unlocked.
-
-`TempEnvFile` zeros output via `std::fs::write` which passes through OS page cache; on SSDs with wear leveling, overwritten data may persist in flash cells indefinitely — acceptable for most threat models but not forensic-grade.
+`TempEnvFile` zeros output via `std::fs::write` which passes through OS page cache; on SSDs with wear leveling, overwritten data may persist in flash cells indefinitely — acceptable for most threat models but not forensic-grade. Note this is a plain (non-atomic) write to the final destination, not a temp-file-plus-rename — a process crash mid-write can leave the target file truncated.
 
 `relay_delete` after receive is best-effort (error ignored), so relay payloads remain accessible to anyone with code+passphrase until the 24-hour TTL expires if deletion fails.
 
 CORS guard accepts `Origin: null`, correctly matching local file:// and Tauri webviews, but also matches any sandboxed iframe — minimal practical impact but violates defense-in-depth.
+
+Projects/environments model replaces the old workspaces. A Project contains multiple typed Environments, each with its own paths and variables. Environment variables are real FK-based links (`environment_vars.item_id` → a vault item), not name-search — an item is only "in" an environment if explicitly linked via `POST /items` (with `key`), `POST /environments` (saving the var list), or one of the import paths above. Deleting a project cascades to delete all its environments via foreign key constraints.
+
+`/projects/:id/preview-delete` returns the impact without executing the deletion — allows clients to show the user what will be removed before confirming.
+
+**Scoping contract**: `GET /items`, `POST /items`, `GET /commands`, `POST /fill`, `POST /share/listen`, `POST /share/connect`, `POST /share/import`, `POST /relay/receive` all require project+environment scope: query params `environment_id` (i64, takes precedence if both are given) or `project`+`environment` (name strings, case-insensitive, resolved via the same lookup `POST /environments/:id/inject` has always used). Missing/unresolvable scope → 422 `VALIDATION_ERROR`.
+
+**Scope is a filter, not an access-control boundary.** `GET/PUT/DELETE /items/:id` and `POST /items/:id/reveal` remain unscoped by design — any holder of a valid token can read/modify/reveal any item by id regardless of project. This is an acceptable model for a single-user local vault but is easy to assume otherwise given how consistently every list/create endpoint enforces scope.
+
+`projects.name` has a case-insensitive UNIQUE index (`idx_projects_name_nocase`) — duplicate-name creation now returns 409 instead of silently succeeding. `environments.name` is only unique per-project under SQLite's default (case-sensitive) collation — two environments in the same project differing only by case (e.g. `Production`/`production`) can still coexist, and name-pair resolution (case-insensitive, picks the lowest-id match) will silently prefer one over the other with no ambiguity error. Known limitation, not fixed.
+
+**Known, deferred issues** (found in review, not fixed in this pass): (1) a crafted environment `name` (only validated non-empty) combined with `output_dir` on `/fill`, `/environments/:id/inject`, or `/environments/:id/example` can path-traverse outside the intended directory, because `create_dir_all` on the joined path materializes the intermediate component that makes `..` segments resolve — reachable by anything holding the static MCP token via `POST /environments`. (2) `/fill`, `/environments/:id/inject`, and `/environments/:id/example` all write via a plain `std::fs::write` to `output_path` with no existence check — pointing one at a real, unrelated file truncates it. (3) `POST /items` on a key that already exists in the environment creates a new item row and repoints the link, orphaning (not deleting) the previous item — repeated `add`-equivalent calls grow the vault unboundedly and "rotating" a secret this way doesn't actually remove the old value.
 
 ---
 
@@ -61,43 +77,61 @@ CORS guard accepts `Origin: null`, correctly matching local file:// and Tauri we
 
 Command: `crypt-env`
 
+Every command that reads or writes vault items scoped to a project (`add`, `fill`, `inject`, `set`, `search`, `exec`, `list`, `cmd list/info/run`, `sync`, `share send/receive`) accepts `--project NAME` and `--env NAME` flags. Scope is resolved once per invocation via a shared helper (`commands/scope.rs::resolve`), in this order per field:
+
+1. The command's own `--project` / `--env` flag, if given.
+2. `crypt-env.json`, found by searching from the current directory upward (same convention as `.git`/`package.json` discovery) — its `project` and optional `environment` fields.
+3. Fallback: project name = current working directory's folder name; environment = that project's default environment (`GET /projects`, `isDefault`). **Auto-creation on a resolution miss (`POST /projects`) only happens for `add`/`add --file`** — every other scoped command returns a clear error ("no project found for '<name>' — run `crypt-env add` to create one, or pass --project/--env") instead of silently creating server state. When `add` does create a project, it re-fetches the actual default-environment name from the server response rather than assuming a literal `"default"`, and if a concurrent invocation won the creation race (`POST /projects` → 409, name is case-insensitively unique), it re-fetches and reuses the existing project instead of erroring.
+
+`crypt-env.json` schema (place at a project's root):
+
+```json
+{
+  "project": "my-app",
+  "environment": "production"
+}
+```
+
+`project` is required; `environment` is optional (omit it to always fall through to the project's default environment).
+
 | Command | Subcommand / Flags | Description |
 |---------|-------------------|-------------|
-| `add` | `KEY=value` | Add a secret from KEY=value literal |
+| `add` | `KEY=value` | Add a secret from KEY=value literal, scoped to `--project`/`--env` |
 | `add` | `$VARNAME` | Read value from system environment variable |
-| `add` | `--file [PATH]` | Bulk-import from .env file (uses dotenvy). Defaults to `./.env`. Detects duplicates via GET /items before writing |
+| `add` | `--file [PATH]` | Bulk-import from .env file (uses dotenvy). Defaults to `./.env`. Detects duplicates via scoped GET /items before writing |
 | `add` | `--credential` | Store as credential type instead of secret |
 | `add` | `--note` | Store as note type |
 | `add` | `--name NAME` | Override the stored key name |
 | `add` | `--force` | Skip confirmation on duplicate keys |
-| `doctor` | — | Check app health, vault lock state, token files, version |
-| `fill` | `[PATH]` | Fill .env or .env.example with vault secrets. If .env.example: creates sibling .env. Preserves comments and blank lines. Warns on not-found keys |
-| `inject` | `NAME [--shell TYPE]` | Prints shell assignment to stdout (safe for eval). Supported: pwsh, bash, zsh, sh. Prints verify hint to stderr |
-| `list` | — | List saved commands in a table |
-| `exec` | `NAME [ARGS]` | Execute a saved command by name |
+| `doctor` | — | Check app health, vault lock state, token files, version, and validate `crypt-env.json` if present |
+| `fill` | `[PATH] [--project] [--env]` | Fill a .env template with vault secrets from the resolved environment, via `POST /fill`. No PATH: looks for `.env.example` then `.env` in cwd; if neither exists, generates a fresh `.env` from the environment's own variable keys (inverse of `add`) |
+| `inject` | `NAME [--shell TYPE] [--project] [--env]` | Prints shell assignment to stdout (safe for eval). Supported: pwsh, bash, zsh, sh. Prints verify hint to stderr |
+| `list` | `[--project] [--env]` | List saved commands in a table |
+| `exec` | `NAME [ARGS] [--project] [--env]` | Execute a saved command by name |
 | `memory` | — | Save a command string interactively |
-| `search` | `QUERY` | Search items by name/title. Prints table of ID, TYPE, NAME, CATEGORIES. No values shown |
-| `set` | `NAME` | Print export/env assignment for a secret (stdout) |
-| `cmd` | `list/info/run` | Manage saved commands (list, get info, run) |
-| `share send` | `ITEM_IDS...` | Start LAN share as sender. Polls for peer, shows fingerprint, prompts confirmation |
-| `share receive` | — | Connect as receiver. Prompts pairing code, shows fingerprint, prompts confirmation |
-| `share export` | `ITEM_IDS -o OUTPUT` | Export items as encrypted .vault file. Displays passphrase once |
-| `share import` | `-f FILE` | Import from .vault file. Prompts passphrase via rpassword (no echo) |
-| `category list` | — | List all categories |
-| `category create` | `NAME COLOR [DESC]` | Create a new category |
-| `category edit` | `ID [fields]` | Edit category by ID |
-| `category delete` | `ID` | Delete category by ID |
-| `tui` | — | Launch interactive TUI |
-| `workspace list` | — | List workspaces (ID, Name, Template, Paths, Var count) |
-| `workspace inject` | `--id ID` or `--name NAME` | Inject workspace vars into configured .env paths |
-| `workspace delete` | `--id ID` | Delete workspace by ID |
-| `relay send` | `--items 1,2,3` | Send items via internet relay. Prints code + passphrase once |
-| `relay receive` | `--code CODE --passphrase PASS` | Receive items via relay |
-| `sync` | `[--example PATH] [--env PATH] [--dry-run]` | Add new variables from .env.example into .env without overwriting existing. Fills from vault when found |
+| `search` | `QUERY [--project] [--env]` | Search items by name/title within scope. Prints table of ID, TYPE, NAME, CATEGORIES. No values shown |
+| `set` | `NAME [--project] [--env]` | Print export/env assignment for a secret (stdout) |
+| `cmd` | `list/info/run [--project] [--env]` | Manage saved commands (list, get info, run) |
+| `share send` | `ITEM_IDS... [--project] [--env]` | Start LAN share as sender. Items must already be linked into the resolved environment. Polls for peer, shows fingerprint, prompts confirmation |
+| `share receive` | `[--project] [--env]` | Connect as receiver. Received items are owned by `--project` and linked into `--env`, except where the sender's item name collides with a key already linked there — that item is still imported but the existing link is left alone, and the collision is warned about (`skipped_keys`). Prompts pairing code, shows fingerprint, prompts confirmation |
+| `share export` | `ITEM_IDS -o OUTPUT` | Export items as encrypted .vault file. Displays passphrase once. Unscoped (operates on item IDs directly) |
+| `share import` | `-f FILE [--project] [--env]` | Import from .vault file. Prompts passphrase via rpassword (no echo). Scoped — imported items are owned by `--project` and linked into `--env`, same collision-skip behavior as `share receive` |
+| `category list` | — | List all categories (unscoped, global) |
+| `category create` | `NAME COLOR [DESC]` | Create a new category (unscoped, global) |
+| `category edit` | `ID [fields]` | Edit category by ID (unscoped, global) |
+| `category delete` | `ID` | Delete category by ID (unscoped, global) |
+| `tui` | `[--project] [--env]` | Launch interactive TUI, scoped to the resolved project/environment |
+| `project list` | — | List all projects with their typed environments (name, template, paths, var count) |
+| `project inject` | `--id ID` or `--project NAME --environment NAME` | Inject an environment's vars into its configured .env path(s) |
+| `project delete` | `--id ID` | Delete a project and all its environments |
+| `project delete-env` | `--id ID` | Delete a single environment by ID |
+| `relay send` | `--items 1,2,3` | Send items via internet relay. Prints code + passphrase once. Unscoped |
+| `relay receive` | `--code CODE --passphrase PASS [--project] [--env]` | Receive items via relay. Scoped — imported items are owned by `--project` and linked into `--env`, same collision-skip behavior as `share receive` |
+| `sync` | `[--example PATH] [--env PATH] [--dry-run] [--project] [--environment]` | Add new variables from .env.example into .env without overwriting existing. Fills from the resolved project/environment's vault items when found. (Note: `--env` here means the target `.env` file path, pre-existing flag name — the environment-name flag is `--environment` to avoid the clash) |
 
 ### Notes
 
-`add --file` loads the entire item list via GET /items to detect duplicates, then POSTs each item sequentially — N+1 HTTP requests for a large .env file, with no batch-create optimization.
+`add --file` loads the scoped item list via GET /items to detect duplicates, then POSTs each item sequentially — N+1 HTTP requests for a large .env file, with no batch-create optimization.
 
 `share send` polls GET /share/status with `sleep(1s)` in a loop for up to 300 iterations (5 min) for fingerprint, then another 600 iterations (10 min) for peer acceptance — blocking the terminal indefinitely if the peer crashes or never connects.
 
@@ -107,15 +141,29 @@ Command: `crypt-env`
 
 `sync` appends new lines via `std::fs::OpenOptions::append` — if the .env file lacks a trailing newline, the first appended key appears on the same line as the last existing key.
 
-`fill` writes output via `std::fs::write` (non-atomic) — process crash mid-write leaves the file truncated with no atomic rename recovery.
+`fill` now writes through `POST /fill`, which uses the server's `TempEnvFile` RAII guard (zeros + deletes on error) instead of a raw client-side `std::fs::write`. Note this guard writes directly to the destination path (no temp-file-plus-rename), so it is still not atomic — a crash mid-write can leave the file truncated. A template key not resolvable in scope has its original line preserved unchanged rather than being blanked (fixed after an earlier version of this migration blanked unmatched keys, causing data loss on plain `.env` targets).
+
+`--project`/`--env` flags are resolved independently (each field falls through flags → `crypt-env.json` → cwd-derived default on its own), not as an all-or-nothing pair — e.g. `--env staging` alone still picks up the project name from `crypt-env.json` if present.
+
+`project inject` resolves environment by ID or by project+environment names (both case-insensitive). The environment's variables are matched via `environment_vars.item_id` (a real FK to the vault item), not by name search — the "matched by name" behavior only applies to legacy pre-migration rows still carrying a `literal` value with no `item_id`. Missing items appear as warnings but do not abort the injection. This subcommand (and `project delete-env`) still use `resolve_environment_id`/id-based lookups client-side and were intentionally left untouched by the project/environment scoping work — they were already project-scoped by construction.
+
+`add` on a key that already exists in the resolved environment creates a new item row and repoints the environment-var link to it, rather than updating the existing item in place — the superseded item is orphaned (still in the vault, still decryptable via `/items/:id`, included in exports/backups) rather than deleted. Not fixed this pass.
+
+A crafted environment name (created via the GUI or with the static MCP token — CLI-driven `crypt-env.json`/cwd-derived names can't produce this) combined with `--project`/`--env` resolving to it can path-traverse `fill`'s/`project inject`'s `output_dir`-derived path outside the intended directory. Not fixed this pass.
+
+`project list` shows all projects with nested environment details. Projects with no environments display "(none)" for environment and var count.
+
+`doctor` no longer reports vault item count — `GET /health` stopped returning `item_count` (it leaked vault size to unauthenticated callers).
 
 ---
 
 ## TUI
 
-Command: `crypt-env tui`
+Command: `crypt-env tui [--project NAME] [--env NAME]`
 
-Screens: Unlock (master password entry), Main (item list), Detail (item metadata + controls), Help (keybinding reference), Confirm (destructive operation confirmation).
+Scope (which project/environment's items are listed) is resolved the same way as every scoped CLI command — see `commands/scope.rs::resolve` in the CLI section above: `--project`/`--env` flags, then `crypt-env.json`, then the cwd folder name + the project's default environment. Resolution happens once, right after authentication succeeds (either from a cached token at startup or right after Unlock), since it may issue authenticated requests (`GET`/`POST /projects`). The active `project / environment` is shown in the top bar next to the item count.
+
+Screens: Unlock (master password entry), Main (item list, scoped to the resolved project/environment), Detail (item metadata + controls), Help (keybinding reference), Confirm (destructive operation confirmation).
 
 | Key | Screen | Action |
 |-----|--------|--------|
@@ -140,7 +188,7 @@ Screens: Unlock (master password entry), Main (item list), Detail (item metadata
 
 ### Notes
 
-TUI uses crossterm raw mode without panic hook or RAII guard — if the process panics mid-render, the terminal remains in raw mode and is unusable until manual `stty sane` or shell restart.
+TUI installs a panic hook (`std::panic::set_hook`) that disables raw mode and leaves the alternate screen before delegating to the default hook, so a mid-render panic restores the terminal rather than leaving it unusable.
 
 Copy-to-clipboard (`c`) relies on `tauri-plugin-clipboard-manager`, a GUI plugin designed for Tauri's webview context — clipboard integration in a standalone TUI binary is uncertain and may silently fail or panic.
 
@@ -149,6 +197,10 @@ Reveal (`v`) calls GET /items/:id/reveal on the REST API for every toggle, gener
 Fuzzy search operates on the in-memory item list loaded at Main screen entry — no re-fetch on search, so changes made elsewhere (API, CLI) are not reflected until `r` is pressed.
 
 TUI has no auto-lock timeout despite the setting existing in vault config — the vault remains unlocked indefinitely if the user leaves the TUI open, bypassing the `auto_lock_timeout` setting entirely.
+
+Scope resolution (`--project`/`--env` → `crypt-env.json` → cwd fallback) runs once per session and is memoized in `App.scope` — switching project/environment requires restarting the TUI with different flags or a different `crypt-env.json`, there is no in-app scope switcher.
+
+If scope resolution fails after a cached token is found at startup (e.g. the vault was locked server-side, or the resolved project/environment no longer exists), the TUI falls back to the Unlock screen rather than showing a broken or partial item list.
 
 Detail view includes `detail_scroll` field in App state but scroll rendering is not confirmed functional from the source code — long secrets may be silently clipped without visual indication.
 
@@ -164,37 +216,40 @@ Authentication: Automatic — MCP server reads the REST API session token from d
 
 | Tool | Required | Optional | Description |
 |------|----------|----------|-------------|
-| `crypt_env_list_items` | — | `type`, `category` | List item metadata (no values). Filter by type or category |
-| `crypt_env_get_item` | `id` | — | Get single item metadata (no value) |
-| `crypt_env_search_items` | `query` | — | Search items by name. Returns metadata only |
-| `crypt_env_add_item` | `type`, `name` | `value`, `category`, `notes`, `url`, `username` | Add item to vault. Value passes through MCP → REST in plaintext |
-| `crypt_env_update_item` | `id` | `name`, `value`, `url`, `username`, `password`, `title`, `description`, `notes`, `content`, `command`, `shell`, `categories` | Update item. Omitted fields keep existing values server-side |
-| `crypt_env_delete_item` | `id` | — | Permanently delete item |
-| `crypt_env_generate_env` | `keys` | — | Write .env file to temp dir with real values for given key names. Returns path + count. Values never in response. Cleans up previous temp file on next call |
-| `crypt_env_inject_env` | `key` | — | Inject one secret as env var into the MCP process via `std::env::set_var`. Does not return value |
-| `crypt_env_fill_env` | `template`, `output_path` | — | Fill .env.example template and write to output_path. Values never in response |
-| `crypt_env_import_env_file` | `path` | `category`, `overwrite` | Read .env file from disk, parse KEY=value pairs, import each as vault secret. Values never in MCP response |
+| `crypt_env_list_items` | `environment_id` or (`project`+`environment`) | `type`, `category` | List item metadata (no values), scoped to a project+environment (required — the underlying `GET /items` now enforces it). Filter by type or category on top |
+| `crypt_env_get_item` | `id` | — | Get single item metadata (no value). Unscoped — `GET /items/:id` was not changed by this migration, reachable by id regardless of project |
+| `crypt_env_search_items` | `query`, `environment_id` or (`project`+`environment`) | — | Search items by name within scope. Returns metadata only |
+| `crypt_env_add_item` | `type`, `name`, `environment_id` or (`project`+`environment`) | `value`, `category`, `notes`, `url`, `username`, `key` | Add item to vault, owned by the resolved project and linked into the resolved environment under `key` (defaults to `name`). Value passes through MCP → REST in plaintext |
+| `crypt_env_update_item` | `id` | `name`, `value`, `url`, `username`, `password`, `title`, `description`, `notes`, `content`, `command`, `shell`, `categories` | Update item. Omitted fields keep existing values server-side. Unscoped — `PUT /items/:id` was not changed by this migration |
+| `crypt_env_delete_item` | `id` | — | Permanently delete item. Unscoped — `DELETE /items/:id` was not changed by this migration |
+| `crypt_env_generate_env` | `keys`, `environment_id` or (`project`+`environment`) | — | Write .env file to temp dir with real values for given key names, looked up by item name within scope (see Notes for the name-vs-key mismatch vs `crypt_env_fill_env`). Returns path + count. Values never in response. Cleans up previous temp file on next call |
+| `crypt_env_inject_env` | `key`, `environment_id` or (`project`+`environment`) | — | Inject one secret as env var into the MCP process via `std::env::set_var`. Does not return value |
+| `crypt_env_fill_env` | `template` | `output_path`, `output_dir`, `environment_id` or (`project`+`environment`) | Fill a template with vault secrets from the resolved environment, matched by `environment_vars.key`. `output_path` given: writes there. No `output_path` but `output_dir`: writes `{output_dir}/.env.<environment-name>`. Neither: **filled content returned inline in the tool response** — a value-exposure path that didn't exist when `output_path` was required |
+| `crypt_env_import_env_file` | `path`, `environment_id` or (`project`+`environment`) | `category`, `overwrite` | Read .env file from disk, parse KEY=value pairs, import each as a vault item owned by the resolved project and linked into the resolved environment. Values never in MCP response |
 | `crypt_env_update_settings` | — | `auto_lock_timeout`, `hotkey` | Update vault settings |
-| `crypt_env_doctor` | — | — | Health check: app status, lock state, item count, token config |
-| `crypt_env_list_commands` | — | — | List saved commands with placeholders |
-| `crypt_env_run_command` | `name` | `params` | Resolve {{VAR}} placeholders and execute command via shell. Returns stdout/stderr (truncated 2000 chars) and exit code. Resolved command never returned |
-| `crypt_env_share_listen` | `items` | — | Start LAN share session. Returns pairing_code |
-| `crypt_env_share_connect` | `pairing_code` | — | Connect as receiver. Returns fingerprint |
+| `crypt_env_doctor` | — | — | Health check: app status, lock state, token config. No longer reports item count — `GET /health` stopped returning `item_count` |
+| `crypt_env_list_commands` | `environment_id` or (`project`+`environment`) | — | List saved commands with placeholders, scoped to a project+environment |
+| `crypt_env_run_command` | `name`, `environment_id` or (`project`+`environment`) | `params` | Resolve {{VAR}} placeholders and execute command via shell. Command lookup is scoped; the detail fetch itself is unscoped. Returns stdout/stderr (truncated 2000 chars) and exit code. Resolved command never returned |
+| `crypt_env_share_listen` | `items`, `environment_id` or (`project`+`environment`) | — | Start LAN share session. `items` must already be linked into the resolved environment or the call fails. Returns pairing_code |
+| `crypt_env_share_connect` | `pairing_code`, `environment_id` or (`project`+`environment`) | — | Connect as receiver. Received items get owned by the resolved project and linked into the resolved environment (skipping any that collide with an existing key — see Notes). Returns fingerprint |
 | `crypt_env_share_confirm` | `confirmed` | — | Confirm/reject fingerprint (boolean) |
 | `crypt_env_share_cancel` | — | — | Cancel active share session |
-| `crypt_env_share_status` | — | — | Get session state, fingerprint, direction |
-| `crypt_env_share_export` | `items`, `output_path` | — | Export as .vault package. Passphrase shown in response once |
-| `crypt_env_share_import` | `path`, `passphrase` | — | Import from .vault package |
+| `crypt_env_share_status` | — | — | Get session state, fingerprint, direction, skipped_keys |
+| `crypt_env_share_export` | `items`, `output_path` | — | Export as .vault package. Passphrase shown in response once. Unscoped (operates on item IDs directly) |
+| `crypt_env_share_import` | `path`, `passphrase`, `environment_id` or (`project`+`environment`) | — | Import from .vault package. Imported items are owned by the resolved project and linked into the resolved environment, same collision-skip behavior as `crypt_env_share_connect` |
 | `crypt_env_list_categories` | — | — | List categories |
 | `crypt_env_create_category` | `name`, `color` | `description` | Create category |
 | `crypt_env_update_category` | `id` | `name`, `color`, `description` | Update category. Empty string description clears it |
 | `crypt_env_delete_category` | `id` | — | Delete category |
-| `crypt_env_list_workspaces` | — | — | List workspaces with var count |
-| `crypt_env_inject_workspace` | — | `id`, `name` | Inject workspace vars into configured .env. Identify by id or name |
-| `crypt_env_list_workspaces_by_env` | — | — | Group workspaces by environment keyword (production/development/staging/other) |
-| `crypt_env_inject_env_by_name` | `project_path`, `environment` | `output_path` | Find workspace matching project+environment and inject. Falls back to item name/category matching |
+| `crypt_env_list_projects` | — | — | List all projects with their typed environments (name, template, paths, var count) |
+| `crypt_env_inject_environment` | — | `id` or `project`+`environment`, `output_path`, `output_dir` | Inject an environment's variables into its configured .env path(s), plus `output_path`/`output_dir` if given (appended to, not replacing, configured paths). Identify by environment ID or project+environment names. Note: uses `id`, not `environment_id` like every other scoped tool above — see Notes |
+| `crypt_env_generate_example_env` | — | `id` or `project`+`environment`, `output_path`, `output_dir` | Generate a placeholder-only (`KEY=`, no values) env file/content for an environment — safe to commit. Never reads or decrypts item values |
+| `crypt_env_list_environments_by_name` | — | — | List all environments across all projects, grouped by their real environment name (production, local, test, etc.) |
+| `crypt_env_inject_env_by_name` | `project_path`, `environment` | `output_path` (unused, kept for compatibility) | Inject environment variables for a project directory and environment name. Matches by real environment name; if no matching environment is found, returns an error with next steps — the previous item-naming-convention fallback was removed (see Notes) |
 | `crypt_env_relay_send` | `item_ids` | — | Send via internet relay. Returns code + passphrase (show immediately, only once) |
-| `crypt_env_relay_receive` | `code`, `passphrase` | — | Receive via internet relay |
+| `crypt_env_relay_receive` | `code`, `passphrase`, `environment_id` or (`project`+`environment`) | — | Receive via internet relay. Imported items are owned by the resolved project and linked into the resolved environment, same collision-skip behavior as `crypt_env_share_connect` |
+| `crypt_env_share_workspace_send` | — | `id` or `name` | Share complete workspace (definition + all decrypted secrets) via relay. Returns code + passphrase |
+| `crypt_env_share_workspace_receive` | `code`, `passphrase` | — | Receive shared workspace from relay. Recreates secrets and rebuilds workspace with variables re-linked |
 | `crypt_env_list_mcp_servers` | — | `scope` | List registered MCP servers from Claude config. Scope: global/project/all. Env values never returned |
 | `crypt_env_add_mcp_server` | `name`, `command` | `args`, `env`, `scope` | Add MCP server to Claude config. `env` stores KEY: "" placeholders — never real values |
 | `crypt_env_update_mcp_server` | `name` | `command`, `args`, `env`, `scope` | Merge-update existing MCP server entry |
@@ -206,11 +261,25 @@ Authentication: Automatic — MCP server reads the REST API session token from d
 
 `crypt_env_generate_env` writes to `std::env::temp_dir()` with random filename but does NOT enforce restrictive permissions (unlike the API's TempEnvFile with 0o600) — on multi-user systems the temp .env is world-readable until cleanup or next call.
 
+`crypt_env_generate_env`/`crypt_env_inject_env` look up keys by vault **item name** (`GET /items?search=`); `crypt_env_fill_env` matches by `environment_vars.key`. When an item's linked key differs from its name (supported since `POST /items` gained the `key` field), these two families disagree on which variables they can find for the same environment.
+
+`crypt_env_inject_environment`'s new `output_path`/`output_dir` parameters let a single call write an environment's full decrypted variable set to any filesystem path, appended to (not replacing) the environment's GUI-configured paths — previously this tool could only write to paths a human had configured through the app. A prompt-injected or confused agent can use this for a one-shot full-environment secret dump; there is no per-key selection or additional confirmation gate on this path beyond normal tool-call approval.
+
 `crypt_env_inject_env` uses `std::env::set_var` which is marked `unsafe` in Rust with `#[allow(unused_unsafe)]` — calling set_var from a multi-threaded context is undefined behavior if any thread reads env vars concurrently; the MCP server's single-threaded main loop mitigates this in practice.
 
 `crypt_env_run_command` substitutes {{VAR}} placeholders into shell commands without sanitization — if params contain shell metacharacters or a vault item's command template is user-controlled, this is a command injection vector.
 
-`crypt_env_inject_env_by_name` uses heuristics (name prefix matching, category name matching) to find items for an environment — could match unintended items if naming conventions drift, with no explicit confirmation before writing.
+`crypt_env_inject_environment` resolves environment by ID or by project+environment names (both case-insensitive). The environment's configured paths (plus `output_path`/`output_dir` if given) are used to write .env files; variables are matched via `environment_vars.item_id` (a real FK), not by name search. Returns paths written and keys injected.
+
+**Scope-parameter naming is inconsistent across tools**: every list/search/create/share tool above uses `environment_id`/`project`/`environment`. `crypt_env_inject_environment` and `crypt_env_generate_example_env` instead use `id`/`project`/`environment` (no `environment_id`) — an LLM that infers the parameter name from the other 12+ tools' schemas will guess wrong for these two. Not unified in this pass; each tool's own `inputSchema` is authoritative.
+
+`crypt_env_list_environments_by_name` lists all environments grouped by their real environment name field, providing a different view than `crypt_env_list_projects` (which groups by project).
+
+`crypt_env_inject_env_by_name` resolves by project directory + environment name. If a real environment is found, its paths are used. If not found, the tool now returns an error with next steps (pass an explicit `environment_id`, or `project`+`environment`) — the previous fallback to item-naming-convention matching (name prefix, category) was removed, since it relied on the now-scope-required `/items`/`/fill` endpoints in a way that could no longer work safely. `output_path` is accepted for backward compatibility but is currently unused.
+
+Global items (`isGlobal: true`, not linked into the queried environment) are invisible to `crypt_env_list_items`, `crypt_env_search_items`, `crypt_env_generate_env`, and `crypt_env_inject_env` — there is currently no MCP tool that can discover a project's reusable global secrets; only items explicitly linked into the scoped environment are reachable.
+
+`crypt_env_share_workspace_send` and `crypt_env_share_workspace_receive` are retained for backward compatibility — they share complete workspaces (definition + decrypted secrets) via relay, not individual items.
 
 MCP server is single-threaded with a blocking I/O loop (`stdin.lock().lines()`) — a slow or stalled request blocks all subsequent MCP tool calls and the LLM host may time out other concurrent requests.
 

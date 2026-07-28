@@ -21,11 +21,14 @@ const TYPE_PILLS: { id: TypeFilter; label: string; dot?: string }[] = [
   { id: 'note',       label: 'NOTE', dot: 'oklch(0.72 0.15 350)' },
 ];
 
-export function MainVault() {
-  const items = useVaultStore((s) => s.items);
+export function GlobalSecrets() {
+  const allItems = useVaultStore((s) => s.items);
   const cats  = useVaultStore((s) => s.cats);
   const go    = useVaultStore((s) => s.go);
-  const setEditTarget = useVaultStore((s) => s.setEditTarget);
+
+  // Only secrets explicitly marked global live here — everything else is
+  // created and managed inside a project's environments.
+  const items = useMemo(() => allItems.filter((i) => i.isGlobal), [allItems]);
 
   const [query,      setQuery]      = useState('');
   const [typeF,      setTypeF]      = useState<TypeFilter>('all');
@@ -121,6 +124,18 @@ export function MainVault() {
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden animate-fade-in">
+      {/* Header */}
+      <div className="px-3.5 py-[9px] border-b border-bd flex items-center gap-[10px] shrink-0">
+        <button
+          onClick={() => go('projects')}
+          className="flex items-center gap-1 text-[12px] font-medium font-ui text-tx3 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
+        >
+          <Icon name="back" size={13} />projects
+        </button>
+        <div className="flex-1 text-[13px] font-semibold text-center text-tx">Global Secrets</div>
+        <span className="text-[11px] text-tx3 font-mono">{items.length}</span>
+      </div>
+
       {/* Search bar */}
       <div className="flex items-center gap-3 pl-5 pr-4 h-12 border-b border-bd bg-bg shrink-0">
         <Icon name="search" size={16} />
@@ -257,18 +272,6 @@ export function MainVault() {
             })}
 
             <div className="flex-1" />
-
-            <button
-              onClick={() => { setEditTarget(null); go('edit'); }}
-              className={[
-                'flex items-center gap-1 bg-accent border-none rounded-[3px]',
-                'px-3 h-[28px] text-[10px] font-bold tracking-wider font-ui',
-                'text-[#020504] cursor-pointer shrink-0 hover:opacity-90 transition-opacity',
-              ].join(' ')}
-            >
-              <Icon name="plus" size={11} color="#020504" />
-              NEW
-            </button>
           </>
         ) : (
           /* Share mode bar */
@@ -324,7 +327,10 @@ export function MainVault() {
             decrypting vault…
           </div>
         ) : filtered.length === 0 ? (
-          <div className="py-16 text-center text-tx3 text-sm font-mono">// no items match</div>
+          <div className="py-16 text-center text-tx3 text-sm font-mono leading-[1.8]">
+            // no global secrets match<br />
+            <span className="text-[11px]">Mark a secret "global" from any project to see it here</span>
+          </div>
         ) : (
           filtered.map((it) => {
             const selProps = {
@@ -345,28 +351,8 @@ export function MainVault() {
       </div>
 
       {/* Status bar */}
-      <div className="flex items-center justify-between px-5 h-10 border-t border-bd bg-bg shrink-0">
-        <div className="text-[12px] text-tx2 font-mono">{items.length} items · AES-256-GCM</div>
-        <div className="flex gap-3">
-          <button
-            onClick={() => go('workspaces')}
-            className="flex items-center gap-1.5 text-[13px] font-mono text-tx2 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
-          >
-            <Icon name="terminal" size={13} />workspaces
-          </button>
-          <button
-            onClick={() => go('categories')}
-            className="flex items-center gap-1.5 text-[13px] font-mono text-tx2 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
-          >
-            <Icon name="tag" size={13} />categories
-          </button>
-          <button
-            onClick={() => go('settings')}
-            className="flex items-center gap-1.5 text-[13px] font-mono text-tx2 bg-transparent border-none cursor-pointer hover:text-tx transition-colors"
-          >
-            <Icon name="settings" size={13} />settings
-          </button>
-        </div>
+      <div className="flex items-center px-5 h-10 border-t border-bd bg-bg shrink-0">
+        <div className="text-[12px] text-tx2 font-mono">{items.length} global secret{items.length !== 1 ? 's' : ''} · AES-256-GCM</div>
       </div>
 
       {/* Share modal overlay */}

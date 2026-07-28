@@ -7,10 +7,10 @@ pub mod cli;
 pub mod crypto;
 pub mod db;
 pub mod mcp;
+pub mod project;
 pub mod share;
 pub mod tls;
 pub mod vault;
-pub mod workspace;
 
 use vault::{
     app_complete_setup, app_generate_mcp_config, app_is_first_run,
@@ -19,14 +19,18 @@ use vault::{
     vault_generate_mcp_token, vault_get_categories, vault_get_items, vault_get_mcp_token,
     vault_get_settings, vault_import_backup, vault_import_backup_data, vault_import_items,
     vault_is_setup, vault_list, vault_lock, vault_parse_import, vault_save_categories, vault_save_item,
-    vault_save_settings, vault_unlock, vault_wipe, SharedState, VaultState,
+    vault_save_settings, vault_unlock, vault_wipe, vault_create_project_item, vault_set_item_global,
+    vault_get_item_owners, SharedState, VaultState,
 };
 use vault::share_commands::{
     share_cancel, share_confirm_fingerprint, share_export_file, share_import_file,
     share_poll_status, share_relay_receive, share_relay_send, share_start_receive,
     share_start_send, SharedShareState,
 };
-use workspace::{workspace_delete, workspace_export, workspace_import, workspace_inject, workspace_list, workspace_pick_env_path, workspace_save};
+use project::{
+    environment_delete, environment_inject, environment_save, project_delete, project_export,
+    project_import, project_list, project_pick_env_path, project_preview_delete, project_save,
+};
 
 struct PendingUpdate(std::sync::Mutex<Option<tauri_plugin_updater::Update>>);
 
@@ -170,6 +174,9 @@ pub fn run() {
             vault_get_items,
             vault_save_item,
             vault_delete_item,
+            vault_create_project_item,
+            vault_set_item_global,
+            vault_get_item_owners,
             vault_get_categories,
             vault_save_categories,
             vault_get_settings,
@@ -197,13 +204,16 @@ pub fn run() {
             share_import_file,
             share_relay_send,
             share_relay_receive,
-            workspace_list,
-            workspace_save,
-            workspace_delete,
-            workspace_inject,
-            workspace_pick_env_path,
-            workspace_export,
-            workspace_import,
+            project_list,
+            project_save,
+            project_delete,
+            project_preview_delete,
+            project_export,
+            project_import,
+            project_pick_env_path,
+            environment_save,
+            environment_delete,
+            environment_inject,
             check_for_update,
             install_update,
             app_is_first_run,

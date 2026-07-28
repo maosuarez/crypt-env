@@ -1,6 +1,7 @@
 use clap::Args;
 use regex::Regex;
 use crate::client::{self, CliError, CommandDetail};
+use crate::commands::scope;
 use crate::shell::{detect_shell, Shell};
 
 #[derive(Args)]
@@ -15,10 +16,19 @@ pub struct ExecArgs {
     /// Force shell for execution (pwsh/bash)
     #[arg(long)]
     pub shell: Option<String>,
+
+    /// Project name (defaults to crypt-env.json or the cwd folder name)
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Environment name (defaults to crypt-env.json or the project's default environment)
+    #[arg(long = "env")]
+    pub env: Option<String>,
 }
 
 pub fn run(args: ExecArgs) -> Result<(), CliError> {
-    let url = format!("{}/commands", client::API_BASE);
+    let resolved_scope = scope::resolve(args.project.as_deref(), args.env.as_deref(), false)?;
+    let url = resolved_scope.append_query(&format!("{}/commands", client::API_BASE));
     let resp = client::authenticated_get(&url)?;
 
     if resp.status() == reqwest::StatusCode::FORBIDDEN {

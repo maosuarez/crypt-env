@@ -18,29 +18,31 @@ Personal productivity vault for developers. Centralizes credentials, API keys, t
 ```
 crypt-env/
 ├── src/                          # React frontend
-│   ├── components/               # UI components by screen (includes WorkspaceManager, ShareModal)
-│   ├── store/                    # Global state with Zustand (includes workspaceStore)
+│   ├── components/               # UI components by screen (includes ProjectManager, GlobalSecrets, ShareModal, itemFields/)
+│   ├── store/                    # Global state with Zustand (includes projectStore)
 │   ├── hooks/                    # Custom hooks for Tauri invoke()
 │   └── types/                    # Shared TypeScript types
 ├── src-tauri/
 │   ├── src/
 │   │   ├── main.rs               # Tauri entrypoint (initializes lib)
 │   │   ├── lib.rs                # Tauri command registry, AppState setup
-│   │   ├── db/mod.rs             # SQLite pool, tables, CRUD items/categories/settings/workspaces
+│   │   ├── db/mod.rs             # SQLite pool, tables, CRUD items/categories/settings/projects/environments
 │   │   ├── crypto/mod.rs         # Argon2id KDF + AES-256-GCM encrypt/decrypt
 │   │   ├── vault/mod.rs          # VaultState, Tauri commands for vault management
+│   │   ├── project/mod.rs        # Project/environment business logic (shared by Tauri + HTTP API)
 │   │   ├── api/mod.rs            # Axum server on 127.0.0.1:47821, dual token auth
 │   │   ├── share/mod.rs          # Secure secret sharing (LAN bridge + encrypted packages)
 │   │   ├── share/relay.rs        # Internet relay sharing (Supabase-based)
-│   │   ├── workspace/mod.rs      # Workspace management for .env files and env var grouping
 │   │   ├── cli/mod.rs            # CLI module (stub)
 │   │   ├── mcp/mod.rs            # MCP module (stub)
 │   │   └── bin/
 │   │       ├── crypt-env.rs      # CLI standalone (clap), connects via HTTP to API
-│   │       │   └── commands/tui.rs  # Interactive TUI (ratatui-based)
+│   │       │   ├── commands/project.rs  # Project/environment CLI subcommands
+│   │       │   └── commands/tui.rs     # Interactive TUI (ratatui-based)
 │   │       └── crypt-env-mcp.rs  # MCP JSON-RPC 2.0 server over stdio
 │   ├── Cargo.toml                # Rust dependencies
 │   └── tauri.conf.json           # Window config, permissions, hotkey
+├── pnpm-workspace.yaml           # pnpm monorepo config (esbuild disabled)
 ```
 
 **Communication**:
@@ -50,7 +52,7 @@ crypt-env/
 - TUI (`crypt-env tui`) → Direct vault access (Tauri command context, no HTTP)
 
 **New Tauri Commands** (Session 4+):
-- Workspace: `workspace_list`, `workspace_save`, `workspace_delete`, `workspace_inject`
+- Projects/Environments: `project_list`, `project_save`, `project_delete`, `project_preview_delete`, `environment_save`, `environment_delete`, `environment_inject`, `vault_create_project_item`, `vault_set_item_global`, `vault_get_item_owners`
 - Internet Relay: `share_relay_send`, `share_relay_receive`
 
 ## Vault Item Types
@@ -77,12 +79,13 @@ Tailwind configuration in `src/index.css` defines semantic tokens:
 - **Text tokens** (`text-ui`, `text-secondary`, `text-disabled`, `text-critical`): Hierarchical text styling
 - **Border & stroke tokens**: Consistent edge styling
 
-### 5 Main Screens
+### Navigation & Main Screens
 1. **Lock Screen** — Master password input with biometric unlock option (Windows Hello)
-2. **Main Vault** — Item list with fuzzy search, category filters, preview pane
-3. **Add/Edit Item** — Dynamic form that changes based on item type (API Key, Credential, Link, Command, Note)
-4. **Category Manager** — CRUD interface for editable categories with color picker
-5. **Settings** — Master password, timeout, biometric, workspaces, internet relay config, backup/restore, import
+2. **Projects & Environments** — Primary landing page (project list → project detail with environment cards → environment editor for linking variables)
+3. **Global Secrets** — Filtered view of reusable `isGlobal` items (accessed via footer link from Projects screen)
+4. **Add/Edit Item** — Dynamic form that changes based on item type (API Key, Credential, Link, Command, Note)
+5. **Category Manager** — CRUD interface for editable categories with color picker
+6. **Settings** — Master password, timeout, biometric, projects/environments, internet relay config, backup/restore, import
 
 ### Decorationless Window
 - The Tauri window is configured with `decorations: false` — no OS titlebar
@@ -96,21 +99,36 @@ Tailwind configuration in `src/index.css` defines semantic tokens:
 
 ## Core Features Implemented (Session 4+)
 
-### Workspaces
-Grouping system for managing environment variables and `.env` files.
+### Projects & Environments (formerly Workspaces)
+Hierarchical organization for managing environment variable sets by project and environment (dev, staging, production, etc.). Every environment variable is a real encrypted vault item.
 
-- **Purpose**: Organize vault item references by project/context (Node.js, PostgreSQL, Docker, Python, etc.)
+- **Purpose**: Organize vault items by project/context (Node.js, PostgreSQL, Docker, Python, etc.) with multiple typed environments per project. Global items reusable across projects; project-specific items forked on un-globalization.
 - **Data Model**: 
-  - `workspaces` table: id, name, description, template_type, env_file_path
-  - `workspace_vars` table: workspace_id, var_name, vault_item_id (foreign key to item)
-- **Stack Templates**: generic, node, postgres, mongo, docker, python (provided as scaffolds)
-- **Inject Action**: Writes decrypted KEY=VALUE pairs to the specified `.env` file on disk
-- **Frontend**: `WorkspaceManager.tsx`, `workspaceStore.ts` in Settings tab
+  - `projects` table: id, name, description, template, created, updated
+  - `environments` table: id, project_id (FK), name, is_default, created, updated
+  - `environment_vars` table: id, environment_id (FK), key, item_id (FK to items, mandatory)
+  - `environment_paths` table: environment_id (FK), path (for .env file exports)
+  - `item_projects` table: item_id (FK), project_id (FK) — many-to-many ownership
+  - `project_categories` table: project_id (FK), category_id (FK) — projects carry tags
+- **Item Ownership**: `items.is_global` plaintext column. Global items in Global Secrets screen; project-specific items visible only in their projects.
+- **Stack Templates**: generic, node, postgres, mongo, docker, python (scaffolds, not locked)
+- **Inject Action**: Writes decrypted KEY=VALUE pairs to configured paths per environment (multiple paths per environment supported)
+- **Frontend**: 
+  - `ProjectManager.tsx` — New landing page (project list → detail with environments → edit environment with variable linking)
+  - `GlobalSecrets.tsx` (renamed from MainVault.tsx) — Filtered to `isGlobal` items, footer link to return to projects
+  - `src/components/itemFields/` — Extracted shared per-type field components for reuse
+  - `projectStore.ts` (replaced workspaceStore.ts)
 - **Tauri Commands**: 
-  - `workspace_list() → Vec<Workspace>` — List all workspaces
-  - `workspace_save(workspace: Workspace) → Workspace` — Create or update
-  - `workspace_delete(id: String) → bool` — Delete workspace
-  - `workspace_inject(id: String) → Result<()>` — Write decrypted env vars to file
+  - `project_list() → Vec<Project>` — All projects with environments and var counts
+  - `project_save(project) → Project` — Create or update
+  - `project_delete(id) → bool` — Delete with cascade
+  - `project_preview_delete(id) → ProjectDeleteImpact` — Show impact before delete
+  - `environment_save(env) → Environment` — Create or update environment
+  - `environment_delete(id) → bool` — Delete environment
+  - `environment_inject(id) → InjectResult` — Write decrypted vars to paths
+  - `vault_create_project_item(project_id, key, item) → VaultItem` — Add variable
+  - `vault_set_item_global(id, is_global) → GlobalToggleResult` — Make global or fork
+  - `vault_get_item_owners(id) → Vec<ItemOwner>` — List projects owning this item
 
 ### Interactive TUI (`crypt-env tui`)
 Terminal user interface for vault access without GUI, built with ratatui.
@@ -668,37 +686,73 @@ CREATE TABLE settings (
 
 ---
 
-### 13. Workspaces for Environment Variable Management
-**Context**: Developers manage multiple projects, each with different environment variable sets. Need to organize vault items by project and easily export to `.env` files.
+### 13. Projects & Environments for Environment Variable Management
+**Context**: Developers manage multiple projects, each with different environment variable sets (dev, staging, production, etc.). Need hierarchical organization, real vault item references, and ability to export to `.env` files per environment.
 
-**Decision**: Create a Workspace system that groups vault item references and associates them with a `.env` file path.
+**Decision**: Create a Projects system with nested Environments. Every environment variable is a real encrypted vault item, not a literal key=value. Projects are the primary navigation primitive; Projects can be marked global or project-specific.
 
 1. **Data Model**:
-   - `workspaces` table: id, name, description, template_type (generic/node/postgres/mongo/docker/python), env_file_path
-   - `workspace_vars` table: workspace_id, var_name, vault_item_id (foreign key to items)
+   - `projects` table: id, name, description, template (generic/node/postgres/mongo/docker/python), created, updated
+   - `environments` table: id, project_id (FK), name, is_default, created, updated
+   - `environment_vars` table: id, environment_id (FK), key, item_id (FK to items, mandatory)
+   - `environment_paths` table: environment_id (FK), path (absolute filesystem path for .env file)
+   - `item_projects` table: item_id (FK), project_id (FK) — many-to-many ownership. Global items can belong to multiple projects
+   - `project_categories` table: project_id (FK), category_id (FK) — projects carry tags via category names
 
-2. **Stack Templates**: Provide 6 pre-configured templates with common environment variables (e.g., node includes NODE_ENV, DEBUG; postgres includes DB_HOST, DB_PORT, DB_PASSWORD)
+2. **Item Ownership & Globalization**:
+   - New column `items.is_global` (plaintext, queryable without decryption): true = reusable across projects, false = project-specific
+   - Global items surfaced in "Global Secrets" screen (new `GlobalSecrets.tsx`, reachable via footer link from Projects landing page)
+   - Deleting a project cascades to delete environments, then to orphaned items (items with zero owners). Preview via `project_preview_delete`
+   - Un-globaling an item with multiple owners forks it: creates N independent copies for each project, one per project
 
-3. **Inject Action**: User selects workspace → clicks "Inject to Path" → backend decrypts all referenced items → writes KEY=VALUE pairs to file on disk
+3. **Stack Templates**: Provide 6 pre-configured templates (generic, node, postgres, mongo, docker, python) as scaffolds with common environment variable names.
 
-4. **Tauri Commands**:
-   - `workspace_list() → Vec<Workspace>` — List all workspaces with var count
-   - `workspace_save(workspace: Workspace) → Workspace` — Create or update workspace
-   - `workspace_delete(id: String) → bool` — Delete workspace (does not delete vault items)
-   - `workspace_inject(id: String) → Result<()>` — Write decrypted env vars to configured file path
+4. **Environment Injection**:
+   - User selects environment → clicks "Inject" → backend decrypts all referenced items → writes KEY=VALUE pairs to all configured paths
+   - Each environment can have multiple paths (e.g., `.env.production` and `.env.prod.backup`)
+   - `environment_inject(id: i64) → InjectResult { paths: Vec<String>, written: Vec<String> }` — returns success per path
 
-5. **Frontend**: `WorkspaceManager.tsx` component in Settings tab; allows CRUD of workspaces, select template, add/remove variable references, preview variables, inject
+5. **Tauri Commands**:
+   - `project_list() → Vec<Project>` — All projects with nested environments, categories, and var counts
+   - `project_save(project: ProjectInput) → Project` — Create or update project (does not modify environments)
+   - `project_delete(id: i64) → bool` — Delete project and cascade (environments, orphaned items)
+   - `project_preview_delete(id: i64) → ProjectDeleteImpact { environments, itemsDeleted, itemsOrphaned }` — Show impact before delete
+   - `project_export(id: i64) → { json, template }` — Export project structure (templates only, no resolved values)
+   - `project_import(json: String) → Project` — Import project structure
+   - `environment_save(env: EnvironmentInput) → Environment` — Create or update environment within a project
+   - `environment_delete(id: i64) → bool` — Delete environment (cascades to its vars)
+   - `environment_inject(id: i64) → InjectResult` — Write decrypted env vars to configured paths
+   - `vault_create_project_item(project_id, key, item) → VaultItem` — Add variable to all environments in a project
+   - `vault_set_item_global(id, is_global) → GlobalToggleResult { updated, forked }` — Make item global or fork if multi-owned
+   - `vault_get_item_owners(id) → Vec<ItemOwner>` — List projects that own this item
+
+6. **Frontend**: 
+   - `ProjectManager.tsx` — Primary landing page (replaced previous vault-first navigation). Shows project list, project detail with environment cards, environment editor with variable linking
+   - `GlobalSecrets.tsx` (renamed from MainVault.tsx) — Filtered view of `isGlobal` items, footer link to return to projects
+   - New `src/components/itemFields/` module: `ItemTypePicker.tsx`, `ItemTypeFields.tsx`, `emptyItemFields()`, `validateItemFields()` — extracted shared per-type form logic used by both ProjectManager (add-variable flow) and EditItem.tsx
+   - Projects carry tags via existing categories/TagInput; reuses `project_categories` join table
+
+7. **Migration from Legacy Workspaces**:
+   - One-time migration `vault::migrate_literal_vars_to_items()` (gated by `settings['migrated_literals_v1']`, runs on every unlock): Converts pre-existing literal-only environment vars (predating "every var is a real item") into real encrypted vault items owned by their environment's project
+   - Pre-existing unowned items (those with no entry in `item_projects` after backfill) are promoted to `is_global = true` so they surface in Global Secrets instead of disappearing
+   - Legacy workspace-backed `share_relay_send/receive` tools remain unchanged (out of scope); only true projects/environments use the new model
+
+8. **CLI & MCP**:
+   - CLI `crypt-env project` subcommand (replaces deleted `workspace`): `list`, `save`, `delete`, `delete-env`, `inject` per environment
+   - MCP tools: `crypt_env_list_projects`, `crypt_env_inject_environment`, `crypt_env_list_environments_by_name`, `crypt_env_inject_env_by_name`
 
 **Rationale**:
-- Workspaces eliminate manual copying of secrets to `.env` files
-- Templates reduce cognitive load for new projects
-- Vault item references (not duplication) keep single source of truth
-- Inject writes to disk instead of response (prevents secrets in logs or clipboard)
+- Hierarchical Projects/Environments match real development workflows (dev, staging, production are instances of the same project)
+- Every variable as a real item ensures full encryption, audit trail, and reusability semantics
+- Item ownership model (via `item_projects`) enables both global reuse and project-specific forking
+- Deletion with preview prevents accidental loss of items
+- Inject to configured paths eliminates manual `.env` management and prevents secrets in logs/clipboard
 
 **Consequences**:
-- If workspace env_file_path is invalid or not writable, inject fails gracefully
-- Workspace deletion does not cascade to vault items (safe default; user may reuse items)
-- Templates are static; future versions could allow custom templates
+- Pre-existing global items become hard to distinguish from new global items (no "creation context" metadata)
+- Project export/import carries structure only (no resolved secret values) — values resolved at inject time
+- Backup/restore of full vault does not yet include projects/environments/item_projects (pre-existing gap, pre-planned for next session)
+- Deletion of orphaned items on project delete is permanent and irreversible (preview mitigates, but not fully preventable)
 
 ---
 

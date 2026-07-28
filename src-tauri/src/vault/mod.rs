@@ -47,6 +47,13 @@ pub struct VaultItem {
     pub content: Option<String>,
     #[serde(default)]
     pub created: String,
+    /// Marks this item as reusable across projects/environments — only
+    /// global items are offered as vault-item references when linking an
+    /// environment variable (see project::mod for the inject-time lookup).
+    /// `Option` (not `bool`) so that HTTP partial updates that omit this
+    /// field leave the existing value untouched instead of clearing it.
+    #[serde(default, rename = "isGlobal", skip_serializing_if = "Option::is_none")]
+    pub is_global: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -92,17 +99,74 @@ pub type SharedState = Arc<Mutex<VaultState>>;
 
 // ─── Crypto helpers ───────────────────────────────────────────────────────────
 
-fn decrypt_item(key: &CryptoKey, row_id: i64, data: &str) -> Result<VaultItem, String> {
+/// `is_global` lives in its own plaintext DB column (queryable without
+/// decryption) rather than inside the ciphertext — this reassembles it onto
+/// the decrypted item.
+pub(crate) fn decrypt_item(
+    key: &CryptoKey,
+    row_id: i64,
+    data: &str,
+    is_global: bool,
+) -> Result<VaultItem, String> {
     let json = crypto::decrypt(key, data)?;
     let mut item: VaultItem =
         serde_json::from_slice(&json).map_err(|e| format!("deserialize item: {e}"))?;
     item.id = row_id;
+    item.is_global = Some(is_global);
     Ok(item)
 }
 
-fn encrypt_item(key: &CryptoKey, item: &VaultItem) -> Result<String, String> {
-    let json = serde_json::to_vec(item).map_err(|e| format!("serialize item: {e}"))?;
+/// Strips `is_global` before serializing — it's metadata, not a secret, and
+/// must never enter the ciphertext (see `decrypt_item`).
+pub(crate) fn encrypt_item(key: &CryptoKey, item: &VaultItem) -> Result<String, String> {
+    let mut for_blob = item.clone();
+    for_blob.is_global = None;
+    let json = serde_json::to_vec(&for_blob).map_err(|e| format!("serialize item: {e}"))?;
     crypto::encrypt(key, &json)
+}
+
+/// One-time (gated by `settings['migrated_literals_v1']`), needs the vault
+/// key so it can't run during the pre-unlock schema migrations — converts
+/// legacy literal-only environment vars (predating "every var is a real
+/// item") into real encrypted secret items, owned by their environment's
+/// project. Called from every unlock entry point (password + biometric +
+/// the HTTP/CLI/MCP unlock path in `api::handle_unlock`).
+pub(crate) async fn migrate_literal_vars_to_items(db: &VaultDb, key: &CryptoKey) -> Result<(), String> {
+    if db.get_setting("migrated_literals_v1").await?.is_some() {
+        return Ok(());
+    }
+
+    let now = epoch_to_iso8601(
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+    );
+
+    for (env_var_id, key_name, literal, project_id) in db.list_unmigrated_literal_vars().await? {
+        let item = VaultItem {
+            id: 0,
+            item_type: "secret".to_string(),
+            name: Some(key_name),
+            value: Some(literal),
+            url: None,
+            username: None,
+            password: None,
+            title: None,
+            description: None,
+            command: None,
+            shell: None,
+            categories: None,
+            notes: None,
+            content: None,
+            created: now.clone(),
+            is_global: Some(false),
+        };
+        let encrypted = encrypt_item(key, &item)?;
+        let new_id = db.upsert_item(0, "secret", &encrypted, &item.created, false).await?;
+        db.add_item_owner(new_id, project_id).await?;
+        db.set_environment_var_item(env_var_id, new_id).await?;
+    }
+
+    db.set_setting("migrated_literals_v1", "true").await?;
+    Ok(())
 }
 
 // ─── Tauri commands ───────────────────────────────────────────────────────────
@@ -138,10 +202,12 @@ async fn do_unlock(
     s.key = Some(Zeroizing::new(key));
     s.touch();
 
+    migrate_literal_vars_to_items(&s.db, &key).await?;
+
     let raw = s.db.list_items().await?;
     let items: Vec<VaultItem> = raw
         .into_iter()
-        .filter_map(|(id, _, data, _)| decrypt_item(&key, id, &data).ok())
+        .filter_map(|(id, _, data, _, is_global)| decrypt_item(&key, id, &data, is_global).ok())
         .collect();
 
     let cats = s
@@ -193,7 +259,7 @@ pub async fn vault_get_items(state: State<'_, SharedState>) -> Result<Vec<VaultI
     let raw = s.db.list_items().await?;
     Ok(raw
         .into_iter()
-        .filter_map(|(id, _, data, _)| decrypt_item(&key, id, &data).ok())
+        .filter_map(|(id, _, data, _, is_global)| decrypt_item(&key, id, &data, is_global).ok())
         .collect())
 }
 
@@ -205,14 +271,137 @@ pub async fn vault_save_item(
     let mut s = state.lock().await;
     let key = s.key.as_ref().ok_or("vault is locked")?.clone();
     s.touch();
+    let is_global = item.is_global.unwrap_or(false);
     let encrypted = encrypt_item(&key, &item)?;
     let new_id = s
         .db
-        .upsert_item(item.id, &item.item_type, &encrypted, &item.created)
+        .upsert_item(item.id, &item.item_type, &encrypted, &item.created, is_global)
         .await?;
     let mut saved = item;
     saved.id = new_id;
+    saved.is_global = Some(is_global);
     Ok(saved)
+}
+
+/// Pure logic shared by the `vault_create_project_item` Tauri command and the
+/// HTTP `POST /items` handler: encrypts and inserts a new item, then grants
+/// ownership to `project_id` atomically. New items are never global by
+/// default — the caller must explicitly toggle that afterwards.
+pub async fn create_project_item(
+    db: &VaultDb,
+    key: &CryptoKey,
+    item: &VaultItem,
+    project_id: i64,
+) -> Result<i64, String> {
+    let encrypted = encrypt_item(key, item)?;
+    let new_id = db
+        .upsert_item(0, &item.item_type, &encrypted, &item.created, false)
+        .await?;
+    db.add_item_owner(new_id, project_id).await?;
+    Ok(new_id)
+}
+
+/// Creates a new item and atomically grants ownership to `project_id` — the
+/// "add a typed variable inside a project" primitive. New items are never
+/// global by default (the caller must explicitly toggle that afterwards).
+#[tauri::command]
+pub async fn vault_create_project_item(
+    item: VaultItem,
+    project_id: i64,
+    state: State<'_, SharedState>,
+) -> Result<VaultItem, String> {
+    let mut s = state.lock().await;
+    let key = s.key.as_ref().ok_or("vault is locked")?.clone();
+    s.touch();
+    let new_id = create_project_item(&s.db, &key, &item, project_id).await?;
+    let mut saved = item;
+    saved.id = new_id;
+    saved.is_global = Some(false);
+    Ok(saved)
+}
+
+/// Result of toggling `isGlobal` on an item: at most one of the two shapes is
+/// populated. `updated` — the flag was simply flipped (item had ≤1 owner).
+/// `forked` — un-globaling an item with >1 owners splits it into one
+/// independent copy per owning project; the original shared row is gone.
+#[derive(Serialize)]
+pub struct GlobalToggleResult {
+    pub updated: Option<VaultItem>,
+    pub forked: Vec<VaultItem>,
+}
+
+#[tauri::command]
+pub async fn vault_set_item_global(
+    id: i64,
+    global: bool,
+    state: State<'_, SharedState>,
+) -> Result<GlobalToggleResult, String> {
+    let mut s = state.lock().await;
+    let key = s.key.as_ref().ok_or("vault is locked")?.clone();
+    s.touch();
+
+    let owners = s.db.list_owning_projects(id).await?;
+
+    // Marking global, or un-globaling something with ≤1 owner: no fork needed.
+    if global || owners.len() <= 1 {
+        s.db.set_item_global(id, global).await?;
+        let raw = s.db.list_items().await?;
+        let updated = raw
+            .into_iter()
+            .find(|(row_id, ..)| *row_id == id)
+            .and_then(|(row_id, _, data, _, is_global)| decrypt_item(&key, row_id, &data, is_global).ok());
+        return Ok(GlobalToggleResult { updated, forked: vec![] });
+    }
+
+    // Un-globaling a multi-owner item: fork one independent copy per owner.
+    let raw = s.db.list_items().await?;
+    let (_, item_type, data, created, _) = raw
+        .into_iter()
+        .find(|(row_id, ..)| *row_id == id)
+        .ok_or("item not found")?;
+    let original = decrypt_item(&key, id, &data, true)?;
+
+    let mut forked = Vec::with_capacity(owners.len());
+    for project_id in &owners {
+        let mut copy = original.clone();
+        copy.id = 0;
+        copy.is_global = Some(false);
+        let encrypted = encrypt_item(&key, &copy)?;
+        let new_id = s.db.upsert_item(0, &item_type, &encrypted, &created, false).await?;
+        s.db.add_item_owner(new_id, *project_id).await?;
+        s.db.repoint_env_var_item(*project_id, id, new_id).await?;
+        copy.id = new_id;
+        forked.push(copy);
+    }
+
+    s.db.delete_item(id).await?;
+
+    Ok(GlobalToggleResult { updated: None, forked })
+}
+
+/// Which projects currently reference (own) this item — used for "used by N
+/// projects" warnings before a destructive delete-everywhere action.
+#[derive(Serialize)]
+pub struct ItemOwner {
+    #[serde(rename = "projectId")]
+    pub project_id: i64,
+    #[serde(rename = "projectName")]
+    pub project_name: String,
+}
+
+#[tauri::command]
+pub async fn vault_get_item_owners(
+    id: i64,
+    state: State<'_, SharedState>,
+) -> Result<Vec<ItemOwner>, String> {
+    let s = state.lock().await;
+    let owner_ids = s.db.list_owning_projects(id).await?;
+    let projects = s.db.list_projects().await?;
+    Ok(projects
+        .into_iter()
+        .filter(|p| owner_ids.contains(&p.id))
+        .map(|p| ItemOwner { project_id: p.id, project_name: p.name })
+        .collect())
 }
 
 #[tauri::command]
@@ -251,7 +440,7 @@ pub async fn vault_list(
 
     let items: Vec<VaultItem> = s.db.list_items().await?
         .into_iter()
-        .filter_map(|(id, _, data, _)| decrypt_item(&key, id, &data).ok())
+        .filter_map(|(id, _, data, _, is_global)| decrypt_item(&key, id, &data, is_global).ok())
         .collect();
 
     let categories: Vec<Category> = s.db.list_categories().await?
@@ -332,7 +521,7 @@ pub async fn vault_change_password(
     // Re-encrypt every item blob
     let raw = s.db.list_items().await?;
     let mut re_encrypted: Vec<(i64, String)> = Vec::with_capacity(raw.len());
-    for (id, _, data, _) in &raw {
+    for (id, _, data, _, _) in &raw {
         let plaintext = crypto::decrypt(&old_key, data)?;
         let new_data = crypto::encrypt(&new_key, &plaintext)?;
         re_encrypted.push((*id, new_data));
@@ -438,6 +627,8 @@ struct BackupItem {
     /// Raw AES-GCM encrypted blob from the DB (hex-encoded nonce || ciphertext).
     data: String,
     created: String,
+    #[serde(default)]
+    is_global: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -478,11 +669,12 @@ pub async fn vault_export_backup(
     let raw_items = s.db.list_items().await?;
     let items: Vec<BackupItem> = raw_items
         .iter()
-        .map(|(id, item_type, data, created)| BackupItem {
+        .map(|(id, item_type, data, created, is_global)| BackupItem {
             id: *id,
             item_type: item_type.clone(),
             data: data.clone(),
             created: created.clone(),
+            is_global: *is_global,
         })
         .collect();
     let item_count = items.len();
@@ -583,7 +775,7 @@ async fn do_restore_backup(
         // Insert items using their original encrypted blobs (already keyed with backup_key).
         for item in &backup.items {
             s.db
-                .upsert_item(0, &item.item_type, &item.data, &item.created)
+                .upsert_item(0, &item.item_type, &item.data, &item.created, item.is_global)
                 .await?;
         }
 
@@ -612,7 +804,7 @@ async fn do_restore_backup(
             let new_data = crypto::encrypt(&current_key, &plaintext)
                 .map_err(|e| format!("re-encrypt item {}: {e}", item.id))?;
             s.db
-                .upsert_item(0, &item.item_type, &new_data, &item.created)
+                .upsert_item(0, &item.item_type, &new_data, &item.created, item.is_global)
                 .await?;
         }
 
@@ -690,8 +882,8 @@ pub async fn vault_import_items(
     let raw = s.db.list_items().await?;
     let existing_names: std::collections::HashSet<String> = raw
         .iter()
-        .filter_map(|(id, _, data, _)| {
-            decrypt_item(key, *id, data).ok().and_then(|v| v.name)
+        .filter_map(|(id, _, data, _, is_global)| {
+            decrypt_item(key, *id, data, *is_global).ok().and_then(|v| v.name)
         })
         .collect();
 
@@ -725,11 +917,12 @@ pub async fn vault_import_items(
             content: None,
             categories: None,
             created: now.clone(),
+            is_global: None,
         };
 
         let encrypted = encrypt_item(key, &vault_item)?;
         s.db
-            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created)
+            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created, false)
             .await?;
         inserted += 1;
     }

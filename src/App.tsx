@@ -3,11 +3,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { AnimatePresence, motion } from 'framer-motion';
 import { WindowChrome } from './components/WindowChrome';
 import { LockScreen } from './components/LockScreen';
-import { MainVault } from './components/MainVault';
+import { GlobalSecrets } from './components/GlobalSecrets';
 import { EditItem } from './components/EditItem';
 import { CategoryManager } from './components/CategoryManager';
 import { Settings } from './components/Settings';
-import { WorkspaceManager } from './components/WorkspaceManager';
+import { ProjectManager } from './components/ProjectManager';
 import { ContextMenu } from './components/ui/ContextMenu';
 import { Toast } from './components/ui/Toast';
 import { PlaceholderModal } from './components/ui/PlaceholderModal';
@@ -18,11 +18,11 @@ import type { Screen } from './types';
 
 const SCREENS: Record<Screen, React.ReactElement> = {
   lock:       <LockScreen />,
-  vault:      <MainVault />,
+  vault:      <GlobalSecrets />,
   edit:       <EditItem />,
   categories: <CategoryManager />,
   settings:   <Settings />,
-  workspaces: <WorkspaceManager />,
+  projects:   <ProjectManager />,
 };
 
 export default function App() {
@@ -40,7 +40,7 @@ export default function App() {
   useEffect(() => {
     const prev = prevScreenRef.current;
     prevScreenRef.current = screen;
-    if (prev === 'lock' && screen === 'vault') {
+    if (prev === 'lock' && screen === 'projects') {
       invoke<boolean>('app_is_first_run')
         .then((isFirst) => { if (isFirst) setShowSetupWizard(true); })
         .catch(() => {});

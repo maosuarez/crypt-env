@@ -2,6 +2,7 @@ use clap::Args;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use crate::client::{self, CliError};
+use crate::commands::scope;
 
 #[derive(Args)]
 pub struct AddArgs {
@@ -27,9 +28,22 @@ pub struct AddArgs {
     /// Skip confirmation when overwriting existing keys
     #[arg(long)]
     pub force: bool,
+
+    /// Project to add this variable to (defaults to crypt-env.json or the cwd folder name)
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Environment to add this variable to (defaults to crypt-env.json or the project's default environment)
+    #[arg(long = "env")]
+    pub env: Option<String>,
 }
 
 pub fn run(args: AddArgs) -> Result<(), CliError> {
+    // `add` (including its `--file` bulk-import mode) is the one command
+    // allowed to silently create a not-yet-existing project — see
+    // scope::resolve's docs for why every other command is not.
+    let resolved_scope = scope::resolve(args.project.as_deref(), args.env.as_deref(), true)?;
+
     let mut pairs: Vec<(String, String)> = Vec::new();
 
     let item_type = if args.credential {
@@ -91,8 +105,9 @@ pub fn run(args: AddArgs) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // Fetch all existing item names ONCE for duplicate detection
-    let existing: HashSet<String> = client::api_list_all_items()?
+    // Fetch existing item names ONCE, scoped to the resolved project +
+    // environment, for duplicate detection.
+    let existing: HashSet<String> = client::api_list_items(&resolved_scope.to_query_string())?
         .into_iter()
         .filter_map(|item| item.name)
         .collect();
@@ -113,6 +128,8 @@ pub fn run(args: AddArgs) -> Result<(), CliError> {
         }
     }
 
+    let items_url = resolved_scope.append_query(&format!("{}/items", client::API_BASE));
+
     for (key, value) in &pairs {
         let body = serde_json::json!({
             "id": 0,
@@ -121,16 +138,14 @@ pub fn run(args: AddArgs) -> Result<(), CliError> {
             "value": value,
             "categories": [],
             "created": "",
+            "key": key,
         });
-        let resp = client::authenticated_post(
-            &format!("{}/items", client::API_BASE),
-            &body,
-        )?;
+        let resp = client::authenticated_post(&items_url, &body)?;
         if !resp.status().is_success() {
             // Only key name in error — never the value
             eprintln!("Failed to add '{}': HTTP {}", key, resp.status());
         } else {
-            eprintln!("Added: {}", key);
+            eprintln!("Added: {} ({} / {})", key, resolved_scope.project, resolved_scope.environment);
         }
     }
 

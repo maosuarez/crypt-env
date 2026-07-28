@@ -418,9 +418,13 @@ pub fn authenticated_delete(url: &str) -> Result<reqwest::blocking::Response, Cl
     Ok(resp)
 }
 
-/// GET /items — returns all items. Used for duplicate detection.
-pub fn api_list_all_items() -> Result<Vec<ItemSummary>, CliError> {
-    let url = format!("{API_BASE}/items");
+/// GET /items, scoped to a project+environment — the API requires scope
+/// params on every call now. `scope_query` is a pre-built query string
+/// (e.g. `project=<enc>&environment=<enc>`, see
+/// `commands::scope::ResolvedScope::to_query_string`), without a leading
+/// `?`. Used for duplicate detection and for listing/browsing items.
+pub fn api_list_items(scope_query: &str) -> Result<Vec<ItemSummary>, CliError> {
+    let url = format!("{API_BASE}/items?{scope_query}");
     let resp = authenticated_get(&url)?;
 
     if resp.status() == reqwest::StatusCode::FORBIDDEN {
@@ -462,10 +466,13 @@ pub fn api_reveal(item_id: i64, token: &str) -> Result<String, CliError> {
     }
 }
 
-/// Searches for an item by exact name (case-insensitive) and returns (id, secret value).
-pub fn find_and_reveal(name: &str) -> Result<(i64, String), CliError> {
+/// Searches for an item by exact name (case-insensitive) within a
+/// project+environment scope and returns (id, secret value). `scope_query`
+/// is a pre-built query string (see `commands::scope::ResolvedScope`),
+/// without a leading `?`.
+pub fn find_and_reveal(name: &str, scope_query: &str) -> Result<(i64, String), CliError> {
     let token = get_auth_token()?;
-    let url = format!("{API_BASE}/items?search={}", urlencod(name));
+    let url = format!("{API_BASE}/items?search={}&{scope_query}", urlencod(name));
 
     let client = http_client();
     let resp = client

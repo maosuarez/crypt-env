@@ -545,10 +545,10 @@ export function Settings() {
           </button>
         </Row>
 
-        <Sec title="WORKSPACES" />
-        <Row icon="terminal" label="Env Workspaces">
+        <Sec title="PROJECTS" />
+        <Row icon="terminal" label="Projects & Environments">
           <button
-            onClick={() => go('workspaces')}
+            onClick={() => go('projects')}
             className="flex items-center gap-1.5 h-8 px-4 bg-transparent border border-bd2 rounded-[3px] text-tx2 text-[12px] cursor-pointer font-ui font-semibold tracking-[0.06em] hover:text-tx transition-colors"
           >
             MANAGE →

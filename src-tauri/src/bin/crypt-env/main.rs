@@ -43,8 +43,8 @@ enum Cmd {
     Category(commands::category::CategoryArgs),
     /// Interactive TUI — browse, search, and reveal secrets in the terminal
     Tui(commands::tui::TuiArgs),
-    /// Manage workspaces (list, inject, delete)
-    Workspace(commands::workspace::WorkspaceArgs),
+    /// Manage projects and their environments (list, inject, delete)
+    Project(commands::project::ProjectArgs),
     /// Share secrets via internet relay (send, receive)
     Relay(commands::relay::RelayArgs),
     /// Sync new variables from .env.example into .env without overwriting existing values
@@ -67,7 +67,7 @@ fn main() {
         Cmd::Share(args) => commands::share::run(args),
         Cmd::Category(args) => commands::category::run(args),
         Cmd::Tui(args) => commands::tui::run(args),
-        Cmd::Workspace(args) => commands::workspace::run(args),
+        Cmd::Project(args) => commands::project::run(args),
         Cmd::Relay(args) => commands::relay::run(args),
         Cmd::Sync(args) => commands::sync::run(args),
     };

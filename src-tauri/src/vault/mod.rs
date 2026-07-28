@@ -283,6 +283,24 @@ pub async fn vault_save_item(
     Ok(saved)
 }
 
+/// Pure logic shared by the `vault_create_project_item` Tauri command and the
+/// HTTP `POST /items` handler: encrypts and inserts a new item, then grants
+/// ownership to `project_id` atomically. New items are never global by
+/// default — the caller must explicitly toggle that afterwards.
+pub async fn create_project_item(
+    db: &VaultDb,
+    key: &CryptoKey,
+    item: &VaultItem,
+    project_id: i64,
+) -> Result<i64, String> {
+    let encrypted = encrypt_item(key, item)?;
+    let new_id = db
+        .upsert_item(0, &item.item_type, &encrypted, &item.created, false)
+        .await?;
+    db.add_item_owner(new_id, project_id).await?;
+    Ok(new_id)
+}
+
 /// Creates a new item and atomically grants ownership to `project_id` — the
 /// "add a typed variable inside a project" primitive. New items are never
 /// global by default (the caller must explicitly toggle that afterwards).
@@ -295,12 +313,7 @@ pub async fn vault_create_project_item(
     let mut s = state.lock().await;
     let key = s.key.as_ref().ok_or("vault is locked")?.clone();
     s.touch();
-    let encrypted = encrypt_item(&key, &item)?;
-    let new_id = s
-        .db
-        .upsert_item(0, &item.item_type, &encrypted, &item.created, false)
-        .await?;
-    s.db.add_item_owner(new_id, project_id).await?;
+    let new_id = create_project_item(&s.db, &key, &item, project_id).await?;
     let mut saved = item;
     saved.id = new_id;
     saved.is_global = Some(false);

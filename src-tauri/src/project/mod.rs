@@ -38,7 +38,11 @@ pub struct Environment {
 pub struct EnvironmentInput {
     #[serde(default)]
     pub id: i64,
-    #[serde(rename = "projectId")]
+    /// `#[serde(default)]` so a missing field produces a friendly 422
+    /// (`handle_save_environment` validates `project_id > 0` and that it
+    /// references an existing project) instead of a raw JSON-deserialize
+    /// rejection.
+    #[serde(default, rename = "projectId")]
     pub project_id: i64,
     pub name: String,
     #[serde(default, rename = "isDefault")]
@@ -201,28 +205,98 @@ pub async fn delete_environment(db: &VaultDb, id: i64) -> Result<(), String> {
     db.delete_environment(id).await
 }
 
+/// Resolves the environment identified either by numeric `environment_id`,
+/// or by a case-insensitive `project` name + `environment` name pair — the
+/// same two lookup shapes CLI's `project inject --id` / `--project
+/// --environment` already offers against `GET /projects`. Every HTTP
+/// endpoint that needs to scope its work to a single project+environment
+/// reuses this instead of inventing a second lookup convention.
+pub async fn resolve_environment(
+    db: &VaultDb,
+    environment_id: Option<i64>,
+    project: Option<&str>,
+    environment: Option<&str>,
+) -> Result<Environment, String> {
+    if let Some(id) = environment_id {
+        let env = get_environment_full(db, id).await?;
+        return env.ok_or_else(|| "environment not found".to_string());
+    }
+
+    if let (Some(p), Some(e)) = (project, environment) {
+        let p_lower = p.to_lowercase();
+        let e_lower = e.to_lowercase();
+        let projects = list_projects(db).await?;
+        return projects
+            .into_iter()
+            .find(|proj| proj.name.to_lowercase() == p_lower)
+            .and_then(|proj| proj.environments.into_iter().find(|env| env.name.to_lowercase() == e_lower))
+            .ok_or_else(|| format!("project/environment not found: {p} / {e}"));
+    }
+
+    Err("provide environment_id, or both project and environment".to_string())
+}
+
+async fn get_environment_full(db: &VaultDb, id: i64) -> Result<Option<Environment>, String> {
+    let env = match db.get_environment(id).await? {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+    let vars = db.get_environment_vars(id).await?;
+    Ok(Some(Environment {
+        id: env.id,
+        project_id: env.project_id,
+        name: env.name,
+        is_default: env.is_default,
+        paths: env.paths,
+        vars: vars
+            .into_iter()
+            .filter_map(|v| v.item_id.map(|item_id| EnvironmentVar { id: v.id, key: v.key, item_id }))
+            .collect(),
+        created: env.created,
+        updated: env.updated,
+    }))
+}
+
 /// Decrypt referenced vault items and write KEY=VALUE pairs into every path
-/// configured on this environment. Merges with existing file content (existing
-/// keys not in the environment are preserved). `written` reports the union of
-/// keys touched across ALL paths, not just the first one.
+/// configured on this environment, plus `output_path` (if given — added to
+/// the configured set, never replacing it) or, when the environment has no
+/// configured paths and no `output_path` was given, a single default file
+/// named `.env.<environment-name>` inside `output_dir`. Merges with existing
+/// file content (existing keys not in the environment are preserved).
+/// `written` reports the union of keys touched across ALL paths, not just
+/// the first one.
 pub async fn inject_environment(
     db: &VaultDb,
     vault_key: &[u8; 32],
     environment_id: i64,
+    output_path: Option<String>,
+    output_dir: Option<String>,
 ) -> Result<InjectResult, String> {
     let env = db
         .get_environment(environment_id)
         .await?
         .ok_or("environment not found")?;
 
-    if env.paths.is_empty() {
+    let mut paths = env.paths;
+    if let Some(p) = output_path {
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    } else if paths.is_empty() {
+        if let Some(dir) = output_dir {
+            let dir = dir.trim_end_matches(['/', '\\']);
+            paths.push(format!("{dir}/.env.{}", env.name));
+        }
+    }
+
+    if paths.is_empty() {
         return Err("environment has no paths configured".into());
     }
 
     let vars = db.get_environment_vars(environment_id).await?;
 
     if vars.is_empty() {
-        return Ok(InjectResult { paths: env.paths, written: vec![] });
+        return Ok(InjectResult { paths, written: vec![] });
     }
 
     // Decrypt vault items needed
@@ -250,7 +324,7 @@ pub async fn inject_environment(
     // Write inject_map into each configured .env path
     let mut written: HashSet<String> = HashSet::new();
 
-    for path in &env.paths {
+    for path in &paths {
         let existing = std::fs::read_to_string(path).unwrap_or_default();
         let mut lines: Vec<String> = existing.lines().map(String::from).collect();
         let mut updated_keys: HashSet<String> = HashSet::new();
@@ -286,7 +360,7 @@ pub async fn inject_environment(
     let mut written_keys: Vec<String> = written.into_iter().collect();
     written_keys.sort();
 
-    Ok(InjectResult { paths: env.paths, written: written_keys })
+    Ok(InjectResult { paths, written: written_keys })
 }
 
 // ─── Tauri commands ───────────────────────────────────────────────────────────
@@ -335,7 +409,7 @@ pub async fn environment_inject(state: State<'_, SharedState>, id: i64) -> Resul
     let s = state.lock().await;
     let key = s.key.as_ref().ok_or("vault is locked")?;
     let vault_key: [u8; 32] = **key;
-    inject_environment(&s.db, &vault_key, id).await
+    inject_environment(&s.db, &vault_key, id, None, None).await
 }
 
 #[tauri::command]

@@ -16,6 +16,7 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use crate::client::{self, CliError, ItemSummary};
+use crate::commands::scope::{self, ResolvedScope};
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
 
@@ -71,6 +72,11 @@ struct App {
     status: Option<(String, bool)>, // (msg, is_error)
     should_quit: bool,
     token: Option<String>,
+    // Project/environment scope (resolved once authenticated — see
+    // `resolve_and_load`)
+    project_flag: Option<String>,
+    env_flag: Option<String>,
+    scope: Option<ResolvedScope>,
 }
 
 #[derive(Clone)]
@@ -80,7 +86,7 @@ enum ConfirmAction {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(project_flag: Option<String>, env_flag: Option<String>) -> Self {
         let token = client::read_token();
         let screen = if token.is_some() { Screen::Main } else { Screen::Unlock };
         App {
@@ -99,6 +105,36 @@ impl App {
             status: None,
             should_quit: false,
             token,
+            project_flag,
+            env_flag,
+            scope: None,
+        }
+    }
+
+    /// Resolves project/environment scope once (memoized in `self.scope`) —
+    /// called after authentication succeeds, since resolution may issue
+    /// authenticated requests (GET/POST /projects).
+    fn resolve_scope(&mut self) -> Result<(), CliError> {
+        if self.scope.is_none() {
+            self.scope = Some(scope::resolve(self.project_flag.as_deref(), self.env_flag.as_deref(), false)?);
+        }
+        Ok(())
+    }
+
+    /// Loads items for the resolved scope. Panics-free: returns the error
+    /// for the caller to surface as pw_error / status.
+    fn load_items(&mut self) -> Result<Vec<ItemSummary>, CliError> {
+        self.resolve_scope()?;
+        let query = self.scope.as_ref().expect("scope resolved above").to_query_string();
+        client::api_list_items(&query)
+    }
+
+    /// "project / environment" for display in the UI chrome, before scope is
+    /// resolved (e.g. still on the Unlock screen).
+    fn scope_label(&self) -> String {
+        match &self.scope {
+            Some(s) => format!("{} / {}", s.project, s.environment),
+            None => "—".to_string(),
         }
     }
 
@@ -151,9 +187,17 @@ impl App {
 // ─── CLI entry point ──────────────────────────────────────────────────────────
 
 #[derive(Args)]
-pub struct TuiArgs {}
+pub struct TuiArgs {
+    /// Project to browse (defaults to crypt-env.json or the cwd folder name)
+    #[arg(long)]
+    pub project: Option<String>,
 
-pub fn run(_args: TuiArgs) -> Result<(), CliError> {
+    /// Environment to browse (defaults to crypt-env.json or the project's default environment)
+    #[arg(long = "env")]
+    pub env: Option<String>,
+}
+
+pub fn run(args: TuiArgs) -> Result<(), CliError> {
     enable_raw_mode().map_err(|e| CliError::Io(e))?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).map_err(|e| CliError::Io(e))?;
@@ -168,11 +212,11 @@ pub fn run(_args: TuiArgs) -> Result<(), CliError> {
         default_hook(info);
     }));
 
-    let mut app = App::new();
+    let mut app = App::new(args.project, args.env);
 
-    // Try to load items if already authenticated
+    // Try to resolve scope and load items if already authenticated
     if app.screen == Screen::Main {
-        match client::api_list_all_items() {
+        match app.load_items() {
             Ok(items) => {
                 let len = items.len();
                 app.items = items;
@@ -181,9 +225,11 @@ pub fn run(_args: TuiArgs) -> Result<(), CliError> {
                 }
             }
             Err(_) => {
-                // Token may be stale — fall back to unlock
+                // Token may be stale, or scope resolution failed — fall
+                // back to unlock rather than showing a broken item list.
                 client::clear_token();
                 app.token = None;
+                app.scope = None;
                 app.screen = Screen::Unlock;
             }
         }
@@ -252,8 +298,8 @@ fn handle_unlock(app: &mut App, code: KeyCode) {
                     app.token = Some(token);
                     app.password.clear();
                     app.pw_error = None;
-                    // Load items
-                    match client::api_list_all_items() {
+                    // Resolve project/environment scope and load its items
+                    match app.load_items() {
                         Ok(items) => {
                             let len = items.len();
                             app.items = items;
@@ -346,8 +392,8 @@ fn handle_main(app: &mut App, code: KeyCode, _mods: KeyModifiers) {
             }
         }
         KeyCode::Char('r') => {
-            // Refresh
-            match client::api_list_all_items() {
+            // Refresh (within the already-resolved scope)
+            match app.load_items() {
                 Ok(items) => {
                     let len = items.len();
                     app.items = items;
@@ -583,9 +629,11 @@ fn render_topbar(f: &mut Frame, app: &App, area: Rect) {
     let total = app.items.len();
     let shown = if app.search.is_empty() { total } else { app.filtered.len() };
     let count = format!(" {}/{} ", shown, total);
+    let scope_text = format!(" [{}] ", app.scope_label());
 
     let bar = Paragraph::new(Line::from(vec![
         Span::styled(search_text, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(scope_text, Style::default().fg(TX2)),
         Span::styled(count, Style::default().fg(TX3)),
     ]))
     .style(Style::default().bg(RAISED));

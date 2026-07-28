@@ -5,6 +5,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router, middleware};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -216,6 +217,35 @@ fn err_validation(field: &str, reason: &str) -> axum::response::Response {
     .into_response()
 }
 
+// ─── Project + environment scoping ────────────────────────────────────────────
+//
+// Every endpoint scoped to a single project+environment accepts the same two
+// shapes, mirrored from the CLI's existing `project inject --id` /
+// `--project --environment` convention: either `environment_id` alone, or a
+// case-insensitive `project` name + `environment` name pair. This struct is
+// reused verbatim as the axum `Query` extractor on every such endpoint.
+#[derive(Deserialize)]
+struct EnvScopeQuery {
+    environment_id: Option<i64>,
+    project: Option<String>,
+    environment: Option<String>,
+}
+
+/// Resolves the environment for a scoped request, or a 422 response with a
+/// clear message when the identifier is missing or doesn't match anything —
+/// matching the existing validation-error convention (see `err_validation`).
+async fn resolve_scope(
+    state: &ApiState,
+    environment_id: Option<i64>,
+    project: Option<&str>,
+    environment: Option<&str>,
+) -> Result<project::Environment, axum::response::Response> {
+    let vault = state.vault.lock().await;
+    project::resolve_environment(&vault.db, environment_id, project, environment)
+        .await
+        .map_err(|msg| err_validation("project/environment", &msg))
+}
+
 /// Validates fields for a POST /items (create) request.
 /// All required fields must be present and non-empty; optional fields are
 /// validated only when present.
@@ -398,6 +428,15 @@ struct ItemsQuery {
     item_type: Option<String>,
     category: Option<String>,
     search: Option<String>,
+    environment_id: Option<i64>,
+    project: Option<String>,
+    environment: Option<String>,
+}
+
+/// The set of item ids linked into an environment's `environment_vars` — the
+/// scope every /items, /commands, /fill lookup below is restricted to.
+fn environment_item_ids(env: &project::Environment) -> HashSet<i64> {
+    env.vars.iter().map(|v| v.item_id).collect()
 }
 
 async fn handle_list_items(
@@ -414,6 +453,19 @@ async fn handle_list_items(
         return err_json(code, msg, err_code).into_response();
     }
 
+    let env = match resolve_scope(
+        &state,
+        params.environment_id,
+        params.project.as_deref(),
+        params.environment.as_deref(),
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
+    let allowed_ids = environment_item_ids(&env);
+
     let items = match decrypt_all_items(&state).await {
         Ok(i) => i,
         Err(StatusCode::FORBIDDEN) => {
@@ -425,6 +477,7 @@ async fn handle_list_items(
                 .into_response()
         }
     };
+    let items = items.into_iter().filter(|item| allowed_ids.contains(&item.id));
 
     let type_filter = params.item_type.as_deref().map(|s| s.to_lowercase());
     let cat_filter = params.category.as_deref().map(|s| s.to_lowercase());
@@ -506,10 +559,21 @@ async fn handle_get_item(
     }
 }
 
+/// Body for `POST /items`: the item fields (flattened, same shape as before)
+/// plus an optional `key` override for the environment variable this item is
+/// linked under. When omitted, `key` defaults to the item's `name`.
+#[derive(Deserialize)]
+struct CreateItemBody {
+    #[serde(flatten)]
+    item: VaultItem,
+    key: Option<String>,
+}
+
 async fn handle_create_item(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
-    Json(mut body): Json<VaultItem>,
+    Query(scope): Query<EnvScopeQuery>,
+    Json(mut body): Json<CreateItemBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
         let (msg, err_code) = match code {
@@ -520,16 +584,38 @@ async fn handle_create_item(
         return err_json(code, msg, err_code).into_response();
     }
 
-    if let Err(resp) = validate_create(&body) {
+    let env = match resolve_scope(
+        &state,
+        scope.environment_id,
+        scope.project.as_deref(),
+        scope.environment.as_deref(),
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
+
+    if let Err(resp) = validate_create(&body.item) {
         return resp;
     }
 
-    // Asegurar timestamp de creación
-    if body.created.is_empty() {
-        body.created = now_ts_str();
+    let key_name = body
+        .key
+        .take()
+        .filter(|k| !k.is_empty())
+        .or_else(|| body.item.name.clone())
+        .unwrap_or_default();
+    if key_name.is_empty() {
+        return err_validation("key", "required and must not be empty (defaults to item name)");
     }
 
-    let (key, new_id) = {
+    // Asegurar timestamp de creación
+    if body.item.created.is_empty() {
+        body.item.created = now_ts_str();
+    }
+
+    let new_id = {
         let vault = state.vault.lock().await;
         let key = match vault.key.as_ref() {
             Some(k) => k.clone(),
@@ -539,24 +625,10 @@ async fn handle_create_item(
             }
         };
 
-        let encrypted = match crate::vault::encrypt_item(&key, &body) {
-            Ok(e) => e,
-            Err(_) => {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "error cifrando item",
-                    "INTERNAL_ERROR",
-                )
-                .into_response()
-            }
-        };
-
-        let is_global = body.is_global.unwrap_or(false);
-        let new_id = match vault
-            .db
-            .upsert_item(0, &body.item_type, &encrypted, &body.created, is_global)
-            .await
-        {
+        // Create + own the item atomically (same primitive as the Tauri
+        // command `vault_create_project_item`), then link it into this
+        // environment's vars under `key_name`.
+        let new_id = match crate::vault::create_project_item(&vault.db, &key, &body.item, env.project_id).await {
             Ok(id) => id,
             Err(e) => {
                 return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
@@ -564,13 +636,16 @@ async fn handle_create_item(
             }
         };
 
-        (key, new_id)
+        if let Err(e) = vault.db.upsert_environment_var(env.id, &key_name, new_id).await {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response();
+        }
+
+        new_id
     };
 
-    let _ = key; // ya no necesitamos la key
-    body.id = new_id;
-    body.is_global = Some(body.is_global.unwrap_or(false));
-    (StatusCode::CREATED, Json(redact_item(body))).into_response()
+    body.item.id = new_id;
+    body.item.is_global = Some(false);
+    (StatusCode::CREATED, Json(redact_item(body.item))).into_response()
 }
 
 async fn handle_update_item(
@@ -889,6 +964,7 @@ async fn handle_delete_category(
 async fn handle_list_commands(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
+    Query(scope): Query<EnvScopeQuery>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
         let (msg, err_code) = match code {
@@ -898,6 +974,19 @@ async fn handle_list_commands(
         };
         return err_json(code, msg, err_code).into_response();
     }
+
+    let env = match resolve_scope(
+        &state,
+        scope.environment_id,
+        scope.project.as_deref(),
+        scope.environment.as_deref(),
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
+    let allowed_ids = environment_item_ids(&env);
 
     let items = match decrypt_all_items(&state).await {
         Ok(i) => i,
@@ -913,7 +1002,7 @@ async fn handle_list_commands(
 
     let commands: Vec<CommandDetail> = items
         .into_iter()
-        .filter(|item| item.item_type == "command")
+        .filter(|item| item.item_type == "command" && allowed_ids.contains(&item.id))
         .map(|item| {
             let template = item.command.as_deref().unwrap_or("");
             let placeholders = extract_placeholders(template);
@@ -1095,19 +1184,12 @@ struct HealthResponse {
     version: &'static str,
     status: &'static str,
     vault_locked: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    item_count: Option<usize>,
     mcp_token_configured: bool,
 }
 
 async fn handle_health(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let vault = state.vault.lock().await;
     let vault_locked = vault.key.is_none();
-    let item_count: Option<usize> = if !vault_locked {
-        vault.db.list_items().await.ok().map(|items| items.len())
-    } else {
-        None
-    };
     let mcp_token_configured = vault
         .db
         .get_setting("mcp_token")
@@ -1124,7 +1206,6 @@ async fn handle_health(State(state): State<Arc<ApiState>>) -> impl IntoResponse 
             version: env!("CARGO_PKG_VERSION"),
             status: "running",
             vault_locked,
-            item_count,
             mcp_token_configured,
         }),
     )
@@ -1208,17 +1289,21 @@ impl Drop for TempEnvFile {
 #[derive(Deserialize)]
 struct FillBody {
     template: String,
-    /// When provided, write the filled .env directly to this path.
+    /// When provided, write the filled .env directly to this exact path.
     /// The response will contain stats but not the secret content.
     output_path: Option<String>,
+    /// When provided (and `output_path` is not), write to
+    /// `{output_dir}/.env.<environment-name>` instead of returning content
+    /// inline — the default-filename-with-environment-suffix convention.
+    output_dir: Option<String>,
 }
 
 #[derive(Serialize)]
 struct FillResponse {
-    /// Only present when output_path is not specified.
+    /// Only present when neither output_path nor output_dir is specified.
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
-    /// Only present when output_path is specified.
+    /// Only present when writing to disk (output_path or output_dir).
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     injected: usize,
@@ -1229,6 +1314,7 @@ struct FillResponse {
 async fn handle_fill(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
+    Query(scope): Query<EnvScopeQuery>,
     Json(body): Json<FillBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
@@ -1239,6 +1325,18 @@ async fn handle_fill(
         };
         return err_json(code, msg, err_code).into_response();
     }
+
+    let env = match resolve_scope(
+        &state,
+        scope.environment_id,
+        scope.project.as_deref(),
+        scope.environment.as_deref(),
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
 
     let items = match decrypt_all_items(&state).await {
         Ok(i) => i,
@@ -1256,6 +1354,27 @@ async fn handle_fill(
         }
     };
 
+    // Fill strictly from this environment's linked vars (key -> decrypted
+    // value) — a template key that happens to match an item name elsewhere
+    // in the vault, but isn't linked into this environment, is NOT filled.
+    let items_by_id: HashMap<i64, VaultItem> = items.into_iter().map(|i| (i.id, i)).collect();
+    let key_to_value: HashMap<String, String> = env
+        .vars
+        .iter()
+        .filter_map(|v| {
+            items_by_id.get(&v.item_id).map(|item| {
+                let value = item
+                    .value
+                    .as_deref()
+                    .or(item.password.as_deref())
+                    .or(item.content.as_deref())
+                    .unwrap_or("")
+                    .to_string();
+                (v.key.to_lowercase(), value)
+            })
+        })
+        .collect();
+
     let mut new_lines: Vec<String> = Vec::new();
     let mut injected = 0usize;
     let mut not_found = 0usize;
@@ -1271,26 +1390,20 @@ async fn handle_fill(
             let key = &trimmed[..eq_pos];
             if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 let key_lower = key.to_lowercase();
-                let found = items.iter().find(|item| {
-                    item.name
-                        .as_deref()
-                        .map(|n| n.to_lowercase() == key_lower)
-                        .unwrap_or(false)
-                });
-                if let Some(item) = found {
-                    let value = item
-                        .value
-                        .as_deref()
-                        .or(item.password.as_deref())
-                        .or(item.content.as_deref())
-                        .unwrap_or("");
+                if let Some(value) = key_to_value.get(&key_lower) {
                     new_lines.push(format!("{key}={value}"));
                     injected += 1;
                     continue;
                 } else {
+                    // Not linked into this environment: preserve the
+                    // original line untouched rather than blanking the
+                    // value out — this is very likely a local-only value
+                    // (port, feature flag, teammate-shared literal) that
+                    // was never vault-managed, and blanking it is silent,
+                    // irreversible data loss. Only report it as missing.
                     missing_keys.push(key.to_string());
                     not_found += 1;
-                    new_lines.push(format!("{key}="));
+                    new_lines.push(line.to_string());
                     continue;
                 }
             }
@@ -1303,13 +1416,25 @@ async fn handle_fill(
         filled.push('\n');
     }
 
-    // When output_path is given: write to disk via RAII guard, return stats only
-    // (no secret content in the response).
+    // Explicit output_path: write to exactly that file. No output_path but an
+    // output_dir: write to the default-filename-with-environment-suffix
+    // convention inside it. Neither: return content inline (unchanged).
+    let write_target = if let Some(out) = body.output_path {
+        Some(out)
+    } else if let Some(dir) = body.output_dir {
+        let dir = dir.trim_end_matches(['/', '\\']);
+        Some(format!("{dir}/.env.{}", env.name))
+    } else {
+        None
+    };
+
+    // When writing to disk: write via RAII guard, return stats only (no
+    // secret content in the response).
     //
     // The guard zeros and deletes the file if any error occurs before persist().
     // On success, persist() disarms the guard so the caller can consume the file.
-    if let Some(ref out) = body.output_path {
-        let path = std::path::PathBuf::from(out);
+    if let Some(out) = write_target {
+        let path = std::path::PathBuf::from(&out);
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 return err_json(
@@ -1346,7 +1471,7 @@ async fn handle_fill(
             .into_response();
     }
 
-    // Without output_path: return the content inline (CLI / programmatic use).
+    // Neither output_path nor output_dir: return the content inline (CLI / programmatic use).
     (
         StatusCode::OK,
         Json(FillResponse {
@@ -1378,6 +1503,7 @@ struct ShareListenResponse {
 async fn handle_share_listen(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
+    Query(scope): Query<EnvScopeQuery>,
     Json(body): Json<ShareListenBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
@@ -1391,6 +1517,30 @@ async fn handle_share_listen(
 
     if body.items.is_empty() {
         return err_json(StatusCode::UNPROCESSABLE_ENTITY, "items list must not be empty", "VALIDATION_ERROR").into_response();
+    }
+
+    // Resolve the project+environment this share is scoped to. Sharing is
+    // restricted to items already linked into that environment's vars — the
+    // same scoping rule GET/POST /items and GET /commands apply — so a
+    // sender can only ever share what already belongs to the project they
+    // said they were sharing from.
+    let env = match resolve_scope(
+        &state,
+        scope.environment_id,
+        scope.project.as_deref(),
+        scope.environment.as_deref(),
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
+    let allowed_ids = environment_item_ids(&env);
+    if let Some(bad_id) = body.items.iter().find(|id| !allowed_ids.contains(id)) {
+        return err_validation(
+            "items",
+            &format!("item {bad_id} is not linked to environment '{}'", env.name),
+        );
     }
 
     // Extract vault key
@@ -1407,6 +1557,8 @@ async fn handle_share_listen(
         body.items,
         vault_key,
         state.vault.clone(),
+        Some(env.project_id),
+        Some(env.id),
     )
     .await
     {
@@ -1447,6 +1599,7 @@ struct ShareConnectResponse {
 async fn handle_share_connect(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
+    Query(scope): Query<EnvScopeQuery>,
     Json(body): Json<ShareConnectBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
@@ -1457,6 +1610,21 @@ async fn handle_share_connect(
         };
         return err_json(code, msg, err_code).into_response();
     }
+
+    // Resolve the project+environment received items should land in — see
+    // `share::import_plain_items_into_vault`, which owns and links each
+    // imported item into this environment once the transfer completes.
+    let env = match resolve_scope(
+        &state,
+        scope.environment_id,
+        scope.project.as_deref(),
+        scope.environment.as_deref(),
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
 
     let vault_key: [u8; 32] = {
         let guard = state.vault.lock().await;
@@ -1471,6 +1639,8 @@ async fn handle_share_connect(
         body.pairing_code,
         vault_key,
         state.vault.clone(),
+        Some(env.project_id),
+        Some(env.id),
     )
     .await
     {
@@ -1534,6 +1704,10 @@ struct ShareStatusResponse {
     fingerprint: Option<String>,
     direction: Option<String>,
     received_names: Option<Vec<String>>,
+    /// Received names that were NOT linked into the target environment
+    /// because their key already had a different item linked there — see
+    /// `share::ImportOutcome`. Same availability rule as `received_names`.
+    skipped_keys: Option<Vec<String>>,
 }
 
 async fn handle_share_status(
@@ -1558,6 +1732,7 @@ async fn handle_share_status(
                 fingerprint: None,
                 direction: None,
                 received_names: None,
+                skipped_keys: None,
             }),
         )
             .into_response(),
@@ -1566,11 +1741,9 @@ async fn handle_share_status(
                 ShareSessionState::Failed(msg) => format!("failed: {msg}"),
                 other => other.as_str().to_string(),
             };
-            let received = if s.state == ShareSessionState::Done && s.direction == crate::share::ShareDirection::Receiving {
-                Some(s.received_names.clone())
-            } else {
-                None
-            };
+            let done_receiving = s.state == ShareSessionState::Done && s.direction == crate::share::ShareDirection::Receiving;
+            let received = if done_receiving { Some(s.received_names.clone()) } else { None };
+            let skipped = if done_receiving { Some(s.skipped_keys.clone()) } else { None };
             (
                 StatusCode::OK,
                 Json(ShareStatusResponse {
@@ -1578,6 +1751,7 @@ async fn handle_share_status(
                     fingerprint: s.fingerprint.clone(),
                     direction: Some(s.direction.as_str().to_string()),
                     received_names: received,
+                    skipped_keys: skipped,
                 }),
             )
                 .into_response()
@@ -1675,11 +1849,16 @@ struct ShareImportBody {
 struct ShareImportResponse {
     imported: usize,
     item_names: Vec<String>,
+    /// Names imported but not linked into the environment because their key
+    /// was already linked to a different item there, or was unsafe (empty /
+    /// contained `=` or a newline) — see `share::ImportOutcome`.
+    skipped_keys: Vec<String>,
 }
 
 async fn handle_share_import(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
+    Query(scope): Query<EnvScopeQuery>,
     Json(body): Json<ShareImportBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
@@ -1691,15 +1870,32 @@ async fn handle_share_import(
         return err_json(code, msg, err_code).into_response();
     }
 
+    // Imported items must land in a resolvable project+environment, same as
+    // /share/connect and /relay/receive, so they're actually findable
+    // afterwards via GET /items / search / MCP instead of only by guessing
+    // their numeric id.
+    let env = match resolve_scope(
+        &state,
+        scope.environment_id,
+        scope.project.as_deref(),
+        scope.environment.as_deref(),
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
+
     let path = std::path::PathBuf::from(&body.path);
-    match crate::share::import_package(&path, &body.passphrase, &state.vault).await {
-        Ok(names) => {
-            let count = names.len();
+    match crate::share::import_package(&path, &body.passphrase, &state.vault, Some((env.project_id, env.id))).await {
+        Ok(outcome) => {
+            let count = outcome.names.len();
             (
                 StatusCode::OK,
                 Json(ShareImportResponse {
                     imported: count,
-                    item_names: names,
+                    item_names: outcome.names,
+                    skipped_keys: outcome.skipped_keys,
                 }),
             )
                 .into_response()
@@ -1756,6 +1952,15 @@ async fn handle_save_project(
         Ok(id) => {
             let status = if is_new { StatusCode::CREATED } else { StatusCode::OK };
             (status, Json(serde_json::json!({ "id": id }))).into_response()
+        }
+        // A concurrent request may have already created a project with the
+        // same case-insensitive name (enforced by the DB's unique index) —
+        // report it as a distinguishable conflict so callers like the CLI's
+        // auto-create fallback can re-fetch and reuse the existing project
+        // instead of treating this as a hard failure.
+        Err(e) if e.to_lowercase().contains("unique constraint") => {
+            err_json(StatusCode::CONFLICT, "a project with this name already exists", "CONFLICT")
+                .into_response()
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
@@ -1832,9 +2037,22 @@ async fn handle_save_environment(
         return err_json(StatusCode::UNPROCESSABLE_ENTITY, "name: required and must not be empty", "VALIDATION_ERROR")
             .into_response();
     }
+    if body.project_id <= 0 {
+        return err_validation("projectId", "required and must reference an existing project");
+    }
 
     let is_new = body.id == 0;
     let vault = state.vault.lock().await;
+
+    match project::list_projects(&vault.db).await {
+        Ok(projects) => {
+            if !projects.iter().any(|p| p.id == body.project_id) {
+                return err_validation("projectId", "must reference an existing project");
+            }
+        }
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+    }
+
     match project::save_environment(&vault.db, body).await {
         Ok(id) => {
             let status = if is_new { StatusCode::CREATED } else { StatusCode::OK };
@@ -1865,10 +2083,25 @@ async fn handle_delete_environment(
     }
 }
 
+/// Body for `POST /environments/:id/inject`. Both fields optional — an empty
+/// body (`{}`) preserves the pre-existing behavior of writing to exactly the
+/// environment's configured `paths[]`. Mirrors `/fill`'s filename resolution
+/// (see `FillBody`): `output_path` is an explicit exact path (added to
+/// `paths[]`, never replacing it); `output_dir` is only consulted when
+/// `paths[]` is empty and no `output_path` was given, writing a single
+/// `{output_dir}/.env.<environment-name>` file.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct InjectBody {
+    output_path: Option<String>,
+    output_dir: Option<String>,
+}
+
 async fn handle_inject_environment(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
+    Json(body): Json<InjectBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
         let (msg, err_code) = match code {
@@ -1888,7 +2121,7 @@ async fn handle_inject_environment(
         }
     };
 
-    match project::inject_environment(&vault.db, &vault_key, id).await {
+    match project::inject_environment(&vault.db, &vault_key, id, body.output_path, body.output_dir).await {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
         Err(e) if e == "environment not found" => {
             err_json(StatusCode::NOT_FOUND, &e, "NOT_FOUND").into_response()
@@ -1898,6 +2131,102 @@ async fn handle_inject_environment(
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
+}
+
+// ─── /environments/:id/example ────────────────────────────────────────────────
+//
+// Generates a `.env`-shaped file listing an environment's variable KEYS with
+// empty values — safe to commit to source control, since it never touches
+// (let alone decrypts) the referenced items' actual secret values.
+
+/// Mirrors `InjectBody`'s dual write mode: explicit `output_path`, or
+/// `output_dir` (written as `{output_dir}/.env.example.<environment-name>`),
+/// or neither (content returned inline — still just placeholders, never
+/// secrets, so inline return carries no risk here).
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ExampleBody {
+    output_path: Option<String>,
+    output_dir: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ExampleResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    keys: Vec<String>,
+}
+
+async fn handle_environment_example(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<ExampleBody>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let env = {
+        let vault = state.vault.lock().await;
+        match project::resolve_environment(&vault.db, Some(id), None, None).await {
+            Ok(e) => e,
+            Err(_) => {
+                return err_json(StatusCode::NOT_FOUND, "environment not found", "NOT_FOUND")
+                    .into_response()
+            }
+        }
+    };
+
+    let mut keys: Vec<String> = env.vars.iter().map(|v| v.key.clone()).collect();
+    keys.sort();
+
+    // Placeholder content only — every value is empty, the actual item
+    // values are never read or decrypted here.
+    let content = keys.iter().map(|k| format!("{k}=")).collect::<Vec<_>>().join("\n") + "\n";
+
+    let write_target = if let Some(p) = body.output_path {
+        Some(p)
+    } else if let Some(dir) = body.output_dir {
+        let dir = dir.trim_end_matches(['/', '\\']);
+        Some(format!("{dir}/.env.example.{}", env.name))
+    } else {
+        None
+    };
+
+    if let Some(out) = write_target {
+        let path = std::path::PathBuf::from(&out);
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("cannot create directory: {e}"),
+                    "INTERNAL_ERROR",
+                )
+                .into_response();
+            }
+        }
+        // Plain write is fine here (no RAII zero-wipe needed) — the content
+        // contains only key names, never a secret value.
+        if let Err(e) = std::fs::write(&path, &content) {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("cannot write file: {e}"),
+                "INTERNAL_ERROR",
+            )
+            .into_response();
+        }
+        return (StatusCode::OK, Json(ExampleResponse { content: None, path: Some(out), keys })).into_response();
+    }
+
+    (StatusCode::OK, Json(ExampleResponse { content: Some(content), path: None, keys })).into_response()
 }
 
 // ─── Relay handlers ───────────────────────────────────────────────────────────
@@ -2082,11 +2411,16 @@ struct RelayReceiveBody {
 #[derive(serde::Serialize)]
 struct RelayReceiveResponse {
     names: Vec<String>,
+    /// Names imported but not linked into the environment because their key
+    /// was already linked to a different item there, or was unsafe (empty /
+    /// contained `=` or a newline) — see `share::ImportOutcome`.
+    skipped_keys: Vec<String>,
 }
 
 async fn handle_relay_receive(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
+    Query(scope): Query<EnvScopeQuery>,
     Json(body): Json<RelayReceiveBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
@@ -2106,6 +2440,22 @@ async fn handle_relay_receive(
         )
         .into_response();
     }
+
+    // Imported items must land in a resolvable project+environment, same as
+    // /share/connect and /share/import, so they're actually findable
+    // afterwards via GET /items / search / MCP instead of only by guessing
+    // their numeric id.
+    let env = match resolve_scope(
+        &state,
+        scope.environment_id,
+        scope.project.as_deref(),
+        scope.environment.as_deref(),
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(resp) => return resp,
+    };
 
     // Derive relay key before spawning blocking tasks (no I/O needed)
     let relay_key = match relay::derive_relay_key(&body.code, &body.passphrase) {
@@ -2216,69 +2566,31 @@ async fn handle_relay_receive(
     })
     .await;
 
-    // Import items into the vault
+    // Import items into the vault, owned by and linked into the resolved
+    // project/environment — reuses the exact same helper LAN share and
+    // `.vault` package import use, instead of duplicating item-creation +
+    // linking logic here.
     let vault = state.vault.lock().await;
-    let now_ts = now_ts_str();
-    let mut names: Vec<String> = Vec::new();
-
-    for plain in &plain_items {
-        let vault_item = VaultItem {
-            id: 0,
-            item_type: plain.item_type.clone(),
-            name: Some(plain.name.clone()),
-            value: plain.value.clone(),
-            username: plain.username.clone(),
-            password: plain.password.clone(),
-            url: plain.url.clone(),
-            notes: plain.notes.clone(),
-            title: None,
-            description: None,
-            command: plain.command.clone(),
-            shell: None,
-            content: None,
-            categories: Some(plain.category.iter().cloned().collect()),
-            created: now_ts.clone(),
-            is_global: None,
-        };
-
-        let json = match serde_json::to_vec(&vault_item) {
-            Ok(j) => j,
-            Err(e) => {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("serialize item: {e}"),
-                    "INTERNAL_ERROR",
-                )
+    let outcome = match crate::share::import_plain_items_into_vault(
+        &plain_items,
+        &vault_key,
+        &vault.db,
+        Some((env.project_id, env.id)),
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), "INTERNAL_ERROR")
                 .into_response()
-            }
-        };
-
-        let encrypted = match crypto::encrypt(&vault_key, &json) {
-            Ok(e) => e,
-            Err(e) => {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("encrypt item: {e}"),
-                    "INTERNAL_ERROR",
-                )
-                .into_response()
-            }
-        };
-
-        match vault
-            .db
-            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created, false)
-            .await
-        {
-            Ok(_) => names.push(plain.name.clone()),
-            Err(e) => {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                    .into_response()
-            }
         }
-    }
+    };
 
-    (StatusCode::OK, Json(RelayReceiveResponse { names })).into_response()
+    (
+        StatusCode::OK,
+        Json(RelayReceiveResponse { names: outcome.names, skipped_keys: outcome.skipped_keys }),
+    )
+        .into_response()
 }
 
 // ─── Complete-workspace relay handlers ────────────────────────────────────────
@@ -2771,6 +3083,7 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         .route("/environments", post(handle_save_environment))
         .route("/environments/:id", delete(handle_delete_environment))
         .route("/environments/:id/inject", post(handle_inject_environment))
+        .route("/environments/:id/example", post(handle_environment_example))
         .route("/relay/send", post(handle_relay_send))
         .route("/relay/receive", post(handle_relay_receive))
         .route("/workspaces/:id/relay/send", post(handle_workspace_relay_send))

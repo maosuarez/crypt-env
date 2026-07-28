@@ -9,6 +9,7 @@ pub mod list;
 pub mod memory;
 pub mod project;
 pub mod relay;
+pub mod scope;
 pub mod search;
 pub mod set;
 pub mod share;

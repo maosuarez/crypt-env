@@ -1,5 +1,6 @@
 use clap::Args;
 use crate::client::{self, CliError, CommandDetail};
+use crate::commands::scope::{self, ResolvedScope};
 
 #[derive(Args)]
 pub struct CmdArgs {
@@ -14,13 +15,22 @@ pub struct CmdArgs {
     /// Placeholder values: --VAR=value
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub vars: Vec<String>,
+
+    /// Project name (defaults to crypt-env.json or the cwd folder name)
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Environment name (defaults to crypt-env.json or the project's default environment)
+    #[arg(long = "env")]
+    pub env: Option<String>,
 }
 
 pub fn run(args: CmdArgs) -> Result<(), CliError> {
+    let resolved_scope = scope::resolve(args.project.as_deref(), args.env.as_deref(), false)?;
     match (args.name.as_deref(), args.list, args.info) {
-        (None, true, _) => list_commands(),
-        (Some(name), _, true) => command_info(name),
-        (Some(name), _, false) => run_command(name, &args.vars),
+        (None, true, _) => list_commands(&resolved_scope),
+        (Some(name), _, true) => command_info(name, &resolved_scope),
+        (Some(name), _, false) => run_command(name, &args.vars, &resolved_scope),
         (None, false, _) => {
             eprintln!("Use --list to list commands or provide a name.");
             std::process::exit(1);
@@ -28,8 +38,8 @@ pub fn run(args: CmdArgs) -> Result<(), CliError> {
     }
 }
 
-fn list_commands() -> Result<(), CliError> {
-    let url = format!("{}/commands", client::API_BASE);
+fn list_commands(resolved_scope: &ResolvedScope) -> Result<(), CliError> {
+    let url = resolved_scope.append_query(&format!("{}/commands", client::API_BASE));
     let resp = client::authenticated_get(&url)?;
 
     if resp.status() == reqwest::StatusCode::FORBIDDEN {
@@ -61,8 +71,8 @@ fn list_commands() -> Result<(), CliError> {
     Ok(())
 }
 
-fn command_info(name: &str) -> Result<(), CliError> {
-    let url = format!("{}/commands", client::API_BASE);
+fn command_info(name: &str, resolved_scope: &ResolvedScope) -> Result<(), CliError> {
+    let url = resolved_scope.append_query(&format!("{}/commands", client::API_BASE));
     let resp = client::authenticated_get(&url)?;
 
     if resp.status() == reqwest::StatusCode::FORBIDDEN {
@@ -110,8 +120,8 @@ fn command_info(name: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn run_command(name: &str, vars: &[String]) -> Result<(), CliError> {
-    let url = format!("{}/commands", client::API_BASE);
+fn run_command(name: &str, vars: &[String], resolved_scope: &ResolvedScope) -> Result<(), CliError> {
+    let url = resolved_scope.append_query(&format!("{}/commands", client::API_BASE));
     let resp = client::authenticated_get(&url)?;
 
     if resp.status() == reqwest::StatusCode::FORBIDDEN {

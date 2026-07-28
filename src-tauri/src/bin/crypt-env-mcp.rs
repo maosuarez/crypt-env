@@ -196,12 +196,15 @@ fn tool_definitions() -> serde_json::Value {
     serde_json::json!([
         {
             "name": "crypt_env_list_items",
-            "description": "List available secrets by name (no values). Use this first to discover which API keys and credentials are stored — so you know what tools and services you can configure before writing a .env.example.",
+            "description": "List available secrets by name (no values), scoped to a single project+environment. Use this first to discover which API keys and credentials are linked into that environment — so you know what tools and services you can configure before writing a .env.example. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "type": { "type": "string", "description": "Filter by type: secret, credential, link, command, note" },
-                    "category": { "type": "string", "description": "Filter by category name" }
+                    "category": { "type": "string", "description": "Filter by category name" },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 }
             }
         },
@@ -218,40 +221,49 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_search_items",
-            "description": "Search items by name (no secret values exposed). Returns matching items metadata.",
+            "description": "Search items by name within a project+environment scope (no secret values exposed). Returns matching items metadata. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Search term to match against item names" }
+                    "query": { "type": "string", "description": "Search term to match against item names" },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 },
                 "required": ["query"]
             }
         },
         {
             "name": "crypt_env_generate_env",
-            "description": "Writes a .env file with the real values of the specified secrets. Returns the file path — values never appear in the response.",
+            "description": "Writes a .env file with the real values of the specified secrets, looked up within a project+environment scope. Returns the file path — values never appear in the response. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "keys": { "type": "array", "items": { "type": "string" }, "description": "Names of the secrets to include" }
+                    "keys": { "type": "array", "items": { "type": "string" }, "description": "Names of the secrets to include" },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 },
                 "required": ["keys"]
             }
         },
         {
             "name": "crypt_env_inject_env",
-            "description": "Injects a secret as an environment variable into the MCP process. Does not return the value.",
+            "description": "Injects a secret as an environment variable into the MCP process, looked up within a project+environment scope. Does not return the value. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "key": { "type": "string", "description": "Secret name" }
+                    "key": { "type": "string", "description": "Secret name" },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 },
                 "required": ["key"]
             }
         },
         {
             "name": "crypt_env_add_item",
-            "description": "Adds a new item to the vault.",
+            "description": "Adds a new item to the vault, owned by the given project and linked into the given environment. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -261,7 +273,11 @@ fn tool_definitions() -> serde_json::Value {
                     "category": { "type": "string" },
                     "notes": { "type": "string" },
                     "url": { "type": "string" },
-                    "username": { "type": "string" }
+                    "username": { "type": "string" },
+                    "key": { "type": "string", "description": "Environment variable key this item is linked under. Defaults to 'name' if omitted." },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 },
                 "required": ["type", "name"]
             }
@@ -317,14 +333,18 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_fill_env",
-            "description": "Fills a .env.example template with real secret values and writes the result directly to output_path on disk. Secret values never appear in the response — use crypt_env_list_items first to discover available keys, then write a .env.example, then call this to produce the final .env the service will read.",
+            "description": "Fills a .env.example template with real secret values from a project+environment scope, matching keys against that environment's linked variables. Secret values never appear in the response — use crypt_env_list_items first to discover available keys, then write a .env.example, then call this to produce the final .env the service will read. Requires scope: 'environment_id', or both 'project' and 'environment'. Write destination: 'output_path' writes exactly there; 'output_dir' (no output_path) writes to '{output_dir}/.env.<environment-name>'; neither returns the filled content inline.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "template": { "type": "string", "description": "Content of the .env.example (lines like KEY= or KEY=description)" },
-                    "output_path": { "type": "string", "description": "Absolute path where the filled .env should be written, e.g. /home/user/my-project/.env" }
+                    "output_path": { "type": "string", "description": "Absolute path where the filled .env should be written, e.g. /home/user/my-project/.env" },
+                    "output_dir": { "type": "string", "description": "Directory to write the filled .env into, using the '.env.<environment-name>' naming convention. Ignored if output_path is given." },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 },
-                "required": ["template", "output_path"]
+                "required": ["template"]
             }
         },
         {
@@ -334,12 +354,19 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_list_commands",
-            "description": "Lists saved commands with name, description, and required placeholders.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "description": "Lists saved commands linked into a project+environment, with name, description, and required placeholders. Requires scope: 'environment_id', or both 'project' and 'environment'.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
+                }
+            }
         },
         {
             "name": "crypt_env_run_command",
-            "description": "Returns a command string with {{VAR}} placeholders resolved. Does not execute it.",
+            "description": "Returns a command string with {{VAR}} placeholders resolved. Does not execute it. The command is looked up within a project+environment scope. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -348,33 +375,42 @@ fn tool_definitions() -> serde_json::Value {
                         "type": "object",
                         "description": "Map of VAR → value to resolve placeholders",
                         "additionalProperties": { "type": "string" }
-                    }
+                    },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 },
                 "required": ["name"]
             }
         },
         {
             "name": "crypt_env_share_listen",
-            "description": "Start a share session as sender (LAN bridge). Registers mDNS and waits for a peer to connect using the returned pairing code.",
+            "description": "Start a share session as sender (LAN bridge). Registers mDNS and waits for a peer to connect using the returned pairing code. Shared item ids must already be linked into the given project+environment. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "items": {
                         "type": "array",
                         "items": { "type": "integer" },
-                        "description": "IDs of vault items to share"
-                    }
+                        "description": "IDs of vault items to share (must be linked into the scoped environment)"
+                    },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 },
                 "required": ["items"]
             }
         },
         {
             "name": "crypt_env_share_connect",
-            "description": "Connect to a sender as receiver using the pairing code. Returns a fingerprint that both sides must verify before data flows.",
+            "description": "Connect to a sender as receiver using the pairing code. Returns a fingerprint that both sides must verify before data flows. Received items are owned by and linked into the given project+environment. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "pairing_code": { "type": "string", "description": "6-digit pairing code from the sender" }
+                    "pairing_code": { "type": "string", "description": "6-digit pairing code from the sender" },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 },
                 "required": ["pairing_code"]
             }
@@ -418,12 +454,15 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_share_import",
-            "description": "Import items from an encrypted .vault package file into the local vault.",
+            "description": "Import items from an encrypted .vault package file into the local vault. Imported items are owned by and linked into the given project+environment. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Absolute path to the .vault package file" },
-                    "passphrase": { "type": "string", "description": "12-character passphrase provided by the sender" }
+                    "passphrase": { "type": "string", "description": "12-character passphrase provided by the sender" },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 },
                 "required": ["path", "passphrase"]
             }
@@ -478,13 +517,29 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_inject_environment",
-            "description": "Inject an environment's vars into its configured .env path(s). Identify by environment id, or by 'project' + 'environment' names.",
+            "description": "Inject an environment's vars into its configured .env path(s). Identify by environment id, or by 'project' + 'environment' names. If the environment has no configured paths, provide 'output_path' or 'output_dir' to write there instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "id": { "type": "integer", "description": "Environment ID" },
                     "project": { "type": "string", "description": "Project name (case-insensitive, used with 'environment' if id not given)" },
-                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive, e.g. production, local, test)" }
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive, e.g. production, local, test)" },
+                    "output_path": { "type": "string", "description": "Absolute path to write the .env to, in addition to the environment's configured paths." },
+                    "output_dir": { "type": "string", "description": "Directory to write '.env.<environment-name>' into. Used as fallback when the environment has no configured paths and no output_path is given." }
+                }
+            }
+        },
+        {
+            "name": "crypt_env_generate_example_env",
+            "description": "Generates a safe-to-commit '.env.example'-style placeholder for an environment: every linked variable key with an empty value (KEY=). Never reads or returns secret values. Identify by environment id, or by 'project' + 'environment' names.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Environment ID" },
+                    "project": { "type": "string", "description": "Project name (case-insensitive, used with 'environment' if id not given)" },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive, e.g. production, local, test)" },
+                    "output_path": { "type": "string", "description": "Absolute path to write the placeholder .env.example to. If omitted, content is returned inline (still placeholders only, never secrets)." },
+                    "output_dir": { "type": "string", "description": "Directory to write '.env.example.<environment-name>' into. Ignored if output_path is given." }
                 }
             }
         },
@@ -505,12 +560,15 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_relay_receive",
-            "description": "Receive vault items shared via internet relay using a code and passphrase from the sender.",
+            "description": "Receive vault items shared via internet relay using a code and passphrase from the sender. Imported items are owned by and linked into the given project+environment. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "code": { "type": "string", "description": "Relay code provided by the sender (e.g. X7K2-M9P4)" },
-                    "passphrase": { "type": "string", "description": "Passphrase provided by the sender" }
+                    "passphrase": { "type": "string", "description": "Passphrase provided by the sender" },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 },
                 "required": ["code", "passphrase"]
             }
@@ -609,26 +667,29 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_inject_env_by_name",
-            "description": "Inject environment variables for a project directory and environment name. Matches a real environment by its name field (and, when ambiguous, by its configured path living under project_path) or falls back to item naming conventions (ENV_KEY prefix or category name).",
+            "description": "Inject environment variables for a project directory and environment name. Matches a real environment by its name field (and, when ambiguous, by its configured path living under project_path). NOTE: the previous item-naming-convention fallback (matching items by ENV_KEY prefix or category when no environment matched) has been removed — GET /items and POST /fill now require an explicit project+environment scope that this fallback cannot supply. If no environment matches, this tool now returns an error with next steps instead of guessing.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project_path": { "type": "string", "description": "Absolute path to the project directory" },
                     "environment": { "type": "string", "description": "Environment name, e.g. production, local, test, or any custom name" },
-                    "output_path": { "type": "string", "description": "Absolute path for the output .env file. Defaults to {project_path}/.env (used only for the item-naming-convention fallback)" }
+                    "output_path": { "type": "string", "description": "Unused. Kept for backward compatibility with existing callers." }
                 },
                 "required": ["project_path", "environment"]
             }
         },
         {
             "name": "crypt_env_import_env_file",
-            "description": "Reads a .env file from disk and imports each KEY=value pair as a secret item in the vault. Secret values are read directly by the MCP process — they never appear in this response. Returns only the list of key names and import counts.",
+            "description": "Reads a .env file from disk and imports each KEY=value pair as a secret item in the vault, owned by the given project and linked into the given environment. Secret values are read directly by the MCP process — they never appear in this response. Returns only the list of key names and import counts. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Absolute path to the .env file to import, e.g. C:\\projects\\myapp\\.env" },
                     "category": { "type": "string", "description": "Optional category name to assign to all imported items" },
-                    "overwrite": { "type": "boolean", "description": "If true, update existing vault items that have the same name. Default: false (skip duplicates)." }
+                    "overwrite": { "type": "boolean", "description": "If true, update existing vault items that have the same name. Default: false (skip duplicates)." },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
                 },
                 "required": ["path"]
             }
@@ -728,6 +789,28 @@ fn urlencod(s: &str) -> String {
     out
 }
 
+/// Appends project+environment scope query params to a URL being built, in
+/// the same two shapes the REST API's `EnvScopeQuery` accepts: either
+/// `environment_id` alone, or `project` + `environment` name pair (both
+/// case-insensitive server-side). `environment_id` wins if both are given.
+/// No-op if neither shape is present in `args` — the API will then reply
+/// with its own 422 VALIDATION_ERROR, which callers already surface.
+fn append_scope_params(url: &mut String, sep: &mut char, args: &serde_json::Value) {
+    if let Some(id) = args.get("environment_id").and_then(|v| v.as_i64()) {
+        url.push_str(&format!("{}environment_id={}", sep, id));
+        *sep = '&';
+        return;
+    }
+    if let Some(p) = args.get("project").and_then(|v| v.as_str()) {
+        url.push_str(&format!("{}project={}", sep, urlencod(p)));
+        *sep = '&';
+    }
+    if let Some(e) = args.get("environment").and_then(|v| v.as_str()) {
+        url.push_str(&format!("{}environment={}", sep, urlencod(e)));
+        *sep = '&';
+    }
+}
+
 /// Valida que el nombre de variable de entorno sea seguro: ^[A-Z][A-Z0-9_]*$
 /// y bloquea variables críticas del sistema.
 fn is_safe_env_key(key: &str) -> bool {
@@ -780,7 +863,9 @@ fn tool_list_items(args: &serde_json::Value, token: &str) -> serde_json::Value {
     }
     if let Some(cat) = args.get("category").and_then(|v| v.as_str()) {
         url.push_str(&format!("{}category={}", sep, cat));
+        sep = '&';
     }
+    append_scope_params(&mut url, &mut sep, args);
 
     let resp = match vault_get(&url, token) {
         Ok(r) => r,
@@ -789,6 +874,10 @@ fn tool_list_items(args: &serde_json::Value, token: &str) -> serde_json::Value {
 
     if resp.status().as_u16() == 403 {
         return tool_err("vault_locked: unlock the vault first");
+    }
+    if resp.status().as_u16() == 422 {
+        let text = resp.text().unwrap_or_default();
+        return tool_err(format!("scope required: pass 'environment_id', or both 'project' and 'environment' ({text})"));
     }
 
     let text = match resp.text() {
@@ -808,7 +897,10 @@ fn tool_search_items(args: &serde_json::Value, token: &str) -> serde_json::Value
         None => return tool_err("required parameter: 'query'"),
     };
 
-    let url = format!("/items?search={}", urlencod(&query));
+    let mut url = format!("/items?search={}", urlencod(&query));
+    let mut sep = '&';
+    append_scope_params(&mut url, &mut sep, args);
+
     let resp = match vault_get(&url, token) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
@@ -816,6 +908,10 @@ fn tool_search_items(args: &serde_json::Value, token: &str) -> serde_json::Value
 
     if resp.status().as_u16() == 403 {
         return tool_err("vault_locked: unlock the vault first");
+    }
+    if resp.status().as_u16() == 422 {
+        let text = resp.text().unwrap_or_default();
+        return tool_err(format!("scope required: pass 'environment_id', or both 'project' and 'environment' ({text})"));
     }
 
     let text = match resp.text() {
@@ -880,7 +976,9 @@ fn tool_generate_env(args: &serde_json::Value, token: &str) -> serde_json::Value
             continue;
         }
 
-        let search_url = format!("/items?search={}", urlencod(key));
+        let mut search_url = format!("/items?search={}", urlencod(key));
+        let mut sep = '&';
+        append_scope_params(&mut search_url, &mut sep, args);
         let items_resp = match vault_get(&search_url, token) {
             Ok(r) => r,
             Err(e) => return tool_err(e),
@@ -888,6 +986,10 @@ fn tool_generate_env(args: &serde_json::Value, token: &str) -> serde_json::Value
 
         if items_resp.status().as_u16() == 403 {
             return tool_err("vault_locked: unlock the vault first");
+        }
+        if items_resp.status().as_u16() == 422 {
+            let text = items_resp.text().unwrap_or_default();
+            return tool_err(format!("scope required: pass 'environment_id', or both 'project' and 'environment' ({text})"));
         }
 
         let items_text = match items_resp.text() {
@@ -989,7 +1091,9 @@ fn tool_inject_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
         ));
     }
 
-    let search_url = format!("/items?search={}", urlencod(&key));
+    let mut search_url = format!("/items?search={}", urlencod(&key));
+    let mut sep = '&';
+    append_scope_params(&mut search_url, &mut sep, args);
     let items_resp = match vault_get(&search_url, token) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
@@ -997,6 +1101,10 @@ fn tool_inject_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
 
     if items_resp.status().as_u16() == 403 {
         return tool_err("vault_locked: unlock the vault first");
+    }
+    if items_resp.status().as_u16() == 422 {
+        let text = items_resp.text().unwrap_or_default();
+        return tool_err(format!("scope required: pass 'environment_id', or both 'project' and 'environment' ({text})"));
     }
 
     let items_text = match items_resp.text() {
@@ -1102,8 +1210,15 @@ fn tool_add_item(args: &serde_json::Value, token: &str) -> serde_json::Value {
             body[field] = serde_json::json!(v);
         }
     }
+    if let Some(key) = args.get("key").and_then(|v| v.as_str()) {
+        body["key"] = serde_json::json!(key);
+    }
 
-    let resp = match vault_post("/items", token, &body) {
+    let mut url = "/items".to_string();
+    let mut sep = '?';
+    append_scope_params(&mut url, &mut sep, args);
+
+    let resp = match vault_post(&url, token, &body) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
     };
@@ -1116,6 +1231,9 @@ fn tool_add_item(args: &serde_json::Value, token: &str) -> serde_json::Value {
 
     if status == 403 {
         return tool_err("vault_locked: unlock the vault first");
+    }
+    if status == 422 {
+        return tool_err(format!("validation error (scope or field): {text}"));
     }
     if status >= 400 {
         return tool_err(format!("error creating item (HTTP {status}): {text}"));
@@ -1152,16 +1270,22 @@ fn tool_fill_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
         Some(t) => t.to_string(),
         None => return tool_err("required parameter: 'template'"),
     };
-    let output_path = match args.get("output_path").and_then(|v| v.as_str()) {
-        Some(p) => std::path::PathBuf::from(p),
-        None => return tool_err("required parameter: 'output_path'"),
-    };
+    let output_path = args.get("output_path").and_then(|v| v.as_str());
+    let output_dir = args.get("output_dir").and_then(|v| v.as_str());
 
-    let resp = match vault_post(
-        "/fill",
-        token,
-        &serde_json::json!({ "template": template, "output_path": output_path.to_string_lossy() }),
-    ) {
+    let mut url = "/fill".to_string();
+    let mut sep = '?';
+    append_scope_params(&mut url, &mut sep, args);
+
+    let mut body = serde_json::json!({ "template": template });
+    if let Some(p) = output_path {
+        body["output_path"] = serde_json::json!(p);
+    }
+    if let Some(d) = output_dir {
+        body["output_dir"] = serde_json::json!(d);
+    }
+
+    let resp = match vault_post(&url, token, &body) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
     };
@@ -1175,11 +1299,17 @@ fn tool_fill_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
     if status == 403 {
         return tool_err("vault_locked: unlock the vault first");
     }
+    if status == 422 {
+        return tool_err(format!("scope or validation error: {text}"));
+    }
     if status >= 400 {
         return tool_err(format!("fill failed (HTTP {status}): {text}"));
     }
 
-    // The API already wrote the file to output_path — just surface the stats.
+    // The API already wrote the file to output_path/output_dir (if given) —
+    // just surface the stats. If neither was given, `text` carries the
+    // filled content inline (still no secret leakage risk beyond what the
+    // caller already requested by omitting a write destination).
     match serde_json::from_str::<serde_json::Value>(&text) {
         Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
         Err(_) => tool_ok(text),
@@ -1225,14 +1355,22 @@ fn tool_doctor(_args: &serde_json::Value, _token: &str) -> serde_json::Value {
     tool_ok(serde_json::to_string_pretty(&health).unwrap_or(text))
 }
 
-fn tool_list_commands(token: &str) -> serde_json::Value {
-    let resp = match vault_get("/commands", token) {
+fn tool_list_commands(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let mut url = "/commands".to_string();
+    let mut sep = '?';
+    append_scope_params(&mut url, &mut sep, args);
+
+    let resp = match vault_get(&url, token) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
     };
 
     if resp.status().as_u16() == 403 {
         return tool_err("vault_locked: unlock the vault first");
+    }
+    if resp.status().as_u16() == 422 {
+        let text = resp.text().unwrap_or_default();
+        return tool_err(format!("scope required: pass 'environment_id', or both 'project' and 'environment' ({text})"));
     }
 
     let text = match resp.text() {
@@ -1252,13 +1390,21 @@ fn tool_run_command(args: &serde_json::Value, token: &str) -> serde_json::Value 
         None => return tool_err("required parameter: 'name'"),
     };
 
-    let list_resp = match vault_get("/commands", token) {
+    let mut list_url = "/commands".to_string();
+    let mut sep = '?';
+    append_scope_params(&mut list_url, &mut sep, args);
+
+    let list_resp = match vault_get(&list_url, token) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
     };
 
     if list_resp.status().as_u16() == 403 {
         return tool_err("vault_locked: unlock the vault first");
+    }
+    if list_resp.status().as_u16() == 422 {
+        let text = list_resp.text().unwrap_or_default();
+        return tool_err(format!("scope required: pass 'environment_id', or both 'project' and 'environment' ({text})"));
     }
 
     let list_text = match list_resp.text() {
@@ -1405,7 +1551,11 @@ fn tool_share_listen(args: &serde_json::Value, token: &str) -> serde_json::Value
         return tool_err("items list must not be empty");
     }
 
-    let resp = match vault_post("/share/listen", token, &serde_json::json!({ "items": items })) {
+    let mut url = "/share/listen".to_string();
+    let mut sep = '?';
+    append_scope_params(&mut url, &mut sep, args);
+
+    let resp = match vault_post(&url, token, &serde_json::json!({ "items": items })) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
     };
@@ -1417,6 +1567,7 @@ fn tool_share_listen(args: &serde_json::Value, token: &str) -> serde_json::Value
     };
 
     if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status == 422 { return tool_err(format!("scope or validation error: {text}")); }
     if status >= 400 { return tool_err(format!("share listen failed (HTTP {status}): {text}")); }
 
     match serde_json::from_str::<serde_json::Value>(&text) {
@@ -1431,7 +1582,11 @@ fn tool_share_connect(args: &serde_json::Value, token: &str) -> serde_json::Valu
         None => return tool_err("required parameter: 'pairing_code'"),
     };
 
-    let resp = match vault_post("/share/connect", token, &serde_json::json!({ "pairing_code": pairing_code })) {
+    let mut url = "/share/connect".to_string();
+    let mut sep = '?';
+    append_scope_params(&mut url, &mut sep, args);
+
+    let resp = match vault_post(&url, token, &serde_json::json!({ "pairing_code": pairing_code })) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
     };
@@ -1443,6 +1598,7 @@ fn tool_share_connect(args: &serde_json::Value, token: &str) -> serde_json::Valu
     };
 
     if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status == 422 { return tool_err(format!("scope or validation error: {text}")); }
     if status >= 400 { return tool_err(format!("share connect failed (HTTP {status}): {text}")); }
 
     match serde_json::from_str::<serde_json::Value>(&text) {
@@ -1561,8 +1717,12 @@ fn tool_share_import(args: &serde_json::Value, token: &str) -> serde_json::Value
         None => return tool_err("required parameter: 'passphrase'"),
     };
 
+    let mut url = "/share/import".to_string();
+    let mut sep = '?';
+    append_scope_params(&mut url, &mut sep, args);
+
     let body = serde_json::json!({ "path": path, "passphrase": passphrase });
-    let resp = match vault_post("/share/import", token, &body) {
+    let resp = match vault_post(&url, token, &body) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
     };
@@ -1574,6 +1734,7 @@ fn tool_share_import(args: &serde_json::Value, token: &str) -> serde_json::Value
     };
 
     if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status == 422 { return tool_err(format!("scope or validation error: {text}")); }
     if status >= 400 { return tool_err(format!("import failed (HTTP {status}): {text}")); }
 
     match serde_json::from_str::<serde_json::Value>(&text) {
@@ -1678,51 +1839,68 @@ fn tool_list_projects(token: &str) -> serde_json::Value {
     }
 }
 
-fn tool_inject_environment(args: &serde_json::Value, token: &str) -> serde_json::Value {
-    // Resolve environment ID: use id directly, or find by project+environment name
-    let environment_id: i64 = if let Some(id) = args.get("id").and_then(|v| v.as_i64()) {
-        id
-    } else if let (Some(project), Some(environment)) = (
+/// Resolves an environment id from tool args shaped like `crypt_env_inject_environment`'s
+/// schema: `id` directly, or `project` + `environment` names (case-insensitive, resolved
+/// via GET /projects). Shared by every tool that identifies an environment this way.
+fn resolve_environment_id(args: &serde_json::Value, token: &str) -> Result<i64, serde_json::Value> {
+    if let Some(id) = args.get("id").and_then(|v| v.as_i64()) {
+        return Ok(id);
+    }
+    let (project, environment) = match (
         args.get("project").and_then(|v| v.as_str()),
         args.get("environment").and_then(|v| v.as_str()),
     ) {
-        let projects = match fetch_projects(token) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let project_lower = project.to_lowercase();
-        let env_lower = environment.to_lowercase();
+        (Some(p), Some(e)) => (p, e),
+        _ => {
+            return Err(tool_err(
+                "required: 'id' (environment id), or 'project' + 'environment' (names)",
+            ))
+        }
+    };
 
-        let found = projects.as_array().and_then(|arr| {
-            arr.iter().find(|p| {
-                p.get("name")
+    let projects = fetch_projects(token)?;
+    let project_lower = project.to_lowercase();
+    let env_lower = environment.to_lowercase();
+
+    let found = projects.as_array().and_then(|arr| {
+        arr.iter().find(|p| {
+            p.get("name")
+                .and_then(|n| n.as_str())
+                .map(|n| n.to_lowercase() == project_lower)
+                .unwrap_or(false)
+        })
+    }).and_then(|p| {
+        p.get("environments").and_then(|v| v.as_array()).and_then(|envs| {
+            envs.iter().find(|e| {
+                e.get("name")
                     .and_then(|n| n.as_str())
-                    .map(|n| n.to_lowercase() == project_lower)
+                    .map(|n| n.to_lowercase() == env_lower)
                     .unwrap_or(false)
             })
-        }).and_then(|p| {
-            p.get("environments").and_then(|v| v.as_array()).and_then(|envs| {
-                envs.iter().find(|e| {
-                    e.get("name")
-                        .and_then(|n| n.as_str())
-                        .map(|n| n.to_lowercase() == env_lower)
-                        .unwrap_or(false)
-                })
-            })
-        }).and_then(|e| e.get("id").and_then(|v| v.as_i64()));
+        })
+    }).and_then(|e| e.get("id").and_then(|v| v.as_i64()));
 
-        match found {
-            Some(id) => id,
-            None => return tool_err(format!("environment '{environment}' not found in project '{project}'")),
-        }
-    } else {
-        return tool_err("required: 'id' (environment id), or 'project' + 'environment' (names)");
+    found.ok_or_else(|| tool_err(format!("environment '{environment}' not found in project '{project}'")))
+}
+
+fn tool_inject_environment(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let environment_id: i64 = match resolve_environment_id(args, token) {
+        Ok(id) => id,
+        Err(e) => return e,
     };
+
+    let mut inject_body = serde_json::json!({});
+    if let Some(p) = args.get("output_path").and_then(|v| v.as_str()) {
+        inject_body["output_path"] = serde_json::json!(p);
+    }
+    if let Some(d) = args.get("output_dir").and_then(|v| v.as_str()) {
+        inject_body["output_dir"] = serde_json::json!(d);
+    }
 
     let resp = match vault_post(
         &format!("/environments/{environment_id}/inject"),
         token,
-        &serde_json::json!({}),
+        &inject_body,
     ) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
@@ -1737,6 +1915,49 @@ fn tool_inject_environment(args: &serde_json::Value, token: &str) -> serde_json:
     if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
     if status == 404 { return tool_err(format!("environment {environment_id} not found")); }
     if status >= 400 { return tool_err(format!("inject failed (HTTP {status}): {text}")); }
+
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
+        Err(_) => tool_ok(text),
+    }
+}
+
+/// Generates a `.env.example`-shaped placeholder for an environment via
+/// POST /environments/:id/example — every linked key with an empty value.
+/// The API never reads or decrypts the referenced items' actual values for
+/// this endpoint, so there is no secret-leakage surface here by construction.
+fn tool_generate_example_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    let environment_id: i64 = match resolve_environment_id(args, token) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+
+    let mut body = serde_json::json!({});
+    if let Some(p) = args.get("output_path").and_then(|v| v.as_str()) {
+        body["output_path"] = serde_json::json!(p);
+    }
+    if let Some(d) = args.get("output_dir").and_then(|v| v.as_str()) {
+        body["output_dir"] = serde_json::json!(d);
+    }
+
+    let resp = match vault_post(
+        &format!("/environments/{environment_id}/example"),
+        token,
+        &body,
+    ) {
+        Ok(r) => r,
+        Err(e) => return tool_err(e),
+    };
+
+    let status = resp.status().as_u16();
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(e) => return tool_err(format!("error reading response: {e}")),
+    };
+
+    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status == 404 { return tool_err(format!("environment {environment_id} not found")); }
+    if status >= 400 { return tool_err(format!("example generation failed (HTTP {status}): {text}")); }
 
     match serde_json::from_str::<serde_json::Value>(&text) {
         Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
@@ -1789,8 +2010,12 @@ fn tool_relay_receive(args: &serde_json::Value, token: &str) -> serde_json::Valu
         None => return tool_err("required parameter: 'passphrase'"),
     };
 
+    let mut url = "/relay/receive".to_string();
+    let mut sep = '?';
+    append_scope_params(&mut url, &mut sep, args);
+
     let body = serde_json::json!({ "code": code, "passphrase": passphrase });
-    let resp = match vault_post("/relay/receive", token, &body) {
+    let resp = match vault_post(&url, token, &body) {
         Ok(r) => r,
         Err(e) => return tool_err(e),
     };
@@ -1802,6 +2027,7 @@ fn tool_relay_receive(args: &serde_json::Value, token: &str) -> serde_json::Valu
     };
 
     if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
+    if status == 422 { return tool_err(format!("scope or validation error: {text}")); }
     if status >= 400 { return tool_err(format!("relay receive failed (HTTP {status}): {text}")); }
 
     match serde_json::from_str::<serde_json::Value>(&text) {
@@ -2543,103 +2769,18 @@ fn tool_inject_env_by_name(args: &serde_json::Value, token: &str) -> serde_json:
         return tool_ok(serde_json::to_string_pretty(&inject_result).unwrap_or_default());
     }
 
-    // Step 3b: no environment found — fallback to item naming conventions
-    // Fetch all items and match by naming convention: {ENV}_KEY or category = environment
-    let items_resp = match vault_get("/items", token) {
-        Ok(r) => r,
-        Err(e) => return tool_err(e),
-    };
-
-    let items_status = items_resp.status().as_u16();
-    let items_text = match items_resp.text() {
-        Ok(t) => t,
-        Err(e) => return tool_err(format!("error reading items: {e}")),
-    };
-
-    if items_status == 403 { return tool_err("vault_locked: unlock the vault first"); }
-    if items_status >= 400 { return tool_err(format!("error listing items (HTTP {items_status}): {items_text}")); }
-
-    let items: serde_json::Value = match serde_json::from_str(&items_text) {
-        Ok(v) => v,
-        Err(_) => return tool_err("error parsing item list"),
-    };
-
-    // Collect items matching env prefix (ENV_KEY) or env category
-    let prefix = format!("{}_", environment.to_uppercase());
-    let matched_items: Vec<(String, i64)> = items.as_array()
-        .map(|arr| {
-            arr.iter().filter_map(|item| {
-                let item_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let item_id = item.get("id").and_then(|v| v.as_i64())?;
-                // Match by ENV_KEY prefix
-                let by_prefix = item_name.to_uppercase().starts_with(&prefix);
-                // Match by category name
-                let by_category = item.get("categories")
-                    .and_then(|v| v.as_array())
-                    .map(|cats| cats.iter().any(|c| {
-                        c.as_str()
-                            .or_else(|| c.get("name").and_then(|n| n.as_str()))
-                            .map(|s| s.to_lowercase() == environment)
-                            .unwrap_or(false)
-                    }))
-                    .unwrap_or(false);
-                if by_prefix || by_category {
-                    Some((item_name.to_string(), item_id))
-                } else {
-                    None
-                }
-            }).collect()
-        })
-        .unwrap_or_default();
-
-    if matched_items.is_empty() {
-        return tool_ok(serde_json::to_string_pretty(&serde_json::json!({
-            "method": "none",
-            "environment": environment,
-            "project_path": project_path,
-            "note": "No workspace or items matched the given environment. Create a workspace or name items with ENV_KEY prefix."
-        })).unwrap_or_default());
-    }
-
-    // Build a template from matched item names and call /fill
-    let template_lines: Vec<String> = matched_items.iter()
-        .map(|(name, _)| {
-            // Strip env prefix if present for cleaner .env keys
-            if name.to_uppercase().starts_with(&prefix) {
-                format!("{}=", &name[prefix.len()..])
-            } else {
-                format!("{name}=")
-            }
-        })
-        .collect();
-    let template = template_lines.join("\n");
-
-    let fill_resp = match vault_post(
-        "/fill",
-        token,
-        &serde_json::json!({ "template": template, "output_path": output_path }),
-    ) {
-        Ok(r) => r,
-        Err(e) => return tool_err(e),
-    };
-
-    let fill_status = fill_resp.status().as_u16();
-    let fill_text = match fill_resp.text() {
-        Ok(t) => t,
-        Err(e) => return tool_err(format!("error reading fill response: {e}")),
-    };
-
-    if fill_status == 403 { return tool_err("vault_locked: unlock the vault first"); }
-    if fill_status >= 400 { return tool_err(format!("fill failed (HTTP {fill_status}): {fill_text}")); }
-
-    let mut fill_result: serde_json::Value = serde_json::from_str(&fill_text)
-        .unwrap_or(serde_json::json!({}));
-    fill_result["method"] = serde_json::json!("item_naming_convention");
-    fill_result["environment"] = serde_json::json!(environment);
-    fill_result["output_path"] = serde_json::json!(output_path);
-    fill_result["matched_items"] = serde_json::json!(matched_items.len());
-
-    tool_ok(serde_json::to_string_pretty(&fill_result).unwrap_or_default())
+    // Step 3b (formerly the item-naming-convention fallback): no environment
+    // matched by name under project_path. This fallback used to scan the
+    // entire vault with an unscoped GET /items and hand-build a /fill
+    // template — both endpoints now hard-require a project+environment
+    // scope (see docs/reference.md MCP notes), and there is no such scope
+    // to supply here by design (that's the whole reason this branch exists).
+    // Rather than send a request that is now guaranteed to 422, fail fast
+    // with actionable next steps.
+    let _ = output_path; // kept for signature/doc parity; no longer used on this path
+    tool_err(format!(
+        "no environment named '{environment}' found under project_path '{project_path}', and the item-naming-convention fallback is no longer available: GET /items and POST /fill now require an explicit project+environment scope, which this fallback cannot supply. Use crypt_env_list_projects or crypt_env_list_environments_by_name to find the right project+environment, then call crypt_env_inject_environment directly, or create an environment named '{environment}' in this project."
+    ))
 }
 
 // ─── Import .env file tool implementation ─────────────────────────────────────
@@ -2726,7 +2867,9 @@ fn tool_import_env_file(args: &serde_json::Value, token: &str) -> serde_json::Va
 
     for (key, value) in &pairs {
         // Search for existing item by key name
-        let search_url = format!("/items?search={}", urlencod(key));
+        let mut search_url = format!("/items?search={}", urlencod(key));
+        let mut search_sep = '&';
+        append_scope_params(&mut search_url, &mut search_sep, args);
         let search_resp = match vault_get(&search_url, token) {
             Ok(r) => r,
             Err(e) => {
@@ -2737,6 +2880,10 @@ fn tool_import_env_file(args: &serde_json::Value, token: &str) -> serde_json::Va
 
         if search_resp.status().as_u16() == 403 {
             return tool_err("vault_locked: unlock the vault first");
+        }
+        if search_resp.status().as_u16() == 422 {
+            let text = search_resp.text().unwrap_or_default();
+            return tool_err(format!("scope required: pass 'environment_id', or both 'project' and 'environment' ({text})"));
         }
 
         let search_text = match search_resp.text() {
@@ -2798,9 +2945,12 @@ fn tool_import_env_file(args: &serde_json::Value, token: &str) -> serde_json::Va
             updated += 1;
             keys.push(key.clone());
         } else {
-            // Create new item
+            // Create new item, linked into the scoped environment.
             let body = build_item_body(0, key, value, &category, &now_ts);
-            let resp = match vault_post("/items", token, &body) {
+            let mut create_url = "/items".to_string();
+            let mut create_sep = '?';
+            append_scope_params(&mut create_url, &mut create_sep, args);
+            let resp = match vault_post(&create_url, token, &body) {
                 Ok(r) => r,
                 Err(e) => {
                     errors.push(format!("{key}: {e}"));
@@ -2810,6 +2960,10 @@ fn tool_import_env_file(args: &serde_json::Value, token: &str) -> serde_json::Va
             let status = resp.status().as_u16();
             if status == 403 {
                 return tool_err("vault_locked: unlock the vault first");
+            }
+            if status == 422 {
+                let text = resp.text().unwrap_or_default();
+                return tool_err(format!("scope required: pass 'environment_id', or both 'project' and 'environment' ({text})"));
             }
             if status >= 400 {
                 let text = resp.text().unwrap_or_default();
@@ -2878,7 +3032,7 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_
         "crypt_env_delete_item" => tool_delete_item(args, token),
         "crypt_env_update_settings" => tool_update_settings(args, token),
         "crypt_env_doctor" => tool_doctor(args, token),
-        "crypt_env_list_commands" => tool_list_commands(token),
+        "crypt_env_list_commands" => tool_list_commands(args, token),
         "crypt_env_run_command" => tool_run_command(args, token),
         "crypt_env_share_listen" => tool_share_listen(args, token),
         "crypt_env_share_connect" => tool_share_connect(args, token),
@@ -2893,6 +3047,7 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_
         "crypt_env_delete_category" => tool_delete_category(args, token),
         "crypt_env_list_projects" => tool_list_projects(token),
         "crypt_env_inject_environment" => tool_inject_environment(args, token),
+        "crypt_env_generate_example_env" => tool_generate_example_env(args, token),
         "crypt_env_relay_send" => tool_relay_send(args, token),
         "crypt_env_relay_receive" => tool_relay_receive(args, token),
         "crypt_env_share_workspace_send" => tool_share_workspace_send(args, token),

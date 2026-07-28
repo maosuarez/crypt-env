@@ -2,6 +2,7 @@ use clap::Args;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use crate::client::{CliError, find_and_reveal};
+use crate::commands::scope;
 
 #[derive(Args)]
 pub struct SyncArgs {
@@ -16,9 +17,18 @@ pub struct SyncArgs {
     /// Only show what would be added, without writing.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Project name (defaults to crypt-env.json or the cwd folder name)
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Environment name (defaults to crypt-env.json or the project's default environment)
+    #[arg(long = "environment")]
+    pub environment: Option<String>,
 }
 
 pub fn run(args: SyncArgs) -> Result<(), CliError> {
+    let resolved_scope = scope::resolve(args.project.as_deref(), args.environment.as_deref(), false)?;
     let example_path = resolve_example_path(args.example.as_deref())?;
 
     let env_path = match args.env {
@@ -60,7 +70,7 @@ pub fn run(args: SyncArgs) -> Result<(), CliError> {
                 continue;
             }
 
-            let new_line = match find_and_reveal(key) {
+            let new_line = match find_and_reveal(key, &resolved_scope.to_query_string()) {
                 Ok((_, value)) => {
                     from_vault += 1;
                     format!("{}={}", key, value)

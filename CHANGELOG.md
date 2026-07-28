@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.1] - 2026-07-28
+
+### Fixed
+
+- **CRITICAL: Windows installer could silently wipe the user's entire PATH environment variable.** The NSIS installer's PATH-safety guard (added in a prior fix) inferred whether the registry value had been truncated by inspecting the *length of the value ReadRegStr returned* — but `ReadRegStr` itself silently truncates any value longer than NSIS's internal string cap with no error signal. A sufficiently long PATH could come back already truncated to something *under* the guard's threshold, pass the check as "safe", and then get written back verbatim — permanently destroying everything past the truncation point. Fixed by querying the registry directly via `RegQueryValueExW` (Win32 API, through NSIS's `System::Call`) to measure the *true* on-disk size of `HKCU\Environment\Path` before any bounded NSIS string variable is involved, so the decision to proceed is based on ground truth instead of a value that may already be mangled. Applies to both the install-time `AddToUserPath` and uninstall-time `RemoveFromUserPath` hooks (`src-tauri/nsis/installer_hooks.nsi`). Verified by compiling the installer script standalone with `makensis`.
+- Removed `src-tauri/nsis/path_setup.nsh`, an unreferenced duplicate of the PATH-management logic that was not wired into the build (`tauri.conf.json` only points at `installer_hooks.nsi`) — its divergence from the real file was itself a hazard.
+
+### Known Limitations (Carried Forward)
+
+- This fix is Windows-only; the Linux (`deb`) and macOS (`dmg`) targets do not modify `PATH` programmatically at all (see `docs/building.md`'s manual install instructions), so they were never exposed to this bug class.
+
+---
+
 ## [1.0.0] - 2026-07-28
 
 ### Changed

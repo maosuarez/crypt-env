@@ -1,109 +1,169 @@
 use clap::Args;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use crate::client::{CliError, find_and_reveal};
+
+use crate::client::{self, CliError, API_BASE};
+use crate::commands::scope::{self, ResolvedScope};
 
 #[derive(Args)]
 pub struct FillArgs {
-    /// Path to .env or .env.example. Defaults to current directory.
+    /// Path to .env or .env.example. Defaults to searching the current
+    /// directory, then falling back to generating a fresh .env from the
+    /// resolved environment's vars (the inverse of `add`).
     pub path: Option<PathBuf>,
+
+    /// Project name (defaults to crypt-env.json or the cwd folder name)
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Environment name (defaults to crypt-env.json or the project's default environment)
+    #[arg(long = "env")]
+    pub env: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FillResponse {
+    #[serde(default)]
+    path: Option<String>,
+    injected: usize,
+    not_found: usize,
+    #[serde(default)]
+    missing_keys: Vec<String>,
 }
 
 pub fn run(args: FillArgs) -> Result<(), CliError> {
-    let source_path = resolve_env_path(args.path.as_deref())?;
-    let is_example = source_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n.ends_with(".example"))
-        .unwrap_or(false);
+    let resolved_scope = scope::resolve(args.project.as_deref(), args.env.as_deref(), false)?;
 
-    let output_path = if is_example {
-        // .env.example → create sibling .env
-        source_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(".env")
-    } else {
-        source_path.clone()
-    };
+    let (template, output_path) = resolve_template_and_output(args.path.as_deref(), &resolved_scope)?;
 
-    let content = std::fs::read_to_string(&source_path)?;
-    let lines: Vec<&str> = content.lines().collect();
-    let mut new_lines: Vec<String> = Vec::with_capacity(lines.len());
-    let mut injected = 0usize;
-    let mut not_found = 0usize;
+    let body = serde_json::json!({
+        "template": template,
+        "output_path": output_path.to_string_lossy(),
+    });
 
-    for line in &lines {
-        let trimmed = line.trim();
+    let url = resolved_scope.append_query(&format!("{API_BASE}/fill"));
+    let resp = client::authenticated_post(&url, &body)?;
 
-        // Preserve comments and blank lines unchanged
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            new_lines.push(line.to_string());
-            continue;
-        }
-
-        if let Some(eq_pos) = trimmed.find('=') {
-            let key = &trimmed[..eq_pos];
-
-            // Only process valid identifiers
-            if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                match find_and_reveal(key) {
-                    Ok((_, value)) => {
-                        new_lines.push(format!("{}={}", key, value));
-                        injected += 1;
-                        continue;
-                    }
-                    Err(CliError::NotFound(_)) => {
-                        eprintln!("warning: '{}' not found in vault", key);
-                        not_found += 1;
-                        if is_example {
-                            new_lines.push(format!("{}=", key));
-                        } else {
-                            new_lines.push(line.to_string());
-                        }
-                        continue;
-                    }
-                    Err(CliError::VaultLocked) => return Err(CliError::VaultLocked),
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-
-        new_lines.push(line.to_string());
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        return Err(CliError::VaultLocked);
+    }
+    if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+        let text = resp.text().unwrap_or_default();
+        return Err(CliError::Api(format!("scope error: {text}")));
+    }
+    if !resp.status().is_success() {
+        let text = resp.text().unwrap_or_default();
+        return Err(CliError::Api(format!("fill failed: {text}")));
     }
 
-    let output = new_lines.join("\n");
-    let output = if content.ends_with('\n') {
-        format!("{}\n", output)
-    } else {
-        output
-    };
+    let result: FillResponse = resp.json().map_err(|e| CliError::Api(e.to_string()))?;
 
-    std::fs::write(&output_path, output)?;
+    for key in &result.missing_keys {
+        eprintln!("warning: '{}' not found in {} / {}", key, resolved_scope.project, resolved_scope.environment);
+    }
+
+    let path_display = result.path.unwrap_or_else(|| output_path.display().to_string());
     eprintln!(
         "OK: {} ({} secrets injected, {} not found)",
-        output_path.display(),
-        injected,
-        not_found
+        path_display, result.injected, result.not_found
     );
-    eprintln!(
-        "Warning: '{}' contains secrets in plaintext. Keep permissions restrictive.",
-        output_path.display()
-    );
+    eprintln!("Warning: '{}' contains secrets in plaintext. Keep permissions restrictive.", path_display);
+
     Ok(())
 }
 
-fn resolve_env_path(arg: Option<&Path>) -> Result<PathBuf, CliError> {
+/// Determines the template content and output path, mirroring `add`'s
+/// defaulting in reverse:
+///   - explicit `path` arg: fill that file (`.env.example` → sibling `.env`,
+///     otherwise fill in place).
+///   - no arg: look for `.env.example` then `.env` in the current directory.
+///   - neither exists: generate a fresh `.env` template from the resolved
+///     environment's own variable keys (the "inverse of add" default).
+fn resolve_template_and_output(
+    arg: Option<&Path>,
+    resolved_scope: &ResolvedScope,
+) -> Result<(String, PathBuf), CliError> {
     if let Some(p) = arg {
-        return Ok(p.to_path_buf());
+        let is_example = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with(".example"))
+            .unwrap_or(false);
+        let content = std::fs::read_to_string(p)?;
+        let output = if is_example {
+            p.parent().unwrap_or(Path::new(".")).join(".env")
+        } else {
+            p.to_path_buf()
+        };
+        return Ok((content, output));
     }
+
     let cwd = std::env::current_dir()?;
-    for name in &[".env", ".env.example"] {
-        let candidate = cwd.join(name);
-        if candidate.exists() {
-            return Ok(candidate);
-        }
+    let example = cwd.join(".env.example");
+    if example.exists() {
+        let content = std::fs::read_to_string(&example)?;
+        return Ok((content, cwd.join(".env")));
     }
-    Err(CliError::NotFound(
-        ".env or .env.example in current directory".to_string(),
-    ))
+
+    let plain = cwd.join(".env");
+    if plain.exists() {
+        let content = std::fs::read_to_string(&plain)?;
+        return Ok((content, plain));
+    }
+
+    // Neither exists — generate a fresh .env template from the environment's
+    // own variable keys, then let the server fill real values into it.
+    let keys = environment_var_keys(resolved_scope)?;
+    let mut template = keys.into_iter().map(|k| format!("{k}=")).collect::<Vec<_>>().join("\n");
+    if !template.is_empty() {
+        template.push('\n');
+    }
+    Ok((template, cwd.join(".env")))
+}
+
+#[derive(Deserialize)]
+struct EnvVarLookup {
+    key: String,
+}
+
+#[derive(Deserialize)]
+struct EnvLookup {
+    name: String,
+    vars: Vec<EnvVarLookup>,
+}
+
+#[derive(Deserialize)]
+struct ProjectLookup {
+    name: String,
+    environments: Vec<EnvLookup>,
+}
+
+/// Reads the resolved environment's variable keys straight from `GET
+/// /projects` — used only to build the "nothing specified" default template.
+fn environment_var_keys(resolved_scope: &ResolvedScope) -> Result<Vec<String>, CliError> {
+    let resp = client::authenticated_get(&format!("{API_BASE}/projects"))?;
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        return Err(CliError::VaultLocked);
+    }
+    if !resp.status().is_success() {
+        return Err(CliError::Api(format!("list projects failed: HTTP {}", resp.status())));
+    }
+    let projects: Vec<ProjectLookup> = resp.json().map_err(|e| CliError::Api(e.to_string()))?;
+
+    let project_lower = resolved_scope.project.to_lowercase();
+    let env_lower = resolved_scope.environment.to_lowercase();
+
+    let project = projects
+        .into_iter()
+        .find(|p| p.name.to_lowercase() == project_lower)
+        .ok_or_else(|| CliError::NotFound(resolved_scope.project.clone()))?;
+    let environment = project
+        .environments
+        .into_iter()
+        .find(|e| e.name.to_lowercase() == env_lower)
+        .ok_or_else(|| CliError::NotFound(resolved_scope.environment.clone()))?;
+
+    let mut keys: Vec<String> = environment.vars.into_iter().map(|v| v.key).collect();
+    keys.sort();
+    Ok(keys)
 }

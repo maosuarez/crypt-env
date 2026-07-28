@@ -238,6 +238,12 @@ impl VaultDb {
                 FROM environment_vars ev
                 JOIN environments e ON e.id = ev.environment_id
                 JOIN items i ON i.id = ev.item_id",
+            // Case-insensitive uniqueness on project names. Prevents two
+            // concurrent CLI auto-creates (see scope::resolve) from ever
+            // landing two rows for the same folder-derived name — the
+            // second insert now fails with a UNIQUE constraint violation
+            // instead of silently creating a duplicate/orphaned project.
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name_nocase ON projects(name COLLATE NOCASE)",
         ];
         for stmt in &migrations {
             sqlx::query(stmt).execute(&self.pool).await.map_err(|e| format!("migration: {e}"))?;
@@ -1136,6 +1142,36 @@ impl VaultDb {
             .map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+
+    /// Links a single item into an environment under `key`, without touching
+    /// any other vars already set on that environment (unlike
+    /// `set_environment_vars`, which replaces the whole set). If `key` is
+    /// already used in this environment, it's repointed to `item_id`.
+    /// Returns the environment_vars row id.
+    pub async fn upsert_environment_var(
+        &self,
+        environment_id: i64,
+        key: &str,
+        item_id: i64,
+    ) -> Result<i64, String> {
+        sqlx::query(
+            "INSERT INTO environment_vars (environment_id, key, item_id, literal) VALUES (?1, ?2, ?3, NULL)
+             ON CONFLICT(environment_id, key) DO UPDATE SET item_id = excluded.item_id, literal = NULL",
+        )
+        .bind(environment_id)
+        .bind(key)
+        .bind(item_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        sqlx::query_scalar("SELECT id FROM environment_vars WHERE environment_id = ?1 AND key = ?2")
+            .bind(environment_id)
+            .bind(key)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     pub async fn wipe_and_reset(&mut self) -> Result<(), String> {

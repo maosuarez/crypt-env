@@ -1,5 +1,6 @@
 use clap::Args;
 use crate::client::{API_BASE, CliError, read_token};
+use crate::commands::scope;
 
 #[derive(Args)]
 pub struct DoctorArgs {}
@@ -32,7 +33,6 @@ pub fn run(_args: DoctorArgs) -> Result<(), CliError> {
                 .get("vault_locked")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            let item_count = json.get("item_count").and_then(|v| v.as_u64());
             let mcp_configured = json
                 .get("mcp_token_configured")
                 .and_then(|v| v.as_bool())
@@ -43,10 +43,10 @@ pub fn run(_args: DoctorArgs) -> Result<(), CliError> {
             if vault_locked {
                 println!("  [!!] Vault status       locked");
             } else {
-                match item_count {
-                    Some(n) => println!("  [OK] Vault status       unlocked  ({n} items)"),
-                    None => println!("  [OK] Vault status       unlocked"),
-                }
+                // /health no longer reports item_count (it leaked vault size
+                // to unauthenticated callers) — vault size is no longer
+                // available from doctor.
+                println!("  [OK] Vault status       unlocked");
             }
 
             if mcp_configured {
@@ -89,6 +89,47 @@ pub fn run(_args: DoctorArgs) -> Result<(), CliError> {
         }
     }
 
+    // crypt-env.json — validate it's well-formed if present anywhere in the
+    // search path (cwd upward), same discovery used by every scoped command.
+    match std::env::current_dir() {
+        Ok(cwd) => match find_project_config_path(&cwd) {
+            Some(path) => match scope::parse_project_config(&path) {
+                Ok(config) => {
+                    let env_display = config.environment.as_deref().unwrap_or("(project default)");
+                    println!(
+                        "  [OK] crypt-env.json     {}  (project: {}, environment: {})",
+                        path.display(),
+                        config.project,
+                        env_display
+                    );
+                }
+                Err(e) => {
+                    println!("  [!!] crypt-env.json     {}: {}", path.display(), e);
+                }
+            },
+            None => {
+                println!("  [--] crypt-env.json     none found  (using cwd folder name as project)");
+            }
+        },
+        Err(e) => {
+            println!("  [!!] crypt-env.json     cannot read current directory: {}", e);
+        }
+    }
+
     println!();
     Ok(())
+}
+
+/// Locates `crypt-env.json` without parsing it — used to report its path
+/// separately from parse/validation errors.
+fn find_project_config_path(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = Some(start.to_path_buf());
+    while let Some(d) = dir {
+        let candidate = d.join(scope::CONFIG_FILE_NAME);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        dir = d.parent().map(|p| p.to_path_buf());
+    }
+    None
 }

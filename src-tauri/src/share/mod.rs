@@ -5,6 +5,7 @@ pub mod protocol;
 pub mod relay;
 
 use rand::RngCore;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -132,8 +133,22 @@ pub struct ShareSession {
     pub received_items: Vec<PlainItem>,
     /// Names of items received (available after Done for the API response).
     pub received_names: Vec<String>,
+    /// Names of received items whose key collided with one already linked
+    /// in the target environment — the item itself was still imported
+    /// (owned by the project), just not linked over the existing var, so
+    /// nothing the receiver already had gets silently repointed. See
+    /// `import_plain_items_into_vault`.
+    pub skipped_keys: Vec<String>,
     /// Non-fatal informational note for the frontend, e.g. firewall warning.
     pub note: Option<String>,
+    /// Project + environment context this session is scoped to, when the
+    /// caller provided one (the HTTP API always does; the GUI's Tauri-command
+    /// LAN share flow currently does not). On the receiving side, when set,
+    /// imported items are owned by `project_id` and linked into
+    /// `environment_id`'s vars under their own name — see
+    /// `import_plain_items_into_vault`.
+    pub project_id: Option<i64>,
+    pub environment_id: Option<i64>,
 }
 
 /// Top-level share state — one optional active session at a time.
@@ -179,6 +194,8 @@ pub async fn start_listen_session(
     item_ids: Vec<i64>,
     vault_key: [u8; 32],
     db: Arc<Mutex<crate::vault::VaultState>>,
+    project_id: Option<i64>,
+    environment_id: Option<i64>,
 ) -> Result<String, ShareError> {
     let keypair = EphemeralKeypair::generate();
     let our_pub = *keypair.public.as_bytes();
@@ -198,7 +215,10 @@ pub async fn start_listen_session(
         fingerprint: None,
         received_items: Vec::new(),
         received_names: Vec::new(),
+        skipped_keys: Vec::new(),
         note: None,
+        project_id,
+        environment_id,
     };
 
     {
@@ -441,6 +461,8 @@ pub async fn connect_to_peer(
     pairing_code: String,
     vault_key: [u8; 32],
     db: Arc<Mutex<crate::vault::VaultState>>,
+    project_id: Option<i64>,
+    environment_id: Option<i64>,
 ) -> Result<String, ShareError> {
     let keypair = EphemeralKeypair::generate();
     let our_pub = *keypair.public.as_bytes();
@@ -459,7 +481,10 @@ pub async fn connect_to_peer(
         fingerprint: None,
         received_items: Vec::new(),
         received_names: Vec::new(),
+        skipped_keys: Vec::new(),
         note: None,
+        project_id,
+        environment_id,
     };
 
     {
@@ -507,6 +532,8 @@ pub async fn connect_to_peer(
             fingerprint.clone(),
             vault_key,
             db,
+            project_id,
+            environment_id,
         )
         .await;
         if let Err(e) = result {
@@ -527,6 +554,8 @@ async fn run_receive_background(
     fingerprint: String,
     vault_key: [u8; 32],
     db_state: Arc<Mutex<crate::vault::VaultState>>,
+    project_id: Option<i64>,
+    environment_id: Option<i64>,
 ) -> Result<(), ShareError> {
     use std::time::Duration;
 
@@ -572,9 +601,13 @@ async fn run_receive_background(
     let item_ids: Vec<i64> = Vec::new(); // receiver doesn't know IDs before import
 
     // Import items into vault and log — acquire the mutex once for both operations
-    let names = {
+    let link = match (project_id, environment_id) {
+        (Some(p), Some(e)) => Some((p, e)),
+        _ => None,
+    };
+    let outcome = {
         let vault_guard = db_state.lock().await;
-        let imported = import_plain_items_into_vault(&items, &vault_key, &vault_guard.db).await?;
+        let imported = import_plain_items_into_vault(&items, &vault_key, &vault_guard.db, link).await?;
         let _ = vault_guard
             .db
             .log_share("lan", "receiving", &item_ids, Some(&fingerprint))
@@ -585,7 +618,8 @@ async fn run_receive_background(
     {
         let mut guard = share_state.session.lock().await;
         if let Some(ref mut s) = *guard {
-            s.received_names = names.clone();
+            s.received_names = outcome.names.clone();
+            s.skipped_keys = outcome.skipped_keys.clone();
             s.state = ShareSessionState::Done;
             s.last_active = Instant::now();
         }
@@ -595,11 +629,36 @@ async fn run_receive_background(
     Ok(())
 }
 
-async fn import_plain_items_into_vault(
+/// Result of [`import_plain_items_into_vault`].
+pub struct ImportOutcome {
+    /// Names of every item actually imported into the vault (regardless of
+    /// whether it ended up linked into an environment).
+    pub names: Vec<String>,
+    /// Names of items that were imported but NOT linked into the target
+    /// environment, either because their key already had a different item
+    /// linked to it there (a peer must never silently repoint a link the
+    /// receiver already had — see Bug 3 in the security review) or because
+    /// the name is empty / contains characters (`=`, newlines) that would
+    /// corrupt a `KEY=value` .env line if it were ever written out.
+    pub skipped_keys: Vec<String>,
+}
+
+/// Imports decrypted items received via LAN share, internet relay, or
+/// `.vault` package import into the vault. When `link` is
+/// `Some((project_id, environment_id))` — whenever the caller resolved a
+/// project+environment scope for the request — each imported item is
+/// additionally granted ownership of `project_id`, and linked into
+/// `environment_id`'s vars under its own name UNLESS that name is unsafe or
+/// already linked to a different item in that environment (see
+/// `ImportOutcome::skipped_keys`); the item itself is still imported and
+/// owned either way, just not silently overwriting an existing link. `link`
+/// is `None` only when the caller has no project+environment context.
+pub(crate) async fn import_plain_items_into_vault(
     items: &[PlainItem],
     vault_key: &[u8; 32],
     db: &crate::db::VaultDb,
-) -> Result<Vec<String>, ShareError> {
+    link: Option<(i64, i64)>,
+) -> Result<ImportOutcome, ShareError> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let now_ts = SystemTime::now()
@@ -608,7 +667,22 @@ async fn import_plain_items_into_vault(
         .as_secs()
         .to_string();
 
+    // Keys already linked in the target environment, read once up front —
+    // a peer sending an item whose name collides with one of these must not
+    // silently repoint the receiver's existing link.
+    let existing_keys: HashSet<String> = if let Some((_, environment_id)) = link {
+        db.get_environment_vars(environment_id)
+            .await
+            .map_err(ShareError::Vault)?
+            .into_iter()
+            .map(|v| v.key)
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
     let mut names = Vec::new();
+    let mut skipped_keys = Vec::new();
 
     for plain in items {
         let vault_item = crate::vault::VaultItem {
@@ -635,14 +709,32 @@ async fn import_plain_items_into_vault(
         let encrypted = crate::crypto::encrypt(vault_key, &json)
             .map_err(|e| ShareError::Vault(e))?;
 
-        db.upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created, false)
+        let new_id = db
+            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created, false)
             .await
             .map_err(|e| ShareError::Vault(e))?;
+
+        if let Some((project_id, environment_id)) = link {
+            db.add_item_owner(new_id, project_id)
+                .await
+                .map_err(|e| ShareError::Vault(e))?;
+
+            let key = plain.name.trim();
+            let key_is_safe = !key.is_empty() && !key.contains('=') && !key.contains(['\n', '\r']);
+
+            if key_is_safe && !existing_keys.contains(key) {
+                db.upsert_environment_var(environment_id, key, new_id)
+                    .await
+                    .map_err(|e| ShareError::Vault(e))?;
+            } else {
+                skipped_keys.push(plain.name.clone());
+            }
+        }
 
         names.push(plain.name.clone());
     }
 
-    Ok(names)
+    Ok(ImportOutcome { names, skipped_keys })
 }
 
 /// Confirm (or reject) the fingerprint for the active session.
@@ -749,13 +841,17 @@ pub async fn export_package(
     Ok(passphrase)
 }
 
-/// Import an encrypted package file into the vault.
-/// Returns names of imported items.
+/// Import an encrypted package file into the vault. `link`, when
+/// `Some((project_id, environment_id))`, owns and links each imported item
+/// into that project/environment the same way LAN/relay receive do (see
+/// `import_plain_items_into_vault`) — the Tauri GUI import flow has no such
+/// scope and passes `None`.
 pub async fn import_package(
     path: &std::path::Path,
     passphrase: &str,
     vault_state: &Arc<Mutex<crate::vault::VaultState>>,
-) -> Result<Vec<String>, ShareError> {
+    link: Option<(i64, i64)>,
+) -> Result<ImportOutcome, ShareError> {
     let path_clone = path.to_path_buf();
     let pass_clone = passphrase.to_string();
 
@@ -777,10 +873,10 @@ pub async fn import_package(
     };
 
     let guard = vault_state.lock().await;
-    let names = import_plain_items_into_vault(&plain_items, &vault_key, &guard.db).await?;
+    let outcome = import_plain_items_into_vault(&plain_items, &vault_key, &guard.db, link).await?;
 
     // Log
     let _ = guard.db.log_share("package", "receiving", &[], None).await;
 
-    Ok(names)
+    Ok(outcome)
 }

@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 
 use crate::client::{authenticated_post, CliError, API_BASE};
+use crate::commands::scope;
 
 // ─── CLI argument structs ─────────────────────────────────────────────────────
 
@@ -26,6 +27,12 @@ pub enum RelayCmd {
         /// Passphrase provided by the sender
         #[arg(long)]
         passphrase: String,
+        /// Project to own the received items (defaults to crypt-env.json or the cwd folder name)
+        #[arg(long)]
+        project: Option<String>,
+        /// Environment to link the received items into (defaults to crypt-env.json or the project's default environment)
+        #[arg(long = "env")]
+        env: Option<String>,
     },
 }
 
@@ -34,7 +41,7 @@ pub enum RelayCmd {
 pub fn run(args: RelayArgs) -> Result<(), CliError> {
     match args.cmd {
         RelayCmd::Send { items } => run_send(items),
-        RelayCmd::Receive { code, passphrase } => run_receive(code, passphrase),
+        RelayCmd::Receive { code, passphrase, project, env } => run_receive(code, passphrase, project, env),
     }
 }
 
@@ -82,9 +89,12 @@ fn run_send(items_str: String) -> Result<(), CliError> {
 
 // ─── Receive ──────────────────────────────────────────────────────────────────
 
-fn run_receive(code: String, passphrase: String) -> Result<(), CliError> {
+fn run_receive(code: String, passphrase: String, project: Option<String>, env: Option<String>) -> Result<(), CliError> {
+    let resolved_scope = scope::resolve(project.as_deref(), env.as_deref(), false)?;
+
     let body = serde_json::json!({ "code": code, "passphrase": passphrase });
-    let resp = authenticated_post(&format!("{API_BASE}/relay/receive"), &body)?;
+    let url = resolved_scope.append_query(&format!("{API_BASE}/relay/receive"));
+    let resp = authenticated_post(&url, &body)?;
 
     if resp.status() == reqwest::StatusCode::FORBIDDEN {
         return Err(CliError::VaultLocked);
@@ -99,10 +109,17 @@ fn run_receive(code: String, passphrase: String) -> Result<(), CliError> {
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
+    let skipped_keys: Vec<String> = data["skipped_keys"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
 
-    println!("Imported {} item(s):", names.len());
+    println!("Imported {} item(s) into {} / {}:", names.len(), resolved_scope.project, resolved_scope.environment);
     for name in &names {
         println!("  + {name}");
+    }
+    for key in &skipped_keys {
+        eprintln!("warning: '{}' already linked in {} / {} — imported but not relinked", key, resolved_scope.project, resolved_scope.environment);
     }
 
     Ok(())

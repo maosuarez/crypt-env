@@ -68,6 +68,8 @@ pub async fn share_start_send(
         item_ids,
         vault_key,
         vault_state.inner().clone(),
+        None,
+        None,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -92,6 +94,8 @@ pub async fn share_start_receive(
         pairing_code,
         vault_key,
         vault_state.inner().clone(),
+        None,
+        None,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -189,11 +193,11 @@ pub async fn share_import_file(
     .map_err(|e| e.to_string())?
     .ok_or_else(|| "file open cancelled".to_string())?;
 
-    let names = share::import_package(&path, &passphrase, vault_state.inner())
+    let outcome = share::import_package(&path, &passphrase, vault_state.inner(), None)
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(ImportFileResponse { names })
+    Ok(ImportFileResponse { names: outcome.names })
 }
 
 // ─── Internet relay commands ──────────────────────────────────────────────────

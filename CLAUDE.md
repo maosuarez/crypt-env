@@ -71,33 +71,58 @@ cd src-tauri && cargo check
 ---
 
 ## UI Design
-The interface was previously designed with Claude. Refined industrial/utilitarian aesthetic, dark palette, technical typography. The 5 screens are:
-1. Lock screen (master password)
-2. Main vault (list + fuzzy search + filters by type and category)
-3. Add/Edit item (dynamic form by type)
-4. Category manager (CRUD of editable categories)
-5. Settings (hotkey, timeout, master password, biometric unlock, workspaces, internet sharing)
+Industrial/utilitarian aesthetic with dark palette and technical typography. Navigation is footer-based (text links over icon rail per user preference). The main screens are:
+1. **Lock Screen** — Master password entry + biometric unlock option
+2. **Projects & Environments** — Primary landing page (project list → project detail with environments → environment editor for variable linking)
+3. **Global Secrets** — Filtered view of reusable `isGlobal` items (footer link back to projects)
+4. **Add/Edit Item** — Dynamic form by item type (secret, credential, link, command, note)
+5. **Category Manager** — CRUD of editable categories
+6. **Settings** — Master password, timeout, biometric, projects/environments management, internet relay config, backup/restore, import
 
-Consult the generated design before implementing any UI component.
+Footer navigation links users between Projects, Global Secrets, Categories, and Settings. Decorationless window with custom React titlebar and window controls.
 
 ---
 
 ## Recent Features (Session 4+)
 
-### 1. Workspaces
-New system to group environment variable references to vault items and manage `.env` files.
+### 1. Projects & Environments
+Hierarchical organization replacing flat Workspaces. Projects contain multiple typed Environments; every environment variable is now a real encrypted vault item.
 
-**Modules & Commands**:
-- `src-tauri/src/workspace/mod.rs` — Core workspace logic
-- Tauri commands: `workspace_list`, `workspace_save`, `workspace_delete`, `workspace_inject`
-- Database tables: `workspaces`, `workspace_vars`
+**Core Architecture**:
+- `src-tauri/src/project/mod.rs` — Project/environment business logic (shared by Tauri commands + HTTP API)
+- `src-tauri/src/db/mod.rs` — Tables: `projects`, `environments`, `environment_vars`, `item_projects` (many-to-many), `project_categories`
+- Database: `items.is_global` plaintext column tracks reusability across projects; `item_projects` tracks ownership
 
-**Features**:
-- Templates for common stacks: generic, node, postgres, mongo, docker, python
-- "Inject to Path" action writes decrypted KEY=VALUE pairs to specified .env file
-- Frontend: `WorkspaceManager.tsx`, `workspaceStore.ts` accessible from Settings
+**Data Model**:
+- **Project**: id, name, description, template, environments[], categories[] (tags via category names)
+- **Environment**: id, project_id, name, is_default, paths[], vars[]
+- **EnvironmentVar**: id, key, item_id (mandatory — no more literal key=value)
+- **Item Ownership**: Every item either global (`is_global=true`) or owned by one or more projects. Deleting a project cascades to orphaned items; un-globaling multi-owner items forks them into independent copies.
 
-**Example**: Create a workspace for a Node.js project, add references to `DB_HOST`, `DB_PASSWORD` vault items, then inject to `.env` with one click.
+**Tauri Commands**:
+- `project_list() → Vec<Project>` — All projects with nested environments
+- `project_save(project: ProjectInput) → Project` — Create or update
+- `project_delete(id: i64)` — Delete with cascade logic
+- `project_preview_delete(id: i64) → ProjectDeleteImpact` — Show impact before delete
+- `environment_save(env: EnvironmentInput)` — Create or update environment
+- `environment_delete(id: i64)` — Delete environment
+- `environment_inject(id: i64) → InjectResult` — Write decrypted vars to configured paths
+- `vault_create_project_item(project_id, key, item)` — Add variable to environment
+- `vault_set_item_global(id, is_global) → GlobalToggleResult` — Make item global or fork if multi-owned
+- `vault_get_item_owners(id) → Vec<ItemOwner>` — List projects that own this item
+
+**Frontend**:
+- New `ProjectManager.tsx` screen: project list → project detail with environment cards → environment editor with variable linking
+- `GlobalSecrets.tsx` (renamed from MainVault.tsx): filtered to `isGlobal` items only, reachable via footer link
+- New `src/components/itemFields/` module: extracted `ItemTypePicker`, `ItemTypeFields`, `emptyItemFields`, `validateItemFields` for shared per-type field logic
+- Project categories reuse existing categories/TagInput; projects carry tags via `project_categories` join table
+
+**Migration & Backward Compatibility**:
+- One-time migration `vault::migrate_literal_vars_to_items()` (gated by `settings['migrated_literals_v1']`) runs on unlock: converts legacy literal-only environment vars to real encrypted vault items owned by their environment's project
+- Pre-existing items with zero owners after backfill are promoted to global (surface in Global Secrets instead of disappearing)
+- CLI `crypt-env project` replaces deleted `workspace` subcommand
+
+**Example**: Create a "MyApp" project with "production" and "local" environments. Add DB_HOST, DB_PASSWORD as vault items. Link them to production environment. Click "Inject" to write to `.env.production`. Un-global DB_PASSWORD to make it project-specific.
 
 ---
 

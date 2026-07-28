@@ -19,7 +19,8 @@ use vault::{
     vault_generate_mcp_token, vault_get_categories, vault_get_items, vault_get_mcp_token,
     vault_get_settings, vault_import_backup, vault_import_backup_data, vault_import_items,
     vault_is_setup, vault_list, vault_lock, vault_parse_import, vault_save_categories, vault_save_item,
-    vault_save_settings, vault_unlock, vault_wipe, SharedState, VaultState,
+    vault_save_settings, vault_unlock, vault_wipe, vault_create_project_item, vault_set_item_global,
+    vault_get_item_owners, SharedState, VaultState,
 };
 use vault::share_commands::{
     share_cancel, share_confirm_fingerprint, share_export_file, share_import_file,
@@ -28,7 +29,7 @@ use vault::share_commands::{
 };
 use project::{
     environment_delete, environment_inject, environment_save, project_delete, project_export,
-    project_import, project_list, project_pick_env_path, project_save,
+    project_import, project_list, project_pick_env_path, project_preview_delete, project_save,
 };
 
 struct PendingUpdate(std::sync::Mutex<Option<tauri_plugin_updater::Update>>);
@@ -173,6 +174,9 @@ pub fn run() {
             vault_get_items,
             vault_save_item,
             vault_delete_item,
+            vault_create_project_item,
+            vault_set_item_global,
+            vault_get_item_owners,
             vault_get_categories,
             vault_save_categories,
             vault_get_settings,
@@ -203,6 +207,7 @@ pub fn run() {
             project_list,
             project_save,
             project_delete,
+            project_preview_delete,
             project_export,
             project_import,
             project_pick_env_path,

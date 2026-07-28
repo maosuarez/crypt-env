@@ -2,20 +2,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::State;
 
-use crate::db::{DbEnvironmentVar, VaultDb};
+use crate::db::{DbEnvironmentVar, ProjectDeleteImpact, VaultDb};
 use crate::vault::SharedState;
 
 // ─── Frontend-facing types ────────────────────────────────────────────────────
 
+/// Every variable is a real vault item now — no more bare literals. `item_id`
+/// points into the shared `items` table; ownership (`item_projects`) is
+/// granted automatically by `save_environment` below.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct EnvironmentVar {
     #[serde(default)]
     pub id: i64,
     pub key: String,
-    #[serde(rename = "itemId", skip_serializing_if = "Option::is_none")]
-    pub item_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub literal: Option<String>,
+    #[serde(rename = "itemId")]
+    pub item_id: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -59,6 +60,10 @@ pub struct Project {
     pub created: String,
     pub updated: String,
     pub environments: Vec<Environment>,
+    /// Category NAMES (same convention as `VaultItem.categories`) — reuses
+    /// the existing categories table for project tags/language.
+    #[serde(default)]
+    pub categories: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +74,8 @@ pub struct ProjectInput {
     #[serde(default)]
     pub description: Option<String>,
     pub template: String,
+    #[serde(default)]
+    pub categories: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -95,14 +102,17 @@ pub async fn list_projects(db: &VaultDb) -> Result<Vec<Project>, String> {
                 name: e.name,
                 is_default: e.is_default,
                 paths: e.paths,
+                // Vars still awaiting the post-unlock literal→item migration
+                // (item_id not yet set) are skipped rather than exposed broken.
                 vars: db_vars
                     .into_iter()
-                    .map(|v| EnvironmentVar { id: v.id, key: v.key, item_id: v.item_id, literal: v.literal })
+                    .filter_map(|v| v.item_id.map(|item_id| EnvironmentVar { id: v.id, key: v.key, item_id }))
                     .collect(),
                 created: e.created,
                 updated: e.updated,
             });
         }
+        let categories = db.list_project_categories(p.id).await?;
         result.push(Project {
             id: p.id,
             name: p.name,
@@ -111,9 +121,21 @@ pub async fn list_projects(db: &VaultDb) -> Result<Vec<Project>, String> {
             created: p.created,
             updated: p.updated,
             environments,
+            categories,
         });
     }
     Ok(result)
+}
+
+/// Resolves category NAMES (as sent by the frontend, same convention as
+/// `VaultItem.categories`) to their stable ids for storage.
+async fn category_names_to_ids(db: &VaultDb, names: &[String]) -> Result<Vec<String>, String> {
+    let all = db.list_categories().await?;
+    Ok(all
+        .into_iter()
+        .filter(|c| names.contains(&c.name))
+        .map(|c| c.cid)
+        .collect())
 }
 
 /// Creates (id = 0) or updates (id > 0) a project's metadata. A newly created
@@ -126,13 +148,23 @@ pub async fn save_project(db: &VaultDb, input: ProjectInput) -> Result<i64, Stri
     if is_new {
         db.upsert_environment(0, project_id, "default", true).await?;
     }
+    let category_ids = category_names_to_ids(db, &input.categories).await?;
+    db.set_project_categories(project_id, &category_ids).await?;
     Ok(project_id)
 }
 
-pub async fn delete_project(db: &VaultDb, id: i64) -> Result<(), String> {
+pub async fn delete_project(db: &VaultDb, id: i64) -> Result<ProjectDeleteImpact, String> {
     db.delete_project(id).await
 }
 
+pub async fn project_delete_preview(db: &VaultDb, id: i64) -> Result<ProjectDeleteImpact, String> {
+    db.preview_delete_project(id).await
+}
+
+/// Persists an environment's vars, granting item ownership to `project_id` as
+/// a side effect for any referenced item it doesn't already own — but only
+/// when that item is global. A local item can never silently gain a second
+/// owner through this path; the caller must mark it global first.
 pub async fn save_environment(db: &VaultDb, input: EnvironmentInput) -> Result<i64, String> {
     let env_id = db
         .upsert_environment(input.id, input.project_id, &input.name, input.is_default)
@@ -140,10 +172,25 @@ pub async fn save_environment(db: &VaultDb, input: EnvironmentInput) -> Result<i
 
     db.set_environment_paths(env_id, &input.paths).await?;
 
+    for v in &input.vars {
+        let owners = db.list_owning_projects(v.item_id).await?;
+        if owners.contains(&input.project_id) {
+            continue;
+        }
+        if db.is_item_global(v.item_id).await?.unwrap_or(false) {
+            db.add_item_owner(v.item_id, input.project_id).await?;
+        } else {
+            return Err(format!(
+                "item {} is not global and not already owned by this project",
+                v.item_id
+            ));
+        }
+    }
+
     let db_vars: Vec<DbEnvironmentVar> = input
         .vars
         .into_iter()
-        .map(|v| DbEnvironmentVar { id: 0, environment_id: env_id, key: v.key, item_id: v.item_id, literal: v.literal })
+        .map(|v| DbEnvironmentVar { id: 0, environment_id: env_id, key: v.key, item_id: Some(v.item_id), literal: None })
         .collect();
 
     db.set_environment_vars(env_id, &db_vars).await?;
@@ -181,7 +228,7 @@ pub async fn inject_environment(
     // Decrypt vault items needed
     let raw_items = db.list_items().await?;
     let mut item_values: HashMap<i64, String> = HashMap::new();
-    for (item_id, _, data, _) in &raw_items {
+    for (item_id, _, data, _, _) in &raw_items {
         let json = crate::crypto::decrypt(vault_key, data)?;
         let item: crate::vault::VaultItem =
             serde_json::from_slice(&json).map_err(|e| format!("parse item: {e}"))?;
@@ -257,9 +304,15 @@ pub async fn project_save(state: State<'_, SharedState>, project: ProjectInput) 
 }
 
 #[tauri::command]
-pub async fn project_delete(state: State<'_, SharedState>, id: i64) -> Result<(), String> {
+pub async fn project_delete(state: State<'_, SharedState>, id: i64) -> Result<ProjectDeleteImpact, String> {
     let s = state.lock().await;
     delete_project(&s.db, id).await
+}
+
+#[tauri::command]
+pub async fn project_preview_delete(state: State<'_, SharedState>, id: i64) -> Result<ProjectDeleteImpact, String> {
+    let s = state.lock().await;
+    project_delete_preview(&s.db, id).await
 }
 
 #[tauri::command]
@@ -348,13 +401,13 @@ pub async fn project_export(project_id: i64, state: State<'_, SharedState>) -> R
             .map(|e| ExportedEnvironment {
                 name: e.name,
                 is_default: e.is_default,
+                // Every var is a real vault item now, and item values never
+                // cross vaults — templates only ever carry KEY names, never
+                // resolved values, to avoid leaking secrets into an exported file.
                 vars: e
                     .vars
                     .into_iter()
-                    .map(|v| ExportedEnvironmentVar {
-                        key: v.key,
-                        literal: if v.item_id.is_some() { None } else { v.literal },
-                    })
+                    .map(|v| ExportedEnvironmentVar { key: v.key, literal: None })
                     .collect(),
             })
             .collect(),

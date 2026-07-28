@@ -232,7 +232,7 @@ pub async fn share_relay_send(
 
         let raw = guard.db.list_items().await?;
         let mut items: Vec<PlainItem> = Vec::new();
-        for (id, _, data, _) in &raw {
+        for (id, _, data, _, _) in &raw {
             if !item_ids.contains(id) {
                 continue;
             }
@@ -354,12 +354,13 @@ pub async fn share_relay_receive(
             content: None,
             categories: Some(plain.category.iter().cloned().collect()),
             created: now_ts.clone(),
+            is_global: None,
         };
         let json = serde_json::to_vec(&vault_item).map_err(|e| e.to_string())?;
         let encrypted = crate::crypto::encrypt(&vault_key, &json)?;
         guard
             .db
-            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created)
+            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created, false)
             .await?;
         names.push(plain.name.clone());
     }

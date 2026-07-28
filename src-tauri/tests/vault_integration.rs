@@ -39,7 +39,7 @@ async fn test_db_item_upsert_and_list() {
     let created = "2026-01-01T00:00:00Z";
     let encrypted_data = "deadbeef0102030405";
 
-    let inserted_id = db.upsert_item(0, "env", encrypted_data, created).await.unwrap();
+    let inserted_id = db.upsert_item(0, "env", encrypted_data, created, false).await.unwrap();
     assert!(inserted_id > 0, "inserted id must be positive");
 
     let items = db.list_items().await.unwrap();
@@ -56,8 +56,8 @@ async fn test_db_item_update() {
     let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
     let db = VaultDb::open(&db_path).await.unwrap();
 
-    let id = db.upsert_item(0, "env", "original_data", "2026-01-01").await.unwrap();
-    db.upsert_item(id, "env", "updated_data", "2026-01-01").await.unwrap();
+    let id = db.upsert_item(0, "env", "original_data", "2026-01-01", false).await.unwrap();
+    db.upsert_item(id, "env", "updated_data", "2026-01-01", false).await.unwrap();
 
     let items = db.list_items().await.unwrap();
     assert_eq!(items.len(), 1, "update must not create a second row");
@@ -70,7 +70,7 @@ async fn test_db_item_delete() {
     let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
     let db = VaultDb::open(&db_path).await.unwrap();
 
-    let id = db.upsert_item(0, "env", "some_data", "2026-01-01").await.unwrap();
+    let id = db.upsert_item(0, "env", "some_data", "2026-01-01", false).await.unwrap();
     db.delete_item(id).await.unwrap();
 
     let items = db.list_items().await.unwrap();

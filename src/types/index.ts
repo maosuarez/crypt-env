@@ -1,6 +1,6 @@
 export type ItemType = 'secret' | 'credential' | 'link' | 'command' | 'note';
 export type Shell    = 'bash' | 'zsh' | 'fish' | 'PowerShell' | 'cmd';
-export type Screen   = 'lock' | 'vault' | 'edit' | 'categories' | 'settings' | 'workspaces';
+export type Screen   = 'lock' | 'vault' | 'edit' | 'categories' | 'settings' | 'projects';
 
 export interface Category {
   id:    string;
@@ -14,6 +14,9 @@ interface BaseItem {
   categories: string[];
   notes?:     string;
   created:    string;
+  /** Reusable across projects/environments — only global items are offered
+   *  as vault-item references when linking an environment variable. */
+  isGlobal?:  boolean;
 }
 
 export interface SecretItem extends BaseItem {
@@ -53,32 +56,60 @@ export interface NoteItem extends BaseItem {
 
 export type VaultItem = SecretItem | CredentialItem | LinkItem | CommandItem | NoteItem;
 
-// ─── Workspace types ──────────────────────────────────────────────────────────
+// ─── Project / Environment types ───────────────────────────────────────────────
 
-export interface WorkspaceVar {
-  id:       number;
-  key:      string;
-  itemId?:  number;
-  literal?: string;
+export interface EnvironmentVar {
+  id:     number;
+  key:    string;
+  itemId: number;
 }
 
-export interface Workspace {
+export interface Environment {
+  id:        number;
+  projectId: number;
+  name:      string;
+  isDefault: boolean;
+  paths:     string[];
+  vars:      EnvironmentVar[];
+  created:   string;
+  updated:   string;
+}
+
+export interface Project {
   id:           number;
   name:         string;
   description?: string;
-  paths:        string[];
   template:     string;
   created:      string;
   updated:      string;
-  vars:         WorkspaceVar[];
+  environments: Environment[];
+  /** Category names — same convention as VaultItem.categories. Language is
+   *  just another tag value here (e.g. "Python"). */
+  categories:   string[];
 }
 
-export type WorkspaceTemplate =
+export type ProjectTemplate =
   | 'generic' | 'node' | 'postgres' | 'mongo' | 'docker' | 'python';
 
 export interface InjectResult {
   paths:   string[];
   written: string[];
+}
+
+export interface ProjectDeleteImpact {
+  environments:   number;
+  itemsDeleted:   number;
+  itemsOrphaned:  number;
+}
+
+export interface ItemOwner {
+  projectId:   number;
+  projectName: string;
+}
+
+export interface GlobalToggleResult {
+  updated: VaultItem | null;
+  forked:  VaultItem[];
 }
 
 export interface ContextMenuItemDef {

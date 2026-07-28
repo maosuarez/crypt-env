@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { VaultItem, Category, Screen, MenuState } from '../types';
+import type { VaultItem, Category, Screen, MenuState, GlobalToggleResult, ItemOwner } from '../types';
 
 export const CAT_COLORS_PRESET = [
   '#FF9900', '#10a37f', '#635bff', '#c9d1d9',
@@ -39,6 +39,8 @@ interface VaultStore {
   saveItem:       (form: Omit<VaultItem, 'id' | 'created'>) => Promise<void>;
   deleteItem:     (id: number) => Promise<void>;
   saveCats:       (cats: Category[]) => Promise<void>;
+  toggleGlobal:   (id: number, global: boolean) => Promise<GlobalToggleResult>;
+  getItemOwners:  (id: number) => Promise<ItemOwner[]>;
 }
 
 let toastTimer: ReturnType<typeof setTimeout>;
@@ -82,7 +84,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     set({
       items:       result.items,
       cats:        result.categories,
-      screen:      'vault',
+      screen:      'projects',
       editTarget:  null,
       lockTimeout: settings.autoLockTimeout,
       hotkey:      settings.hotkey,
@@ -94,7 +96,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     set({
       items:       payload.items,
       cats:        payload.categories,
-      screen:      'vault',
+      screen:      'projects',
       editTarget:  null,
       lockTimeout: settings.autoLockTimeout,
       hotkey:      settings.hotkey,
@@ -141,4 +143,20 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     await invoke('vault_save_categories', { cats });
     set({ cats });
   },
+
+  toggleGlobal: async (id, global) => {
+    const result = await invoke<GlobalToggleResult>('vault_set_item_global', { id, global });
+    set((s) => {
+      if (result.updated) {
+        const updated = result.updated;
+        return { items: s.items.map((i) => (i.id === id ? updated : i)) };
+      }
+      // Un-globaling a multi-owner item forks it — the shared row is gone,
+      // replaced by one independent copy per project that owned it.
+      return { items: s.items.filter((i) => i.id !== id).concat(result.forked) };
+    });
+    return result;
+  },
+
+  getItemOwners: (id) => invoke<ItemOwner[]>('vault_get_item_owners', { id }),
 }));

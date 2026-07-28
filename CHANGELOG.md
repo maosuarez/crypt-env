@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Major Architecture Refactor: Projects & Environments** — Replaced flat "Workspaces" model with hierarchical Projects containing typed Environments. Every environment variable is now a real vault item (not literal key=value). Projects are now the primary navigation landing page.
+  - **Backend**: New tables `projects`, `environments`, `environment_vars`, `item_projects` (many-to-many), `project_categories`. Deleted `workspace/mod.rs`. Item ownership tracked explicitly; global items reusable across projects.
+  - **Database**: Added `items.is_global` plaintext column (queryable without decryption). One-time migration `vault::migrate_literal_vars_to_items` converts legacy literal vars to real encrypted items on unlock.
+  - **Deletion Logic**: Project deletion is transactional with preview of impact (environments deleted, items deleted vs orphaned). Un-globaling multi-owner items forks them into independent copies.
+  - **Frontend**: New `ProjectManager.tsx` screen (project list → detail with environment cards → environment editor). `MainVault.tsx` renamed to `GlobalSecrets.tsx` (filtered to `isGlobal` items only, reachable via footer link). New `src/components/itemFields/` extracted shared per-type field components used by both ProjectManager and EditItem.
+  - **Tauri Commands**: New `vault_create_project_item`, `vault_set_item_global`, `vault_get_item_owners`, `project_preview_delete`. Deleted `workspace_*` commands.
+  - **CLI**: Replaced `crypt-env workspace` with `crypt-env project` (list/inject/delete/delete-env). Inject now works per-environment.
+  - **MCP Server**: Renamed tools: `crypt_env_list_projects`, `crypt_env_inject_environment`, `crypt_env_list_environments_by_name`, `crypt_env_inject_env_by_name`. Legacy `crypt_env_share_workspace_send/receive` unchanged (out of scope, workspace-table-backed).
+  - **Types**: `Workspace` → `Project` + `Environment`. `WorkspaceVar` → `EnvironmentVar`. `workspaceStore.ts` → `projectStore.ts`.
+  - **Config**: Added `pnpm-workspace.yaml` for monorepo configuration (esbuild disabled).
+
+### Known Limitations (Carried Forward)
+
+- Project export/import templates do not carry resolved secret values (by design)
+- Backup/restore does not yet include projects/environments/item_projects tables (pre-existing gap, pre-planned)
+
 ---
 
 ## [0.1.0] - 2026-04-25

@@ -32,6 +32,14 @@ pub struct DbWorkspaceVar {
     pub literal: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDeleteImpact {
+    pub environments: i64,
+    pub items_deleted: i64,
+    pub items_orphaned: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DbProject {
     pub id: i64,
@@ -128,6 +136,9 @@ impl VaultDb {
         let _ = sqlx::query("ALTER TABLE categories ADD COLUMN description TEXT")
             .execute(&self.pool)
             .await;
+        let _ = sqlx::query("ALTER TABLE items ADD COLUMN is_global INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await;
         let migrations = [
             "CREATE TABLE IF NOT EXISTS workspaces (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -204,10 +215,50 @@ impl VaultDb {
                 SELECT e.id, wp.path
                 FROM workspace_paths wp
                 JOIN environments e ON e.project_id = wp.workspace_id AND e.name = 'default'",
+            // Item ownership: many-to-many so a global item can belong to more
+            // than one project at once (see project::mod for the fork-on-unglobal
+            // and cascade-delete-if-orphaned logic that relies on this table).
+            "CREATE TABLE IF NOT EXISTS item_projects (
+                item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                PRIMARY KEY (item_id, project_id)
+            )",
+            "CREATE TABLE IF NOT EXISTS project_categories (
+                project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                category_id TEXT NOT NULL REFERENCES categories(cid) ON DELETE CASCADE,
+                PRIMARY KEY (project_id, category_id)
+            )",
+            // Backfill: items already referenced by an environment_var are owned
+            // by that environment's project. `environment_vars.item_id` was never
+            // FK-enforced, so a stale reference to an already-deleted item is
+            // possible — the join against `items` skips those instead of failing
+            // the new (enforced) item_projects FK.
+            "INSERT OR IGNORE INTO item_projects (item_id, project_id)
+                SELECT ev.item_id, e.project_id
+                FROM environment_vars ev
+                JOIN environments e ON e.id = ev.environment_id
+                JOIN items i ON i.id = ev.item_id",
         ];
         for stmt in &migrations {
             sqlx::query(stmt).execute(&self.pool).await.map_err(|e| format!("migration: {e}"))?;
         }
+
+        // One-time (not re-run every launch): pre-existing items that end up with
+        // zero owners after the backfill above predate the whole project/ownership
+        // model — promote them to global so they surface in Global Secrets instead
+        // of silently disappearing from the UI. Gated so it never re-flips items
+        // that legitimately become owner-less later via normal project deletion.
+        if self.get_setting("backfilled_global_orphans_v1").await?.is_none() {
+            sqlx::query(
+                "UPDATE items SET is_global = 1
+                 WHERE id NOT IN (SELECT item_id FROM item_projects)",
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(|e| format!("migration: {e}"))?;
+            self.set_setting("backfilled_global_orphans_v1", "true").await?;
+        }
+
         Ok(())
     }
 
@@ -239,51 +290,59 @@ impl VaultDb {
         Ok(row.map(|r| (r.get::<String, _>(0), r.get::<String, _>(1))))
     }
 
-    /// Returns (id, item_type, encrypted_data, created).
-    pub async fn list_items(&self) -> Result<Vec<(i64, String, String, String)>, String> {
+    /// Returns (id, item_type, encrypted_data, created, is_global).
+    pub async fn list_items(&self) -> Result<Vec<(i64, String, String, String, bool)>, String> {
         let rows =
-            sqlx::query("SELECT id, item_type, data, created FROM items ORDER BY id ASC")
+            sqlx::query("SELECT id, item_type, data, created, is_global FROM items ORDER BY id ASC")
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| e.to_string())?;
         Ok(rows
             .into_iter()
             .map(|r| {
+                let is_global: i64 = r.get(4);
                 (
                     r.get::<i64, _>(0),
                     r.get::<String, _>(1),
                     r.get::<String, _>(2),
                     r.get::<String, _>(3),
+                    is_global != 0,
                 )
             })
             .collect())
     }
 
     /// id = 0 → INSERT (returns new id). id > 0 → UPDATE (returns same id).
+    /// `is_global` is written on both insert and update — callers must pass the
+    /// item's current/intended value (updates never silently reset it).
     pub async fn upsert_item(
         &self,
         id: i64,
         item_type: &str,
         data: &str,
         created: &str,
+        is_global: bool,
     ) -> Result<i64, String> {
         let now = now_ts();
+        let is_global_i: i64 = if is_global { 1 } else { 0 };
         if id == 0 {
             let res = sqlx::query(
-                "INSERT INTO items (item_type, data, created, updated) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO items (item_type, data, created, updated, is_global) VALUES (?1, ?2, ?3, ?4, ?5)",
             )
             .bind(item_type)
             .bind(data)
             .bind(created)
             .bind(&now)
+            .bind(is_global_i)
             .execute(&self.pool)
             .await
             .map_err(|e| e.to_string())?;
             Ok(res.last_insert_rowid())
         } else {
-            sqlx::query("UPDATE items SET data = ?1, updated = ?2 WHERE id = ?3")
+            sqlx::query("UPDATE items SET data = ?1, updated = ?2, is_global = ?3 WHERE id = ?4")
                 .bind(data)
                 .bind(&now)
+                .bind(is_global_i)
                 .bind(id)
                 .execute(&self.pool)
                 .await
@@ -293,11 +352,133 @@ impl VaultDb {
     }
 
     pub async fn delete_item(&self, id: i64) -> Result<(), String> {
+        sqlx::query("DELETE FROM environment_vars WHERE item_id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
         sqlx::query("DELETE FROM items WHERE id = ?1")
             .bind(id)
             .execute(&self.pool)
             .await
             .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn set_item_global(&self, id: i64, is_global: bool) -> Result<(), String> {
+        let is_global_i: i64 = if is_global { 1 } else { 0 };
+        sqlx::query("UPDATE items SET is_global = ?1 WHERE id = ?2")
+            .bind(is_global_i)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn is_item_global(&self, id: i64) -> Result<Option<bool>, String> {
+        let val: Option<i64> = sqlx::query_scalar("SELECT is_global FROM items WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(val.map(|v| v != 0))
+    }
+
+    pub async fn item_owner_count(&self, item_id: i64) -> Result<i64, String> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM item_projects WHERE item_id = ?1")
+            .bind(item_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(count)
+    }
+
+    pub async fn list_owning_projects(&self, item_id: i64) -> Result<Vec<i64>, String> {
+        let rows = sqlx::query("SELECT project_id FROM item_projects WHERE item_id = ?1")
+            .bind(item_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows.into_iter().map(|r| r.get(0)).collect())
+    }
+
+    pub async fn add_item_owner(&self, item_id: i64, project_id: i64) -> Result<(), String> {
+        sqlx::query("INSERT OR IGNORE INTO item_projects (item_id, project_id) VALUES (?1, ?2)")
+            .bind(item_id)
+            .bind(project_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub async fn list_owned_item_ids(&self, project_id: i64) -> Result<Vec<i64>, String> {
+        let rows = sqlx::query("SELECT item_id FROM item_projects WHERE project_id = ?1")
+            .bind(project_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows.into_iter().map(|r| r.get(0)).collect())
+    }
+
+    pub async fn delete_environment_vars_by_item(&self, item_id: i64) -> Result<(), String> {
+        sqlx::query("DELETE FROM environment_vars WHERE item_id = ?1")
+            .bind(item_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Legacy literal-only vars (predating the "every var is a real item"
+    /// model) — returns (environment_var_id, key, literal, owning project_id).
+    pub async fn list_unmigrated_literal_vars(&self) -> Result<Vec<(i64, String, String, i64)>, String> {
+        let rows = sqlx::query(
+            "SELECT ev.id, ev.key, ev.literal, e.project_id
+             FROM environment_vars ev
+             JOIN environments e ON e.id = ev.environment_id
+             WHERE ev.item_id IS NULL AND ev.literal IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+            .collect())
+    }
+
+    pub async fn set_environment_var_item(&self, env_var_id: i64, item_id: i64) -> Result<(), String> {
+        sqlx::query("UPDATE environment_vars SET item_id = ?1, literal = NULL WHERE id = ?2")
+            .bind(item_id)
+            .bind(env_var_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Repoints every environment_var in `project_id`'s environments that
+    /// referenced `old_item_id` to `new_item_id` — used when forking a
+    /// multi-owner item back into independent per-project copies.
+    pub async fn repoint_env_var_item(
+        &self,
+        project_id: i64,
+        old_item_id: i64,
+        new_item_id: i64,
+    ) -> Result<(), String> {
+        sqlx::query(
+            "UPDATE environment_vars SET item_id = ?1
+             WHERE item_id = ?2 AND environment_id IN
+                 (SELECT id FROM environments WHERE project_id = ?3)",
+        )
+        .bind(new_item_id)
+        .bind(old_item_id)
+        .bind(project_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -630,13 +811,133 @@ impl VaultDb {
         }
     }
 
-    pub async fn delete_project(&self, id: i64) -> Result<(), String> {
+    /// Read-only dry run of `delete_project`'s bookkeeping, for the
+    /// typed-confirmation modal's blast-radius summary.
+    pub async fn preview_delete_project(&self, project_id: i64) -> Result<ProjectDeleteImpact, String> {
+        let environments: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE project_id = ?1")
+                .bind(project_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| e.to_string())?;
+
+        let owned = self.list_owned_item_ids(project_id).await?;
+        let mut items_deleted = 0i64;
+        let mut items_orphaned = 0i64;
+        for item_id in owned {
+            if self.item_owner_count(item_id).await? <= 1 {
+                if self.is_item_global(item_id).await?.unwrap_or(false) {
+                    items_orphaned += 1;
+                } else {
+                    items_deleted += 1;
+                }
+            }
+        }
+        Ok(ProjectDeleteImpact { environments, items_deleted, items_orphaned })
+    }
+
+    /// Deletes a project and everything it exclusively owns, in one
+    /// transaction. Environments/environment_vars/environment_paths and this
+    /// project's `item_projects` ownership links cascade automatically via
+    /// FK. Afterwards, for every item this project used to own: if it still
+    /// has another owner, nothing to do; if it has none left, delete it
+    /// (local secret with nowhere else to live) unless it's global, in which
+    /// case it survives as an unowned orphan, still visible in Global Secrets.
+    pub async fn delete_project(&self, id: i64) -> Result<ProjectDeleteImpact, String> {
+        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
+
+        let environments: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE project_id = ?1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+
+        let owned_rows = sqlx::query("SELECT item_id FROM item_projects WHERE project_id = ?1")
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        let owned: Vec<i64> = owned_rows.into_iter().map(|r| r.get(0)).collect();
+
         sqlx::query("DELETE FROM projects WHERE id = ?1")
             .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut items_deleted = 0i64;
+        let mut items_orphaned = 0i64;
+        for item_id in owned {
+            let owner_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM item_projects WHERE item_id = ?1")
+                    .bind(item_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            if owner_count > 0 {
+                continue;
+            }
+            let is_global: i64 = sqlx::query_scalar("SELECT is_global FROM items WHERE id = ?1")
+                .bind(item_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            if is_global != 0 {
+                items_orphaned += 1;
+            } else {
+                // Defensive: any stray environment_var reference (there shouldn't
+                // be any left outside this project, since owner_count is 0) is
+                // cleaned up before the item itself goes.
+                sqlx::query("DELETE FROM environment_vars WHERE item_id = ?1")
+                    .bind(item_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                sqlx::query("DELETE FROM items WHERE id = ?1")
+                    .bind(item_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                items_deleted += 1;
+            }
+        }
+
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(ProjectDeleteImpact { environments, items_deleted, items_orphaned })
+    }
+
+    pub async fn set_project_categories(&self, project_id: i64, category_ids: &[String]) -> Result<(), String> {
+        sqlx::query("DELETE FROM project_categories WHERE project_id = ?1")
+            .bind(project_id)
             .execute(&self.pool)
             .await
             .map_err(|e| e.to_string())?;
+        for cid in category_ids {
+            sqlx::query(
+                "INSERT OR IGNORE INTO project_categories (project_id, category_id) VALUES (?1, ?2)",
+            )
+            .bind(project_id)
+            .bind(cid)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
         Ok(())
+    }
+
+    /// Returns category NAMES (not ids) — same convention as `VaultItem.categories`.
+    pub async fn list_project_categories(&self, project_id: i64) -> Result<Vec<String>, String> {
+        let rows = sqlx::query(
+            "SELECT c.name FROM project_categories pc
+             JOIN categories c ON c.cid = pc.category_id
+             WHERE pc.project_id = ?1",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(rows.into_iter().map(|r| r.get(0)).collect())
     }
 
     pub async fn list_environments(&self, project_id: i64) -> Result<Vec<DbEnvironment>, String> {

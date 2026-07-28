@@ -158,12 +158,7 @@ async fn decrypt_all_items(state: &ApiState) -> Result<Vec<VaultItem>, StatusCod
     // Fase 2: descifrar sin lock
     let items: Vec<VaultItem> = raw
         .into_iter()
-        .filter_map(|(id, _, data, _)| {
-            let json = crypto::decrypt(&key, &data).ok()?;
-            let mut item: VaultItem = serde_json::from_slice(&json).ok()?;
-            item.id = id;
-            Some(item)
-        })
+        .filter_map(|(id, _, data, _, is_global)| crate::vault::decrypt_item(&key, id, &data, is_global).ok())
         .collect();
 
     Ok(items)
@@ -372,6 +367,10 @@ async fn handle_unlock(
 
     vault.key = Some(Zeroizing::new(key));
 
+    if let Err(e) = crate::vault::migrate_literal_vars_to_items(&vault.db, &key).await {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response();
+    }
+
     // Leer timeout de la DB (minutos, default 5)
     let minutes = match vault.db.get_setting("auto_lock_timeout").await {
         Ok(Some(v)) => v.parse::<u64>().unwrap_or(5),
@@ -540,19 +539,7 @@ async fn handle_create_item(
             }
         };
 
-        let json = match serde_json::to_vec(&body) {
-            Ok(j) => j,
-            Err(_) => {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "error serializando item",
-                    "INTERNAL_ERROR",
-                )
-                .into_response()
-            }
-        };
-
-        let encrypted = match crypto::encrypt(&key, &json) {
+        let encrypted = match crate::vault::encrypt_item(&key, &body) {
             Ok(e) => e,
             Err(_) => {
                 return err_json(
@@ -564,9 +551,10 @@ async fn handle_create_item(
             }
         };
 
+        let is_global = body.is_global.unwrap_or(false);
         let new_id = match vault
             .db
-            .upsert_item(0, &body.item_type, &encrypted, &body.created)
+            .upsert_item(0, &body.item_type, &encrypted, &body.created, is_global)
             .await
         {
             Ok(id) => id,
@@ -581,6 +569,7 @@ async fn handle_create_item(
 
     let _ = key; // ya no necesitamos la key
     body.id = new_id;
+    body.is_global = Some(body.is_global.unwrap_or(false));
     (StatusCode::CREATED, Json(redact_item(body))).into_response()
 }
 
@@ -641,6 +630,7 @@ async fn handle_update_item(
         // None = not sent → keep existing. Some([]) = explicitly clear. Some([...]) = replace.
         categories: body.categories.or(existing.categories),
         created: existing.created,
+        is_global: body.is_global.or(existing.is_global),
     };
 
     let vault = state.vault.lock().await;
@@ -652,19 +642,7 @@ async fn handle_update_item(
         }
     };
 
-    let json = match serde_json::to_vec(&merged) {
-        Ok(j) => j,
-        Err(_) => {
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "error serializando item",
-                "INTERNAL_ERROR",
-            )
-            .into_response()
-        }
-    };
-
-    let encrypted = match crypto::encrypt(&key, &json) {
+    let encrypted = match crate::vault::encrypt_item(&key, &merged) {
         Ok(e) => e,
         Err(_) => {
             return err_json(
@@ -676,9 +654,10 @@ async fn handle_update_item(
         }
     };
 
+    let is_global = merged.is_global.unwrap_or(false);
     match vault
         .db
-        .upsert_item(id, &merged.item_type, &encrypted, &merged.created)
+        .upsert_item(id, &merged.item_type, &encrypted, &merged.created, is_global)
         .await
     {
         Ok(_) => {}
@@ -1809,7 +1788,28 @@ async fn handle_delete_project(
     }
 
     match project::delete_project(&vault.db, id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(impact) => (StatusCode::OK, Json(impact)).into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+    }
+}
+
+async fn handle_preview_delete_project(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("vault locked", "VAULT_LOCKED"),
+            _ => ("internal error", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let vault = state.vault.lock().await;
+    match project::project_delete_preview(&vault.db, id).await {
+        Ok(impact) => (StatusCode::OK, Json(impact)).into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
 }
@@ -1989,7 +1989,7 @@ async fn handle_relay_send(
         };
 
         let mut items: Vec<PlainItem> = Vec::new();
-        for (id, _, data, _) in &raw {
+        for (id, _, data, _, _) in &raw {
             if !body.item_ids.contains(id) {
                 continue;
             }
@@ -2238,6 +2238,7 @@ async fn handle_relay_receive(
             content: None,
             categories: Some(plain.category.iter().cloned().collect()),
             created: now_ts.clone(),
+            is_global: None,
         };
 
         let json = match serde_json::to_vec(&vault_item) {
@@ -2266,7 +2267,7 @@ async fn handle_relay_receive(
 
         match vault
             .db
-            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created)
+            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created, false)
             .await
         {
             Ok(_) => names.push(plain.name.clone()),
@@ -2378,7 +2379,7 @@ async fn handle_workspace_relay_send(
         };
         let mut items_by_id: std::collections::HashMap<i64, VaultItem> =
             std::collections::HashMap::new();
-        for (item_id, _, data, _) in &raw {
+        for (item_id, _, data, _, _) in &raw {
             if let Ok(json) = crypto::decrypt(&k, data) {
                 if let Ok(item) = serde_json::from_slice::<VaultItem>(&json) {
                     items_by_id.insert(*item_id, item);
@@ -2645,6 +2646,7 @@ async fn handle_workspace_relay_receive(
             content: None,
             categories: Some(plain.category.iter().cloned().collect()),
             created: now_ts.clone(),
+            is_global: None,
         };
         let json = match serde_json::to_vec(&vault_item) {
             Ok(j) => j,
@@ -2670,7 +2672,7 @@ async fn handle_workspace_relay_receive(
         };
         match vault
             .db
-            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created)
+            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created, false)
             .await
         {
             Ok(new_id) => {
@@ -2765,6 +2767,7 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         .route("/projects", get(handle_list_projects))
         .route("/projects", post(handle_save_project))
         .route("/projects/:id", delete(handle_delete_project))
+        .route("/projects/:id/preview-delete", get(handle_preview_delete_project))
         .route("/environments", post(handle_save_environment))
         .route("/environments/:id", delete(handle_delete_environment))
         .route("/environments/:id/inject", post(handle_inject_environment))

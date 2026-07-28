@@ -376,7 +376,7 @@ async fn run_send_background(
     };
 
     let mut plain_items = Vec::new();
-    for (id, _, data, _) in &db_items {
+    for (id, _, data, _, _) in &db_items {
         if !item_ids.contains(id) {
             continue;
         }
@@ -627,6 +627,7 @@ async fn import_plain_items_into_vault(
             content: None,
             categories: Some(plain.category.iter().cloned().collect()),
             created: now_ts.clone(),
+            is_global: None,
         };
 
         let json = serde_json::to_vec(&vault_item)
@@ -634,7 +635,7 @@ async fn import_plain_items_into_vault(
         let encrypted = crate::crypto::encrypt(vault_key, &json)
             .map_err(|e| ShareError::Vault(e))?;
 
-        db.upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created)
+        db.upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created, false)
             .await
             .map_err(|e| ShareError::Vault(e))?;
 
@@ -709,7 +710,7 @@ pub async fn export_package(
     };
 
     let mut plain_items = Vec::new();
-    for (id, _, data, _) in &raw_items {
+    for (id, _, data, _, _) in &raw_items {
         if !item_ids.contains(id) {
             continue;
         }

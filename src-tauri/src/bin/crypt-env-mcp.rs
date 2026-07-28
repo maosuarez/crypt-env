@@ -472,18 +472,19 @@ fn tool_definitions() -> serde_json::Value {
             }
         },
         {
-            "name": "crypt_env_list_workspaces",
-            "description": "List all workspaces with their name, template, path, and variable count.",
+            "name": "crypt_env_list_projects",
+            "description": "List all projects with their environments (name, paths, variable count).",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
-            "name": "crypt_env_inject_workspace",
-            "description": "Inject workspace vars into the .env file at the workspace path. Identify by name or id.",
+            "name": "crypt_env_inject_environment",
+            "description": "Inject an environment's vars into its configured .env path(s). Identify by environment id, or by 'project' + 'environment' names.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "id": { "type": "integer", "description": "Workspace ID" },
-                    "name": { "type": "string", "description": "Workspace name (case-insensitive, used if id not given)" }
+                    "id": { "type": "integer", "description": "Environment ID" },
+                    "project": { "type": "string", "description": "Project name (case-insensitive, used with 'environment' if id not given)" },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive, e.g. production, local, test)" }
                 }
             }
         },
@@ -527,7 +528,7 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_share_workspace_receive",
-            "description": "Receive a complete workspace shared via internet relay using a code and passphrase from the sender. Recreates the bundled secrets in the vault and rebuilds the workspace with its variables re-linked, ready to inject into a .env with crypt_env_inject_workspace.",
+            "description": "Receive a complete workspace shared via internet relay using a code and passphrase from the sender. Recreates the bundled secrets in the vault and rebuilds the workspace with its variables re-linked, ready to inject into a .env with crypt_env_inject_environment.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -602,19 +603,19 @@ fn tool_definitions() -> serde_json::Value {
             }
         },
         {
-            "name": "crypt_env_list_workspaces_by_env",
-            "description": "List workspaces grouped by environment (production, development, staging, other), based on their template field.",
+            "name": "crypt_env_list_environments_by_name",
+            "description": "List all environments across all projects, grouped by their real environment name (e.g. production, local, test, or any custom name) rather than guessed from text.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "crypt_env_inject_env_by_name",
-            "description": "Inject environment variables for a project and environment combination. Finds matching workspaces or falls back to item naming conventions (ENV_KEY or category name).",
+            "description": "Inject environment variables for a project directory and environment name. Matches a real environment by its name field (and, when ambiguous, by its configured path living under project_path) or falls back to item naming conventions (ENV_KEY prefix or category name).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project_path": { "type": "string", "description": "Absolute path to the project directory" },
-                    "environment": { "type": "string", "description": "Environment name: production, development, or staging", "enum": ["production", "development", "staging"] },
-                    "output_path": { "type": "string", "description": "Absolute path for the output .env file. Defaults to {project_path}/.env" }
+                    "environment": { "type": "string", "description": "Environment name, e.g. production, local, test, or any custom name" },
+                    "output_path": { "type": "string", "description": "Absolute path for the output .env file. Defaults to {project_path}/.env (used only for the item-naming-convention fallback)" }
                 },
                 "required": ["project_path", "environment"]
             }
@@ -1650,72 +1651,76 @@ fn tool_delete_item(args: &serde_json::Value, token: &str) -> serde_json::Value 
 
 // ─── Workspace tool implementations ──────────────────────────────────────────
 
-fn tool_list_workspaces(token: &str) -> serde_json::Value {
-    let resp = match vault_get("/workspaces", token) {
-        Ok(r) => r,
-        Err(e) => return tool_err(e),
-    };
-
+/// GET /projects — every project with its nested environments. Shared by all
+/// project/environment tools so the real `name`/`id` fields are queried once
+/// instead of each tool re-implementing its own text-sniffing heuristic.
+fn fetch_projects(token: &str) -> Result<serde_json::Value, serde_json::Value> {
+    let resp = vault_get("/projects", token).map_err(tool_err)?;
     let status = resp.status().as_u16();
-    let text = match resp.text() {
-        Ok(t) => t,
-        Err(e) => return tool_err(format!("error reading response: {e}")),
-    };
+    let text = resp
+        .text()
+        .map_err(|e| tool_err(format!("error reading response: {e}")))?;
 
     if status == 403 {
-        return tool_err("vault_locked: unlock the vault first");
+        return Err(tool_err("vault_locked: unlock the vault first"));
     }
     if status >= 400 {
-        return tool_err(format!("error listing workspaces (HTTP {status}): {text}"));
+        return Err(tool_err(format!("error listing projects (HTTP {status}): {text}")));
     }
 
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
-        Err(_) => tool_ok(text),
+    serde_json::from_str(&text).map_err(|_| tool_err("error parsing project list"))
+}
+
+fn tool_list_projects(token: &str) -> serde_json::Value {
+    match fetch_projects(token) {
+        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or_default()),
+        Err(e) => e,
     }
 }
 
-fn tool_inject_workspace(args: &serde_json::Value, token: &str) -> serde_json::Value {
-    // Resolve workspace ID: use id directly, or find by name
-    let workspace_id: i64 = if let Some(id) = args.get("id").and_then(|v| v.as_i64()) {
+fn tool_inject_environment(args: &serde_json::Value, token: &str) -> serde_json::Value {
+    // Resolve environment ID: use id directly, or find by project+environment name
+    let environment_id: i64 = if let Some(id) = args.get("id").and_then(|v| v.as_i64()) {
         id
-    } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
-        // Fetch all workspaces and find by name
-        let resp = match vault_get("/workspaces", token) {
-            Ok(r) => r,
-            Err(e) => return tool_err(e),
-        };
-        if resp.status().as_u16() == 403 {
-            return tool_err("vault_locked: unlock the vault first");
-        }
-        let text = match resp.text() {
-            Ok(t) => t,
-            Err(e) => return tool_err(format!("error reading workspaces: {e}")),
-        };
-        let list: serde_json::Value = match serde_json::from_str(&text) {
+    } else if let (Some(project), Some(environment)) = (
+        args.get("project").and_then(|v| v.as_str()),
+        args.get("environment").and_then(|v| v.as_str()),
+    ) {
+        let projects = match fetch_projects(token) {
             Ok(v) => v,
-            Err(_) => return tool_err("error parsing workspace list"),
+            Err(e) => return e,
         };
-        let name_lower = name.to_lowercase();
-        let found = list.as_array().and_then(|arr| {
-            arr.iter().find(|ws| {
-                ws.get("name")
+        let project_lower = project.to_lowercase();
+        let env_lower = environment.to_lowercase();
+
+        let found = projects.as_array().and_then(|arr| {
+            arr.iter().find(|p| {
+                p.get("name")
                     .and_then(|n| n.as_str())
-                    .map(|n| n.to_lowercase() == name_lower)
+                    .map(|n| n.to_lowercase() == project_lower)
                     .unwrap_or(false)
             })
-        }).and_then(|ws| ws.get("id").and_then(|v| v.as_i64()));
+        }).and_then(|p| {
+            p.get("environments").and_then(|v| v.as_array()).and_then(|envs| {
+                envs.iter().find(|e| {
+                    e.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|n| n.to_lowercase() == env_lower)
+                        .unwrap_or(false)
+                })
+            })
+        }).and_then(|e| e.get("id").and_then(|v| v.as_i64()));
 
         match found {
             Some(id) => id,
-            None => return tool_err(format!("workspace '{name}' not found")),
+            None => return tool_err(format!("environment '{environment}' not found in project '{project}'")),
         }
     } else {
-        return tool_err("required: 'id' (integer) or 'name' (string)");
+        return tool_err("required: 'id' (environment id), or 'project' + 'environment' (names)");
     };
 
     let resp = match vault_post(
-        &format!("/workspaces/{workspace_id}/inject"),
+        &format!("/environments/{environment_id}/inject"),
         token,
         &serde_json::json!({}),
     ) {
@@ -1730,7 +1735,7 @@ fn tool_inject_workspace(args: &serde_json::Value, token: &str) -> serde_json::V
     };
 
     if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
-    if status == 404 { return tool_err(format!("workspace {workspace_id} not found")); }
+    if status == 404 { return tool_err(format!("environment {environment_id} not found")); }
     if status >= 400 { return tool_err(format!("inject failed (HTTP {status}): {text}")); }
 
     match serde_json::from_str::<serde_json::Value>(&text) {
@@ -2402,76 +2407,42 @@ fn tool_delete_mcp_server(args: &serde_json::Value, _token: &str) -> serde_json:
 
 // ─── Environment-aware workspace injection tool implementations ───────────────
 
-fn tool_list_workspaces_by_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
-    let resp = match vault_get("/workspaces", token) {
-        Ok(r) => r,
-        Err(e) => return tool_err(e),
-    };
-
-    let status = resp.status().as_u16();
-    let text = match resp.text() {
-        Ok(t) => t,
-        Err(e) => return tool_err(format!("error reading response: {e}")),
-    };
-
-    if status == 403 {
-        return tool_err("vault_locked: unlock the vault first");
-    }
-    if status >= 400 {
-        return tool_err(format!("error listing workspaces (HTTP {status}): {text}"));
-    }
-
-    let workspaces: serde_json::Value = match serde_json::from_str(&text) {
+fn tool_list_environments_by_name(token: &str) -> serde_json::Value {
+    let projects = match fetch_projects(token) {
         Ok(v) => v,
-        Err(_) => return tool_err("error parsing workspace list"),
+        Err(e) => return e,
     };
 
-    let arr = match workspaces.as_array() {
+    let arr = match projects.as_array() {
         Some(a) => a,
-        None => return tool_err("unexpected workspace response format"),
+        None => return tool_err("unexpected project response format"),
     };
 
-    let mut groups: std::collections::HashMap<&str, Vec<&serde_json::Value>> =
+    // Real query: group by each environment's actual `name` field instead of
+    // guessing an environment from project/workspace name text.
+    let mut groups: std::collections::HashMap<String, Vec<serde_json::Value>> =
         std::collections::HashMap::new();
-    groups.insert("production", Vec::new());
-    groups.insert("development", Vec::new());
-    groups.insert("staging", Vec::new());
-    groups.insert("other", Vec::new());
 
-    for ws in arr {
-        let template = ws.get("template")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let name = ws.get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let template_lower = template.to_lowercase();
+    for project in arr {
+        let project_id = project.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let project_name = project.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let envs = project.get("environments").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
-        let group = if template_lower.contains("production") || name.contains("production") || name.contains("prod") {
-            "production"
-        } else if template_lower.contains("staging") || name.contains("staging") || name.contains("stage") {
-            "staging"
-        } else if template_lower.contains("development") || template_lower.contains("dev")
-            || name.contains("development") || name.contains("dev") {
-            "development"
-        } else {
-            "other"
-        };
-
-        groups.entry(group).or_default().push(ws);
+        for env in envs {
+            let group_key = env.get("name").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+            let entry = serde_json::json!({
+                "projectId": project_id,
+                "projectName": project_name,
+                "environmentId": env.get("id"),
+                "environmentName": env.get("name"),
+                "paths": env.get("paths"),
+                "varCount": env.get("vars").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+            });
+            groups.entry(group_key).or_default().push(entry);
+        }
     }
 
-    let result = serde_json::json!({
-        "production": groups.get("production").map(|v| serde_json::json!(v)).unwrap_or(serde_json::json!([])),
-        "development": groups.get("development").map(|v| serde_json::json!(v)).unwrap_or(serde_json::json!([])),
-        "staging": groups.get("staging").map(|v| serde_json::json!(v)).unwrap_or(serde_json::json!([])),
-        "other": groups.get("other").map(|v| serde_json::json!(v)).unwrap_or(serde_json::json!([]))
-    });
-
-    // Suppress unused variable warning — args is kept for signature consistency
-    let _ = args;
-    tool_ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+    tool_ok(serde_json::to_string_pretty(&groups).unwrap_or_default())
 }
 
 fn tool_inject_env_by_name(args: &serde_json::Value, token: &str) -> serde_json::Value {
@@ -2488,60 +2459,63 @@ fn tool_inject_env_by_name(args: &serde_json::Value, token: &str) -> serde_json:
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{project_path}/.env"));
 
-    // Step 1: fetch all workspaces
-    let ws_resp = match vault_get("/workspaces", token) {
-        Ok(r) => r,
-        Err(e) => return tool_err(e),
-    };
-
-    let ws_status = ws_resp.status().as_u16();
-    let ws_text = match ws_resp.text() {
-        Ok(t) => t,
-        Err(e) => return tool_err(format!("error reading workspaces: {e}")),
-    };
-
-    if ws_status == 403 {
-        return tool_err("vault_locked: unlock the vault first");
-    }
-    if ws_status >= 400 {
-        return tool_err(format!("error listing workspaces (HTTP {ws_status}): {ws_text}"));
-    }
-
-    let workspaces: serde_json::Value = match serde_json::from_str(&ws_text) {
+    let projects = match fetch_projects(token) {
         Ok(v) => v,
-        Err(_) => return tool_err("error parsing workspace list"),
+        Err(e) => return e,
     };
 
-    // Step 2: find a workspace whose name/template matches the environment
-    // AND whose path starts with project_path
-    let env_lower = environment.as_str();
-    let found_ws = workspaces.as_array().and_then(|arr| {
-        arr.iter().find(|ws| {
-            let name_matches = ws.get("name")
-                .and_then(|v| v.as_str())
-                .map(|n| n.to_lowercase().contains(env_lower))
-                .unwrap_or(false);
-            let template_matches = ws.get("template")
-                .and_then(|v| v.as_str())
-                .map(|t| t.to_lowercase().contains(env_lower))
-                .unwrap_or(false);
-            let path_matches = ws.get("path")
-                .and_then(|v| v.as_str())
-                .map(|p| p.starts_with(&project_path))
-                .unwrap_or(false);
-            (name_matches || template_matches) && path_matches
-        })
-    });
+    // Real query: match environments by their actual `name` field (not a
+    // sniffed guess), scoped first to ones whose configured paths live under
+    // project_path; if none match by path, fall back to any environment with
+    // that exact name as long as it's unambiguous.
+    let collect_matches = |require_path: bool| -> Vec<(i64, i64, String, String)> {
+        let mut out = Vec::new();
+        let Some(arr) = projects.as_array() else { return out; };
+        for project in arr {
+            let project_id = match project.get("id").and_then(|v| v.as_i64()) { Some(i) => i, None => continue };
+            let project_name = project.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let envs = project.get("environments").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            for env in envs {
+                let env_id = match env.get("id").and_then(|v| v.as_i64()) { Some(i) => i, None => continue };
+                let env_name = env.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if env_name.to_lowercase() != environment {
+                    continue;
+                }
+                if require_path {
+                    let path_matches = env.get("paths").and_then(|v| v.as_array())
+                        .map(|paths| paths.iter().any(|p| {
+                            p.as_str().map(|s| s.starts_with(&project_path)).unwrap_or(false)
+                        }))
+                        .unwrap_or(false);
+                    if !path_matches {
+                        continue;
+                    }
+                }
+                out.push((project_id, env_id, project_name.clone(), env_name.clone()));
+            }
+        }
+        out
+    };
 
-    if let Some(ws) = found_ws {
-        // Step 3a: workspace found — inject it
-        let ws_id = match ws.get("id").and_then(|v| v.as_i64()) {
-            Some(id) => id,
-            None => return tool_err("workspace entry has no id"),
-        };
+    let mut candidates = collect_matches(true);
+    if candidates.is_empty() {
+        candidates = collect_matches(false);
+    }
 
+    if candidates.len() > 1 {
+        let options: Vec<String> = candidates.iter()
+            .map(|(pid, eid, pname, ename)| format!("{pname} / {ename} (project {pid}, environment {eid})"))
+            .collect();
+        return tool_err(format!(
+            "ambiguous match for environment '{environment}': {}. Use crypt_env_inject_environment with a specific 'id'.",
+            options.join(", ")
+        ));
+    }
+
+    if let Some((project_id, env_id, project_name, env_name)) = candidates.into_iter().next() {
+        // Step 3a: environment found — inject it
         let inject_resp = match vault_post(
-            &format!("/workspaces/{ws_id}/inject"),
+            &format!("/environments/{env_id}/inject"),
             token,
             &serde_json::json!({}),
         ) {
@@ -2560,14 +2534,16 @@ fn tool_inject_env_by_name(args: &serde_json::Value, token: &str) -> serde_json:
 
         let mut inject_result: serde_json::Value = serde_json::from_str(&inject_text)
             .unwrap_or(serde_json::json!({}));
-        inject_result["method"] = serde_json::json!("workspace");
-        inject_result["workspace_id"] = serde_json::json!(ws_id);
-        inject_result["environment"] = serde_json::json!(environment);
+        inject_result["method"] = serde_json::json!("environment");
+        inject_result["projectId"] = serde_json::json!(project_id);
+        inject_result["projectName"] = serde_json::json!(project_name);
+        inject_result["environmentId"] = serde_json::json!(env_id);
+        inject_result["environmentName"] = serde_json::json!(env_name);
 
         return tool_ok(serde_json::to_string_pretty(&inject_result).unwrap_or_default());
     }
 
-    // Step 3b: no workspace found — fallback to item naming conventions
+    // Step 3b: no environment found — fallback to item naming conventions
     // Fetch all items and match by naming convention: {ENV}_KEY or category = environment
     let items_resp = match vault_get("/items", token) {
         Ok(r) => r,
@@ -2589,7 +2565,7 @@ fn tool_inject_env_by_name(args: &serde_json::Value, token: &str) -> serde_json:
     };
 
     // Collect items matching env prefix (ENV_KEY) or env category
-    let prefix = format!("{}_", env_lower.to_uppercase());
+    let prefix = format!("{}_", environment.to_uppercase());
     let matched_items: Vec<(String, i64)> = items.as_array()
         .map(|arr| {
             arr.iter().filter_map(|item| {
@@ -2603,7 +2579,7 @@ fn tool_inject_env_by_name(args: &serde_json::Value, token: &str) -> serde_json:
                     .map(|cats| cats.iter().any(|c| {
                         c.as_str()
                             .or_else(|| c.get("name").and_then(|n| n.as_str()))
-                            .map(|s| s.to_lowercase() == env_lower)
+                            .map(|s| s.to_lowercase() == environment)
                             .unwrap_or(false)
                     }))
                     .unwrap_or(false);
@@ -2915,8 +2891,8 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_
         "crypt_env_create_category" => tool_create_category(args, token),
         "crypt_env_update_category" => tool_update_category(args, token),
         "crypt_env_delete_category" => tool_delete_category(args, token),
-        "crypt_env_list_workspaces" => tool_list_workspaces(token),
-        "crypt_env_inject_workspace" => tool_inject_workspace(args, token),
+        "crypt_env_list_projects" => tool_list_projects(token),
+        "crypt_env_inject_environment" => tool_inject_environment(args, token),
         "crypt_env_relay_send" => tool_relay_send(args, token),
         "crypt_env_relay_receive" => tool_relay_receive(args, token),
         "crypt_env_share_workspace_send" => tool_share_workspace_send(args, token),
@@ -2925,7 +2901,7 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_
         "crypt_env_add_mcp_server" => tool_add_mcp_server(args, token),
         "crypt_env_update_mcp_server" => tool_update_mcp_server(args, token),
         "crypt_env_delete_mcp_server" => tool_delete_mcp_server(args, token),
-        "crypt_env_list_workspaces_by_env" => tool_list_workspaces_by_env(args, token),
+        "crypt_env_list_environments_by_name" => tool_list_environments_by_name(token),
         "crypt_env_inject_env_by_name" => tool_inject_env_by_name(args, token),
         "crypt_env_import_env_file" => tool_import_env_file(args, token),
         _ => tool_err(format!("unknown tool: {name}")),

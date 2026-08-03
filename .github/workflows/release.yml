@@ -106,7 +106,8 @@ jobs:
           if-no-files-found: warn
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/dmg/*.sig
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
             src-tauri/target/release/crypt-env-mcp
             src-tauri/target/release/crypt-env
 
@@ -203,9 +204,10 @@ jobs:
           # Windows installer + sigs + CLI binaries
           find dist/windows -name "*.exe" | xargs -I{} cp {} release/
           find dist/windows -name "*.sig" | xargs -I{} cp {} release/
-          # macOS .dmg + sigs + CLI binaries (renamed to avoid collision)
+          # macOS .dmg (manual install) + .app.tar.gz + sig (updater artifact) + CLI binaries (renamed to avoid collision)
           find dist/macos -name "*.dmg" | xargs -I{} cp {} release/
-          find dist/macos -name "*.sig" | xargs -I{} cp {} release/
+          find dist/macos -name "*.app.tar.gz" | xargs -I{} cp {} release/
+          find dist/macos -name "*.app.tar.gz.sig" | xargs -I{} cp {} release/
           find dist/macos -name "crypt-env" -not -name "*.exe" | xargs -I{} cp {} release/crypt-env-macos
           find dist/macos -name "crypt-env-mcp" -not -name "*.exe" | xargs -I{} cp {} release/crypt-env-mcp-macos
           # Linux .deb, .AppImage + sigs + CLI binaries
@@ -225,10 +227,18 @@ jobs:
           BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-          WIN_SIG=$(cat release/CryptEnv_${VERSION}_x64-setup.exe.sig 2>/dev/null || echo "")
-          DMG_SIG=$(cat release/CryptEnv_${VERSION}_x64.dmg.sig 2>/dev/null || echo "")
-          DEB_SIG=$(cat release/crypt-env_${VERSION}_amd64.deb.sig 2>/dev/null || echo "")
-          APPIMAGE_SIG=$(cat release/crypt-env_${VERSION}_amd64.AppImage.sig 2>/dev/null || echo "")
+          # Fail loudly instead of silently emitting an empty (invalid) signature.
+          read_sig() {
+            if [ ! -s "$1" ]; then
+              echo "::error::missing or empty signature: $1" >&2
+              exit 1
+            fi
+            cat "$1"
+          }
+
+          WIN_SIG=$(read_sig release/CryptEnv_${VERSION}_x64-setup.exe.sig)
+          APP_TAR_SIG=$(read_sig release/CryptEnv.app.tar.gz.sig)
+          APPIMAGE_SIG=$(read_sig release/crypt-env_${VERSION}_amd64.AppImage.sig)
 
           cat > release/latest.json <<EOF
           {
@@ -240,13 +250,9 @@ jobs:
                 "signature": "${WIN_SIG}",
                 "url": "${BASE_URL}/CryptEnv_${VERSION}_x64-setup.exe"
               },
-              "darwin-x86_64": {
-                "signature": "${DMG_SIG}",
-                "url": "${BASE_URL}/CryptEnv_${VERSION}_x64.dmg"
-              },
               "darwin-aarch64": {
-                "signature": "${DMG_SIG}",
-                "url": "${BASE_URL}/CryptEnv_${VERSION}_x64.dmg"
+                "signature": "${APP_TAR_SIG}",
+                "url": "${BASE_URL}/CryptEnv.app.tar.gz"
               },
               "linux-x86_64": {
                 "signature": "${APPIMAGE_SIG}",
@@ -257,6 +263,19 @@ jobs:
           EOF
           echo "--- latest.json ---"
           cat release/latest.json
+
+      - name: Verify updater signatures are present
+        run: |
+          python3 -c "
+          import json, sys
+          with open('release/latest.json') as f:
+              data = json.load(f)
+          empty = [p for p, v in data['platforms'].items() if not v.get('signature')]
+          if empty:
+              print(f'::error::empty signature for platform(s): {empty}')
+              sys.exit(1)
+          print('All platform signatures present.')
+          "
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

@@ -169,6 +169,8 @@ Useful for SSH sessions, CI/CD scripts, or environments where a GUI is unavailab
 - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
 - **Linux**: `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`
 
+> **Known issue (Linux):** the mouse cursor may render oversized inside the app window on some Linux setups. Root cause is not yet confirmed — diagnosis is blocked on a native X11/Wayland desktop session (WSLg is not a valid repro/verification environment for this). No workaround is documented yet. Track status in [issue #6](https://github.com/maosuarez/crypt-env/issues/6).
+
 ### Install & Run
 
 ```bash

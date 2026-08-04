@@ -72,6 +72,19 @@ struct CommandDetail {
     placeholders: Vec<String>,
 }
 
+/// `/commands`-list-only wrapper adding the same `isGlobal`/`linked`
+/// discriminators as `ScopedItem`, kept off the shared `CommandDetail` (used
+/// unscoped by `GET /commands/:id`, which this change deliberately leaves
+/// alone — see plan §3/§4).
+#[derive(Serialize)]
+struct ScopedCommand {
+    #[serde(flatten)]
+    detail: CommandDetail,
+    #[serde(rename = "isGlobal")]
+    is_global: bool,
+    linked: bool,
+}
+
 #[derive(Serialize)]
 struct RevealResponse {
     value: String,
@@ -229,6 +242,120 @@ struct EnvScopeQuery {
     environment_id: Option<i64>,
     project: Option<String>,
     environment: Option<String>,
+    /// Only consumed by `handle_list_commands` — see `IncludeGlobal`. Present
+    /// here (rather than only on `ItemsQuery`) because `/commands` shares
+    /// this extractor; other handlers reusing `EnvScopeQuery` simply ignore
+    /// an unused query param, matching the existing per-handler duplication
+    /// style instead of refactoring the shared extractor in a bug-fix PR.
+    include_global: Option<String>,
+}
+
+/// Discovery-endpoint tri-state for whether globally-reusable, unlinked
+/// items are unioned into the response. Materialization endpoints
+/// (`/fill`, `/environments/:id/inject`, `/environments/:id/example`,
+/// `/share/listen`) never consult this — they stay strictly linkage-based.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IncludeGlobal {
+    With,
+    Without,
+    Only,
+}
+
+impl IncludeGlobal {
+    /// `None` (param omitted) defaults to `With` — see plan §4.5: a
+    /// default-`false` fix is invisible to callers who don't know the
+    /// param exists, which is precisely the bug being fixed.
+    fn parse(raw: Option<&str>) -> Result<IncludeGlobal, axum::response::Response> {
+        match raw {
+            None | Some("true") | Some("with") => Ok(IncludeGlobal::With),
+            Some("false") | Some("without") => Ok(IncludeGlobal::Without),
+            Some("only") => Ok(IncludeGlobal::Only),
+            Some(_) => Err(err_validation(
+                "include_global",
+                "must be one of: true, false, only",
+            )),
+        }
+    }
+}
+
+/// Union (or restriction) of `items` against the `linked` id set, per `mode`.
+/// Pure function — no `ApiState`, no lock, no crypto — fully unit-testable
+/// without a vault or an HTTP server. Stamps `linked` on every returned item.
+fn scope_items(items: Vec<VaultItem>, linked: &HashSet<i64>, mode: IncludeGlobal) -> Vec<ScopedItem> {
+    items
+        .into_iter()
+        .filter_map(|item| {
+            let is_linked = linked.contains(&item.id);
+            let is_global = item.is_global.unwrap_or(false);
+            let include = match mode {
+                IncludeGlobal::With => is_linked || is_global,
+                IncludeGlobal::Without => is_linked,
+                IncludeGlobal::Only => is_global,
+            };
+            include.then(|| ScopedItem { linked: is_linked, item })
+        })
+        .collect()
+}
+
+/// Applies the `/items` type/category/search filters over `ScopedItem`s.
+/// `type_filter`/`cat_filter`/`search_filter` are expected pre-lowercased by
+/// the caller, matching the pre-existing filter behaviour byte-for-byte.
+fn filter_scoped_items(
+    items: Vec<ScopedItem>,
+    type_filter: Option<&str>,
+    cat_filter: Option<&str>,
+    search_filter: Option<&str>,
+) -> Vec<ScopedItem> {
+    items
+        .into_iter()
+        .filter(|s| {
+            if let Some(t) = type_filter {
+                if s.item.item_type.to_lowercase() != t {
+                    return false;
+                }
+            }
+            if let Some(cat) = cat_filter {
+                let found = s
+                    .item
+                    .categories
+                    .iter()
+                    .flatten()
+                    .any(|c| c.to_lowercase() == cat);
+                if !found {
+                    return false;
+                }
+            }
+            if let Some(q) = search_filter {
+                let name_match = s
+                    .item
+                    .name
+                    .as_deref()
+                    .map(|n| n.to_lowercase().contains(q))
+                    .unwrap_or(false);
+                let title_match = s
+                    .item
+                    .title
+                    .as_deref()
+                    .map(|t| t.to_lowercase().contains(q))
+                    .unwrap_or(false);
+                if !name_match && !title_match {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
+}
+
+/// API-response-only wrapper adding the `linked` discriminator on top of
+/// `VaultItem`. MUST NOT be merged into `VaultItem` — that struct is what
+/// gets AES-GCM encrypted (`vault::encrypt_item`), so a view-only field on
+/// it risks being persisted into ciphertext by any round-trip write path.
+#[derive(Serialize)]
+struct ScopedItem {
+    #[serde(flatten)]
+    item: VaultItem,
+    linked: bool,
 }
 
 /// Resolves the environment for a scoped request, or a 422 response with a
@@ -431,6 +558,8 @@ struct ItemsQuery {
     environment_id: Option<i64>,
     project: Option<String>,
     environment: Option<String>,
+    /// Tri-state `true|false|only`, default `true` — see `IncludeGlobal`.
+    include_global: Option<String>,
 }
 
 /// The set of item ids linked into an environment's `environment_vars` — the
@@ -466,6 +595,11 @@ async fn handle_list_items(
     };
     let allowed_ids = environment_item_ids(&env);
 
+    let mode = match IncludeGlobal::parse(params.include_global.as_deref()) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+
     let items = match decrypt_all_items(&state).await {
         Ok(i) => i,
         Err(StatusCode::FORBIDDEN) => {
@@ -477,52 +611,24 @@ async fn handle_list_items(
                 .into_response()
         }
     };
-    let items = items.into_iter().filter(|item| allowed_ids.contains(&item.id));
+
+    // Union linked items with globals (per `mode`) before applying the
+    // type/category/search filters, so `search` also searches globals.
+    let scoped = scope_items(items, &allowed_ids, mode);
 
     let type_filter = params.item_type.as_deref().map(|s| s.to_lowercase());
     let cat_filter = params.category.as_deref().map(|s| s.to_lowercase());
     let search_filter = params.search.as_deref().map(|s| s.to_lowercase());
 
-    let filtered: Vec<VaultItem> = items
-        .into_iter()
-        .filter(|item| {
-            // Filtro por tipo
-            if let Some(ref t) = type_filter {
-                if item.item_type.to_lowercase() != *t {
-                    return false;
-                }
-            }
-            // Filtro por categoría
-            if let Some(ref cat) = cat_filter {
-                let found = item
-                    .categories
-                    .iter()
-                    .flatten()
-                    .any(|c| c.to_lowercase() == *cat);
-                if !found {
-                    return false;
-                }
-            }
-            // Filtro por búsqueda en nombre/título
-            if let Some(ref q) = search_filter {
-                let name_match = item
-                    .name
-                    .as_deref()
-                    .map(|n| n.to_lowercase().contains(q.as_str()))
-                    .unwrap_or(false);
-                let title_match = item
-                    .title
-                    .as_deref()
-                    .map(|t| t.to_lowercase().contains(q.as_str()))
-                    .unwrap_or(false);
-                if !name_match && !title_match {
-                    return false;
-                }
-            }
-            true
-        })
-        .map(redact_item)
-        .collect();
+    let filtered: Vec<ScopedItem> = filter_scoped_items(
+        scoped,
+        type_filter.as_deref(),
+        cat_filter.as_deref(),
+        search_filter.as_deref(),
+    )
+    .into_iter()
+    .map(|s| ScopedItem { item: redact_item(s.item), linked: s.linked })
+    .collect();
 
     (StatusCode::OK, Json(filtered)).into_response()
 }
@@ -988,6 +1094,11 @@ async fn handle_list_commands(
     };
     let allowed_ids = environment_item_ids(&env);
 
+    let mode = match IncludeGlobal::parse(scope.include_global.as_deref()) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+
     let items = match decrypt_all_items(&state).await {
         Ok(i) => i,
         Err(StatusCode::FORBIDDEN) => {
@@ -1000,19 +1111,26 @@ async fn handle_list_commands(
         }
     };
 
-    let commands: Vec<CommandDetail> = items
+    let commands: Vec<ScopedCommand> = scope_items(items, &allowed_ids, mode)
         .into_iter()
-        .filter(|item| item.item_type == "command" && allowed_ids.contains(&item.id))
-        .map(|item| {
+        .filter(|s| s.item.item_type == "command")
+        .map(|s| {
+            let is_global = s.item.is_global.unwrap_or(false);
+            let linked = s.linked;
+            let item = s.item;
             let template = item.command.as_deref().unwrap_or("");
             let placeholders = extract_placeholders(template);
-            CommandDetail {
-                id: item.id,
-                name: item.name.unwrap_or_default(),
-                description: item.description,
-                shell: item.shell,
-                command: item.command,
-                placeholders,
+            ScopedCommand {
+                detail: CommandDetail {
+                    id: item.id,
+                    name: item.name.unwrap_or_default(),
+                    description: item.description,
+                    shell: item.shell,
+                    command: item.command,
+                    placeholders,
+                },
+                is_global,
+                linked,
             }
         })
         .collect();
@@ -3118,5 +3236,162 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         .await
     {
         eprintln!("[api] REST server error: {e}");
+    }
+}
+
+// ─── Tests: issue #13, global-item scoped visibility ─────────────────────────
+//
+// Pure-function tests: plain `VaultItem` values and a `project::Environment`
+// with synthetic `vars`, no database, no key, no async. `VaultItem`
+// deliberately has no `#[derive(Debug)]` (it holds decrypted plaintext
+// secrets — CLAUDE.md forbids secrets in logs/errors, and a stray `{:?}` on
+// assertion failure would leak one into CI output), so assertions below
+// compare individual fields rather than whole structs.
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    /// Builds a minimal `VaultItem` fixture. `is_global` mirrors the
+    /// `Option<bool>` shape of the real field (`None` behaves like `false`
+    /// for scoping purposes, same as `unwrap_or(false)` in `scope_items`).
+    fn item(id: i64, name: &str, is_global: Option<bool>) -> VaultItem {
+        VaultItem {
+            id,
+            item_type: "secret".to_string(),
+            name: Some(name.to_string()),
+            value: None,
+            url: None,
+            username: None,
+            password: None,
+            title: None,
+            description: None,
+            command: None,
+            shell: None,
+            categories: None,
+            notes: None,
+            content: None,
+            created: "2026-01-01T00:00:00Z".to_string(),
+            is_global,
+        }
+    }
+
+    fn env_with_vars(pairs: &[(&str, i64)]) -> project::Environment {
+        project::Environment {
+            id: 1,
+            project_id: 1,
+            name: "test".to_string(),
+            is_default: true,
+            paths: vec![],
+            vars: pairs
+                .iter()
+                .map(|(key, item_id)| project::EnvironmentVar {
+                    id: 0,
+                    key: key.to_string(),
+                    item_id: *item_id,
+                })
+                .collect(),
+            created: "2026-01-01T00:00:00Z".to_string(),
+            updated: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn global_unlinked_item_visible_by_default() {
+        let item_a = item(1, "A", Some(false)); // linked, non-global
+        let item_b = item(2, "B", Some(true)); // unlinked, global
+        let env = env_with_vars(&[("A_KEY", 1)]);
+        let linked = environment_item_ids(&env);
+
+        let result = scope_items(vec![item_a, item_b], &linked, IncludeGlobal::With);
+
+        assert_eq!(result.len(), 2, "default mode must return both linked and unlinked-global items");
+        let b = result.iter().find(|s| s.item.id == 2).expect("item B must be present");
+        assert_eq!(b.item.is_global, Some(true));
+        assert!(!b.linked, "unlinked global item must report linked: false");
+    }
+
+    #[test]
+    fn linked_item_reports_linked_true() {
+        let item_a = item(1, "A", Some(false));
+        let env = env_with_vars(&[("A_KEY", 1)]);
+        let linked = environment_item_ids(&env);
+
+        let result = scope_items(vec![item_a], &linked, IncludeGlobal::With);
+
+        assert_eq!(result.len(), 1);
+        assert!(result[0].linked, "linked item must report linked: true");
+        assert_eq!(result[0].item.is_global, Some(false));
+    }
+
+    #[test]
+    fn global_and_linked_item_appears_once() {
+        let item_c = item(3, "C", Some(true)); // both global and linked
+        let env = env_with_vars(&[("C_KEY", 3)]);
+        let linked = environment_item_ids(&env);
+
+        let result = scope_items(vec![item_c], &linked, IncludeGlobal::With);
+
+        assert_eq!(result.len(), 1, "item that is both global and linked must appear exactly once (dedup guard)");
+        assert!(result[0].linked);
+        assert_eq!(result[0].item.is_global, Some(true));
+    }
+
+    #[test]
+    fn include_global_false_matches_legacy_scope() {
+        let item_a = item(1, "A", Some(false)); // linked, non-global
+        let item_b = item(2, "B", Some(true)); // unlinked, global
+        let env = env_with_vars(&[("A_KEY", 1)]);
+        let linked = environment_item_ids(&env);
+
+        let result = scope_items(vec![item_a, item_b], &linked, IncludeGlobal::Without);
+
+        assert_eq!(result.len(), 1, "Without must return exactly the linked set, matching the pre-change filter");
+        assert_eq!(result[0].item.id, 1);
+        assert!(result[0].linked);
+    }
+
+    #[test]
+    fn include_global_only_returns_globals_regardless_of_link() {
+        let item_a = item(1, "A", Some(false)); // linked, non-global
+        let item_b = item(2, "B", Some(true)); // unlinked, global
+        let item_c = item(3, "C", Some(true)); // linked, global
+        let env = env_with_vars(&[("A_KEY", 1), ("C_KEY", 3)]);
+        let linked = environment_item_ids(&env);
+
+        let result = scope_items(vec![item_a, item_b, item_c], &linked, IncludeGlobal::Only);
+
+        let ids: HashSet<i64> = result.iter().map(|s| s.item.id).collect();
+        assert_eq!(ids, HashSet::from([2, 3]), "Only must return all is_global items regardless of linkage, excluding non-global A");
+    }
+
+    #[test]
+    fn search_and_type_filters_apply_to_unioned_globals() {
+        let item_a = item(1, "DB_HOST", Some(false)); // linked
+        let item_b = item(2, "API_KEY", Some(true)); // unlinked, global
+        let env = env_with_vars(&[("DB_HOST", 1)]);
+        let linked = environment_item_ids(&env);
+
+        let scoped = scope_items(vec![item_a, item_b], &linked, IncludeGlobal::With);
+        assert_eq!(scoped.len(), 2, "union must include both before filtering");
+
+        let filtered = filter_scoped_items(scoped, None, None, Some("api"));
+
+        assert_eq!(filtered.len(), 1, "search must narrow within the union, including unioned globals");
+        assert_eq!(filtered[0].item.id, 2);
+    }
+
+    #[test]
+    fn invalid_include_global_value_is_rejected() {
+        // `axum::response::Response` (the `Err` side) implements neither
+        // `Debug` nor `PartialEq`, so `assert_eq!`/`unwrap()` on the whole
+        // `Result` won't compile — `matches!` pattern-matches without
+        // requiring either trait.
+        assert!(IncludeGlobal::parse(Some("bogus")).is_err());
+        assert!(matches!(IncludeGlobal::parse(None), Ok(IncludeGlobal::With)));
+        assert!(matches!(IncludeGlobal::parse(Some("true")), Ok(IncludeGlobal::With)));
+        assert!(matches!(IncludeGlobal::parse(Some("with")), Ok(IncludeGlobal::With)));
+        assert!(matches!(IncludeGlobal::parse(Some("false")), Ok(IncludeGlobal::Without)));
+        assert!(matches!(IncludeGlobal::parse(Some("without")), Ok(IncludeGlobal::Without)));
+        assert!(matches!(IncludeGlobal::parse(Some("only")), Ok(IncludeGlobal::Only)));
     }
 }

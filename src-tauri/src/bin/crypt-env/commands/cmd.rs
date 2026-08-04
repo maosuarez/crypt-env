@@ -84,11 +84,8 @@ fn command_info(name: &str, resolved_scope: &ResolvedScope) -> Result<(), CliErr
     }
 
     let commands: Vec<CommandDetail> = resp.json().map_err(|e| CliError::Api(e.to_string()))?;
-    let name_lower = name.to_lowercase();
 
-    let found = commands
-        .into_iter()
-        .find(|c| c.name.to_lowercase() == name_lower);
+    let found = client::resolve_command_by_name(commands, name);
 
     let cmd_id = match found {
         Some(c) => c.id,
@@ -133,11 +130,8 @@ fn run_command(name: &str, vars: &[String], resolved_scope: &ResolvedScope) -> R
     }
 
     let commands: Vec<CommandDetail> = resp.json().map_err(|e| CliError::Api(e.to_string()))?;
-    let name_lower = name.to_lowercase();
 
-    let cmd = commands
-        .into_iter()
-        .find(|c| c.name.to_lowercase() == name_lower)
+    let cmd = client::resolve_command_by_name(commands, name)
         .ok_or_else(|| CliError::NotFound(name.to_string()))?;
 
     let mut template = cmd.command.unwrap_or_default();

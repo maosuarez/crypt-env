@@ -104,3 +104,50 @@ async fn test_db_init_vault_and_get_meta() {
     assert_eq!(salt, "deadbeef_salt");
     assert_eq!(token, "deadbeef_token");
 }
+
+// ─── Issue #13: global-item scoped visibility — data-path guards ─────────────
+//
+// The API's scope filter (src-tauri/src/api/mod.rs, `scope_items`) now reads
+// `is_global` off every row returned by `list_items()` to decide whether an
+// unlinked item should be unioned into a discovery response. These two tests
+// guard the data path that decision depends on: the DB layer must round-trip
+// `is_global` faithfully through both insert/update (`upsert_item`) and the
+// dedicated toggle (`set_item_global`).
+
+#[tokio::test]
+async fn test_db_list_items_preserves_is_global_flag() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let db = VaultDb::open(&db_path).await.unwrap();
+
+    let global_id = db.upsert_item(0, "secret", "global_data", "2026-01-01", true).await.unwrap();
+    let non_global_id = db.upsert_item(0, "secret", "scoped_data", "2026-01-01", false).await.unwrap();
+
+    let items = db.list_items().await.unwrap();
+    assert_eq!(items.len(), 2);
+
+    let global_row = items.iter().find(|r| r.0 == global_id).expect("global item must be present");
+    assert!(global_row.4, "tuple index 4 (is_global) must be true for the item created global");
+
+    let scoped_row = items.iter().find(|r| r.0 == non_global_id).expect("non-global item must be present");
+    assert!(!scoped_row.4, "tuple index 4 (is_global) must be false for the item created non-global");
+}
+
+#[tokio::test]
+async fn test_db_set_item_global_roundtrip() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let db = VaultDb::open(&db_path).await.unwrap();
+
+    let id = db.upsert_item(0, "secret", "data", "2026-01-01", false).await.unwrap();
+
+    db.set_item_global(id, true).await.unwrap();
+    let items = db.list_items().await.unwrap();
+    let row = items.iter().find(|r| r.0 == id).unwrap();
+    assert!(row.4, "set_item_global(true) must flip is_global to true in list_items");
+
+    db.set_item_global(id, false).await.unwrap();
+    let items = db.list_items().await.unwrap();
+    let row = items.iter().find(|r| r.0 == id).unwrap();
+    assert!(!row.4, "set_item_global(false) must flip is_global back to false in list_items");
+}

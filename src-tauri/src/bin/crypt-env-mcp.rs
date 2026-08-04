@@ -202,6 +202,7 @@ fn tool_definitions() -> serde_json::Value {
                 "properties": {
                     "type": { "type": "string", "description": "Filter by type: secret, credential, link, command, note" },
                     "category": { "type": "string", "description": "Filter by category name" },
+                    "include_global": { "type": "string", "enum": ["true", "false", "only"], "description": "true (default) also lists reusable global secrets not yet linked into this environment — these appear with `linked: false` and will NOT be written by generate/inject/fill until linked. false restricts to items actually linked into this environment (what fill/inject will materialize). only returns just the global secrets, ignoring linkage." },
                     "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
                     "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
                     "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
@@ -226,6 +227,7 @@ fn tool_definitions() -> serde_json::Value {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Search term to match against item names" },
+                    "include_global": { "type": "string", "enum": ["true", "false", "only"], "description": "true (default) also searches reusable global secrets not yet linked into this environment — these appear with `linked: false` and will NOT be written by generate/inject/fill until linked. false restricts to items actually linked into this environment (what fill/inject will materialize). only returns just the global secrets, ignoring linkage." },
                     "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
                     "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
                     "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
@@ -865,6 +867,10 @@ fn tool_list_items(args: &serde_json::Value, token: &str) -> serde_json::Value {
         url.push_str(&format!("{}category={}", sep, cat));
         sep = '&';
     }
+    if let Some(ig) = args.get("include_global").and_then(|v| v.as_str()) {
+        url.push_str(&format!("{}include_global={}", sep, urlencod(ig)));
+        sep = '&';
+    }
     append_scope_params(&mut url, &mut sep, args);
 
     let resp = match vault_get(&url, token) {
@@ -899,6 +905,10 @@ fn tool_search_items(args: &serde_json::Value, token: &str) -> serde_json::Value
 
     let mut url = format!("/items?search={}", urlencod(&query));
     let mut sep = '&';
+    if let Some(ig) = args.get("include_global").and_then(|v| v.as_str()) {
+        url.push_str(&format!("{}include_global={}", sep, urlencod(ig)));
+        sep = '&';
+    }
     append_scope_params(&mut url, &mut sep, args);
 
     let resp = match vault_get(&url, token) {

@@ -330,6 +330,57 @@ pub struct GlobalToggleResult {
     pub forked: Vec<VaultItem>,
 }
 
+/// Pure logic behind `vault_set_item_global`: toggles `isGlobal`, or — when
+/// un-globaling an item with more than one owning project — forks it into
+/// one independent copy per owner. Split out the same way `create_project_item`
+/// already was, so this is unit-testable without a Tauri runtime; the
+/// `#[tauri::command]` below is now a thin wrapper delegating to it with
+/// identical behaviour.
+pub async fn set_item_global(
+    db: &VaultDb,
+    key: &CryptoKey,
+    id: i64,
+    global: bool,
+) -> Result<GlobalToggleResult, String> {
+    let owners = db.list_owning_projects(id).await?;
+
+    // Marking global, or un-globaling something with ≤1 owner: no fork needed.
+    if global || owners.len() <= 1 {
+        db.set_item_global(id, global).await?;
+        let raw = db.list_items().await?;
+        let updated = raw
+            .into_iter()
+            .find(|(row_id, ..)| *row_id == id)
+            .and_then(|(row_id, _, data, _, is_global)| decrypt_item(key, row_id, &data, is_global).ok());
+        return Ok(GlobalToggleResult { updated, forked: vec![] });
+    }
+
+    // Un-globaling a multi-owner item: fork one independent copy per owner.
+    let raw = db.list_items().await?;
+    let (_, item_type, data, created, _) = raw
+        .into_iter()
+        .find(|(row_id, ..)| *row_id == id)
+        .ok_or("item not found")?;
+    let original = decrypt_item(key, id, &data, true)?;
+
+    let mut forked = Vec::with_capacity(owners.len());
+    for project_id in &owners {
+        let mut copy = original.clone();
+        copy.id = 0;
+        copy.is_global = Some(false);
+        let encrypted = encrypt_item(key, &copy)?;
+        let new_id = db.upsert_item(0, &item_type, &encrypted, &created, false).await?;
+        db.add_item_owner(new_id, *project_id).await?;
+        db.repoint_env_var_item(*project_id, id, new_id).await?;
+        copy.id = new_id;
+        forked.push(copy);
+    }
+
+    db.delete_item(id).await?;
+
+    Ok(GlobalToggleResult { updated: None, forked })
+}
+
 #[tauri::command]
 pub async fn vault_set_item_global(
     id: i64,
@@ -339,44 +390,7 @@ pub async fn vault_set_item_global(
     let mut s = state.lock().await;
     let key = s.key.as_ref().ok_or("vault is locked")?.clone();
     s.touch();
-
-    let owners = s.db.list_owning_projects(id).await?;
-
-    // Marking global, or un-globaling something with ≤1 owner: no fork needed.
-    if global || owners.len() <= 1 {
-        s.db.set_item_global(id, global).await?;
-        let raw = s.db.list_items().await?;
-        let updated = raw
-            .into_iter()
-            .find(|(row_id, ..)| *row_id == id)
-            .and_then(|(row_id, _, data, _, is_global)| decrypt_item(&key, row_id, &data, is_global).ok());
-        return Ok(GlobalToggleResult { updated, forked: vec![] });
-    }
-
-    // Un-globaling a multi-owner item: fork one independent copy per owner.
-    let raw = s.db.list_items().await?;
-    let (_, item_type, data, created, _) = raw
-        .into_iter()
-        .find(|(row_id, ..)| *row_id == id)
-        .ok_or("item not found")?;
-    let original = decrypt_item(&key, id, &data, true)?;
-
-    let mut forked = Vec::with_capacity(owners.len());
-    for project_id in &owners {
-        let mut copy = original.clone();
-        copy.id = 0;
-        copy.is_global = Some(false);
-        let encrypted = encrypt_item(&key, &copy)?;
-        let new_id = s.db.upsert_item(0, &item_type, &encrypted, &created, false).await?;
-        s.db.add_item_owner(new_id, *project_id).await?;
-        s.db.repoint_env_var_item(*project_id, id, new_id).await?;
-        copy.id = new_id;
-        forked.push(copy);
-    }
-
-    s.db.delete_item(id).await?;
-
-    Ok(GlobalToggleResult { updated: None, forked })
+    set_item_global(&s.db, &key, id, global).await
 }
 
 /// Which projects currently reference (own) this item — used for "used by N
@@ -1146,4 +1160,262 @@ pub async fn biometric_disable(state: State<'_, SharedState>) -> Result<(), Stri
     let s = state.lock().await;
     s.db.set_setting("biometric_blob", "").await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::DbEnvironmentVar;
+
+    async fn test_db() -> (tempfile::TempDir, VaultDb, [u8; 32]) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.db");
+        let db = VaultDb::open(path.to_str().unwrap()).await.unwrap();
+        let (salt, token, key) = crypto::init_vault_crypto(b"test-master-password-1").unwrap();
+        db.init_vault(&salt, &token).await.unwrap();
+        (dir, db, key)
+    }
+
+    fn plain_secret(name: &str, value: &str, is_global: bool) -> VaultItem {
+        VaultItem {
+            id: 0,
+            item_type: "secret".to_string(),
+            name: Some(name.to_string()),
+            value: Some(value.to_string()),
+            url: None,
+            username: None,
+            password: None,
+            title: None,
+            description: None,
+            command: None,
+            shell: None,
+            categories: None,
+            notes: None,
+            content: None,
+            created: "0".to_string(),
+            is_global: Some(is_global),
+        }
+    }
+
+    async fn literal_var(db: &VaultDb, project_name: &str, key_name: &str, literal: &str) -> (i64, i64) {
+        let project_id = db.upsert_project(0, project_name, None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+        db.set_environment_vars(
+            env_id,
+            &[DbEnvironmentVar {
+                id: 0,
+                environment_id: env_id,
+                key: key_name.to_string(),
+                item_id: None,
+                literal: Some(literal.to_string()),
+            }],
+        )
+        .await
+        .unwrap();
+        (project_id, env_id)
+    }
+
+    // ─── migrate_literal_vars_to_items ────────────────────────────────────
+
+    #[tokio::test]
+    async fn migrate_converts_literal_var_into_real_item() {
+        let (_dir, db, key) = test_db().await;
+        let (project_id, env_id) = literal_var(&db, "proj-a", "LITERAL_KEY", "literal-secret").await;
+
+        migrate_literal_vars_to_items(&db, &key).await.unwrap();
+
+        let vars = db.get_environment_vars(env_id).await.unwrap();
+        assert_eq!(vars.len(), 1);
+        assert!(vars[0].literal.is_none(), "literal must be cleared after migration");
+        let item_id = vars[0].item_id.expect("item_id must be set after migration");
+
+        let owners = db.list_owning_projects(item_id).await.unwrap();
+        assert_eq!(owners, vec![project_id]);
+
+        let raw = db.list_items().await.unwrap();
+        let (_, _, data, _, is_global) = raw.into_iter().find(|(id, ..)| *id == item_id).unwrap();
+        let item = decrypt_item(&key, item_id, &data, is_global).unwrap();
+        assert_eq!(item.name.as_deref(), Some("LITERAL_KEY"));
+        assert_eq!(item.value.as_deref(), Some("literal-secret"));
+        assert_eq!(item.is_global, Some(false));
+    }
+
+    #[tokio::test]
+    async fn migrate_gives_each_project_its_own_owned_item() {
+        let (_dir, db, key) = test_db().await;
+        let (project_a, _) = literal_var(&db, "proj-a", "KEY_A", "secret-a").await;
+        let (project_b, _) = literal_var(&db, "proj-b", "KEY_B", "secret-b").await;
+
+        migrate_literal_vars_to_items(&db, &key).await.unwrap();
+
+        let raw = db.list_items().await.unwrap();
+        assert_eq!(raw.len(), 2, "one item per migrated literal var");
+        for (id, ..) in &raw {
+            let owners = db.list_owning_projects(*id).await.unwrap();
+            assert!(owners == vec![project_a] || owners == vec![project_b]);
+        }
+    }
+
+    #[tokio::test]
+    async fn migrate_is_a_noop_once_already_migrated() {
+        let (_dir, db, key) = test_db().await;
+        db.set_setting("migrated_literals_v1", "true").await.unwrap();
+        let (_project_id, env_id) = literal_var(&db, "proj-a", "LITERAL_KEY", "literal-secret").await;
+
+        migrate_literal_vars_to_items(&db, &key).await.unwrap();
+
+        let vars = db.get_environment_vars(env_id).await.unwrap();
+        assert_eq!(vars.len(), 1);
+        assert!(vars[0].item_id.is_none(), "already-migrated gate must skip the rewrite");
+        assert_eq!(vars[0].literal.as_deref(), Some("literal-secret"));
+        assert!(db.list_items().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn migrate_running_twice_is_idempotent() {
+        let (_dir, db, key) = test_db().await;
+        literal_var(&db, "proj-a", "LITERAL_KEY", "literal-secret").await;
+
+        migrate_literal_vars_to_items(&db, &key).await.unwrap();
+        let first_count = db.list_items().await.unwrap().len();
+
+        migrate_literal_vars_to_items(&db, &key).await.unwrap();
+        let second_count = db.list_items().await.unwrap().len();
+
+        assert_eq!(first_count, 1);
+        assert_eq!(second_count, 1, "second call must not create duplicate items");
+    }
+
+    // ─── create_project_item ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_project_item_grants_ownership() {
+        let (_dir, db, key) = test_db().await;
+        let project_id = db.upsert_project(0, "proj", None, "generic").await.unwrap();
+        let item = plain_secret("NEW_ITEM", "value-1", false);
+
+        let new_id = create_project_item(&db, &key, &item, project_id).await.unwrap();
+
+        assert_eq!(db.list_owning_projects(new_id).await.unwrap(), vec![project_id]);
+    }
+
+    #[tokio::test]
+    async fn create_project_item_is_never_global_regardless_of_input() {
+        let (_dir, db, key) = test_db().await;
+        let project_id = db.upsert_project(0, "proj", None, "generic").await.unwrap();
+        let mut item = plain_secret("NEW_ITEM", "value-1", false);
+        item.is_global = Some(true); // caller tries to sneak in isGlobal=true
+
+        let new_id = create_project_item(&db, &key, &item, project_id).await.unwrap();
+
+        let raw = db.list_items().await.unwrap();
+        let (_, _, _, _, is_global) = raw.into_iter().find(|(id, ..)| *id == new_id).unwrap();
+        assert!(!is_global, "create_project_item must force is_global=false in the DB column");
+    }
+
+    #[tokio::test]
+    async fn create_project_item_twice_yields_two_owned_items() {
+        let (_dir, db, key) = test_db().await;
+        let project_id = db.upsert_project(0, "proj", None, "generic").await.unwrap();
+        let item_a = plain_secret("ITEM_A", "value-a", false);
+        let item_b = plain_secret("ITEM_B", "value-b", false);
+
+        let id_a = create_project_item(&db, &key, &item_a, project_id).await.unwrap();
+        let id_b = create_project_item(&db, &key, &item_b, project_id).await.unwrap();
+
+        assert_ne!(id_a, id_b);
+        let owned = db.list_owned_item_ids(project_id).await.unwrap();
+        assert!(owned.contains(&id_a) && owned.contains(&id_b));
+    }
+
+    // ─── set_item_global (fork logic) ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn set_item_global_true_updates_in_place() {
+        let (_dir, db, key) = test_db().await;
+        let project_id = db.upsert_project(0, "proj", None, "generic").await.unwrap();
+        let item = plain_secret("ITEM", "value", false);
+        let id = create_project_item(&db, &key, &item, project_id).await.unwrap();
+
+        let result = set_item_global(&db, &key, id, true).await.unwrap();
+
+        assert!(result.forked.is_empty());
+        let updated = result.updated.expect("updated item present");
+        assert_eq!(updated.is_global, Some(true));
+    }
+
+    #[tokio::test]
+    async fn set_item_global_false_with_single_owner_updates_in_place() {
+        let (_dir, db, key) = test_db().await;
+        let project_id = db.upsert_project(0, "proj", None, "generic").await.unwrap();
+        let mut item = plain_secret("ITEM", "value", true);
+        item.is_global = Some(true);
+        let encrypted = encrypt_item(&key, &item).unwrap();
+        let id = db.upsert_item(0, &item.item_type, &encrypted, &item.created, true).await.unwrap();
+        db.add_item_owner(id, project_id).await.unwrap();
+
+        let result = set_item_global(&db, &key, id, false).await.unwrap();
+
+        assert!(result.forked.is_empty(), "single owner must not fork");
+        assert_eq!(result.updated.unwrap().is_global, Some(false));
+    }
+
+    #[tokio::test]
+    async fn set_item_global_false_with_multiple_owners_forks_per_owner() {
+        let (_dir, db, key) = test_db().await;
+        let project_a = db.upsert_project(0, "proj-a", None, "generic").await.unwrap();
+        let project_b = db.upsert_project(0, "proj-b", None, "generic").await.unwrap();
+        let env_a = db.upsert_environment(0, project_a, "production", true).await.unwrap();
+        let env_b = db.upsert_environment(0, project_b, "production", true).await.unwrap();
+
+        let mut item = plain_secret("SHARED", "shared-value", true);
+        item.is_global = Some(true);
+        let encrypted = encrypt_item(&key, &item).unwrap();
+        let original_id = db.upsert_item(0, &item.item_type, &encrypted, &item.created, true).await.unwrap();
+        db.add_item_owner(original_id, project_a).await.unwrap();
+        db.add_item_owner(original_id, project_b).await.unwrap();
+        db.upsert_environment_var(env_a, "SHARED", original_id).await.unwrap();
+        db.upsert_environment_var(env_b, "SHARED", original_id).await.unwrap();
+
+        let result = set_item_global(&db, &key, original_id, false).await.unwrap();
+
+        assert!(result.updated.is_none());
+        assert_eq!(result.forked.len(), 2, "one fork per owning project");
+        for copy in &result.forked {
+            assert_eq!(copy.is_global, Some(false));
+            assert_eq!(copy.name.as_deref(), Some("SHARED"));
+            assert_eq!(copy.value.as_deref(), Some("shared-value"));
+        }
+
+        // Each project's environment var must now point at ITS OWN fork, not
+        // the deleted original nor the other project's fork.
+        let vars_a = db.get_environment_vars(env_a).await.unwrap();
+        let vars_b = db.get_environment_vars(env_b).await.unwrap();
+        let forked_ids: Vec<i64> = result.forked.iter().map(|c| c.id).collect();
+        assert!(forked_ids.contains(&vars_a[0].item_id.unwrap()));
+        assert!(forked_ids.contains(&vars_b[0].item_id.unwrap()));
+        assert_ne!(vars_a[0].item_id, vars_b[0].item_id);
+    }
+
+    #[tokio::test]
+    async fn set_item_global_false_multi_owner_deletes_the_original() {
+        let (_dir, db, key) = test_db().await;
+        let project_a = db.upsert_project(0, "proj-a", None, "generic").await.unwrap();
+        let project_b = db.upsert_project(0, "proj-b", None, "generic").await.unwrap();
+
+        let mut item = plain_secret("SHARED", "shared-value", true);
+        item.is_global = Some(true);
+        let encrypted = encrypt_item(&key, &item).unwrap();
+        let original_id = db.upsert_item(0, &item.item_type, &encrypted, &item.created, true).await.unwrap();
+        db.add_item_owner(original_id, project_a).await.unwrap();
+        db.add_item_owner(original_id, project_b).await.unwrap();
+
+        set_item_global(&db, &key, original_id, false).await.unwrap();
+
+        let raw = db.list_items().await.unwrap();
+        assert!(
+            raw.iter().find(|(id, ..)| *id == original_id).is_none(),
+            "original shared row must be deleted after forking"
+        );
+    }
 }

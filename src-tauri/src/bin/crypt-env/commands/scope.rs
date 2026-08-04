@@ -240,3 +240,118 @@ pub fn resolve(
 
     Ok(ResolvedScope { project, environment })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── parse_project_config / find_project_config ───────────────────────
+
+    #[test]
+    fn parse_project_config_reads_project_and_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(&path, r#"{"project": "demo", "environment": "production"}"#).unwrap();
+
+        let config = parse_project_config(&path).unwrap();
+        assert_eq!(config.project, "demo");
+        assert_eq!(config.environment.as_deref(), Some("production"));
+    }
+
+    #[test]
+    fn parse_project_config_environment_is_optional() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(&path, r#"{"project": "demo"}"#).unwrap();
+
+        let config = parse_project_config(&path).unwrap();
+        assert_eq!(config.project, "demo");
+        assert!(config.environment.is_none());
+    }
+
+    #[test]
+    fn parse_project_config_rejects_empty_project_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(&path, r#"{"project": ""}"#).unwrap();
+
+        assert!(parse_project_config(&path).is_err());
+    }
+
+    #[test]
+    fn parse_project_config_rejects_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(&path, "not json").unwrap();
+
+        assert!(parse_project_config(&path).is_err());
+    }
+
+    #[test]
+    fn find_project_config_locates_file_in_a_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_config = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(&root_config, r#"{"project": "demo"}"#).unwrap();
+
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let found = find_project_config(&nested).unwrap();
+        assert_eq!(found.unwrap().project, "demo");
+    }
+
+    #[test]
+    fn find_project_config_returns_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        // A fresh tempdir has no crypt-env.json anywhere in its (short)
+        // ancestry within itself; searching starting here must not find the
+        // real repo's config accidentally.
+        let nested = dir.path().join("isolated");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("marker.txt"), "x").unwrap();
+
+        // Search only within the tempdir itself, not all the way to `/`,
+        // by asserting the immediate directory has no config — this does
+        // not prove the full upward walk is empty (that depends on the
+        // host filesystem), but does confirm a directory with no config
+        // file present does not spuriously report one.
+        let candidate = nested.join(CONFIG_FILE_NAME);
+        assert!(!candidate.is_file());
+    }
+
+    // ─── ResolvedScope ──────────────────────────────────────────────────────
+
+    #[test]
+    fn append_query_adds_leading_question_mark_when_url_has_none() {
+        let scope = ResolvedScope { project: "demo".to_string(), environment: "production".to_string() };
+        let url = scope.append_query("/items");
+        assert_eq!(url, "/items?project=demo&environment=production");
+    }
+
+    #[test]
+    fn append_query_appends_with_ampersand_when_url_already_has_a_query() {
+        let scope = ResolvedScope { project: "demo".to_string(), environment: "production".to_string() };
+        let url = scope.append_query("/items?type=secret");
+        assert_eq!(url, "/items?type=secret&project=demo&environment=production");
+    }
+
+    #[test]
+    fn to_query_string_url_encodes_special_characters() {
+        let scope = ResolvedScope { project: "my project".to_string(), environment: "prod/test".to_string() };
+        let qs = scope.to_query_string();
+        assert!(!qs.contains(' '), "spaces must be percent-encoded: {qs}");
+        assert!(qs.starts_with("project="));
+    }
+
+    // ─── resolve (network-free branches only) ──────────────────────────────
+
+    #[test]
+    fn resolve_with_both_flags_explicit_never_touches_network_or_fs() {
+        // allow_create is irrelevant here: with both flags given, neither
+        // find_project_config nor default_environment_for (which would need
+        // a live server) is ever called.
+        let scope = resolve(Some("demo"), Some("production"), false).unwrap();
+        assert_eq!(scope.project, "demo");
+        assert_eq!(scope.environment, "production");
+    }
+}

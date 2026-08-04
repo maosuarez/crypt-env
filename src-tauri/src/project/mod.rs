@@ -10,7 +10,7 @@ use crate::vault::SharedState;
 /// Every variable is a real vault item now — no more bare literals. `item_id`
 /// points into the shared `items` table; ownership (`item_projects`) is
 /// granted automatically by `save_environment` below.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EnvironmentVar {
     #[serde(default)]
     pub id: i64,
@@ -19,7 +19,7 @@ pub struct EnvironmentVar {
     pub item_id: i64,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Environment {
     #[serde(default)]
     pub id: i64,
@@ -82,7 +82,7 @@ pub struct ProjectInput {
     pub categories: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct InjectResult {
     pub paths: Vec<String>,
     pub written: Vec<String>,
@@ -522,4 +522,346 @@ pub async fn project_import() -> Result<ExportedProject, String> {
     let json = std::fs::read(&path).map_err(|e| e.to_string())?;
     let project: ExportedProject = serde_json::from_slice(&json).map_err(|e| format!("invalid file: {e}"))?;
     Ok(project)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::VaultDb;
+    use crate::vault::VaultItem;
+
+    async fn test_db() -> (tempfile::TempDir, VaultDb) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.db");
+        let db = VaultDb::open(path.to_str().unwrap()).await.unwrap();
+        (dir, db)
+    }
+
+    fn plain_secret(name: &str, value: &str) -> VaultItem {
+        VaultItem {
+            id: 0,
+            item_type: "secret".to_string(),
+            name: Some(name.to_string()),
+            value: Some(value.to_string()),
+            url: None,
+            username: None,
+            password: None,
+            title: None,
+            description: None,
+            command: None,
+            shell: None,
+            categories: None,
+            notes: None,
+            content: None,
+            created: "0".to_string(),
+            is_global: Some(false),
+        }
+    }
+
+    // ─── resolve_environment ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_by_environment_id() {
+        let (_dir, db) = test_db().await;
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+
+        let env = resolve_environment(&db, Some(env_id), None, None).await.unwrap();
+        assert_eq!(env.id, env_id);
+        assert_eq!(env.project_id, project_id);
+        assert_eq!(env.name, "production");
+    }
+
+    #[tokio::test]
+    async fn resolve_by_environment_id_unknown_errors() {
+        let (_dir, db) = test_db().await;
+        let err = resolve_environment(&db, Some(999_999), None, None).await.unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn resolve_by_project_and_environment() {
+        let (_dir, db) = test_db().await;
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+
+        let env = resolve_environment(&db, None, Some("demo"), Some("production")).await.unwrap();
+        assert_eq!(env.id, env_id);
+    }
+
+    #[tokio::test]
+    async fn resolve_project_name_is_case_insensitive() {
+        let (_dir, db) = test_db().await;
+        let project_id = db.upsert_project(0, "Demo", None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+
+        let env = resolve_environment(&db, None, Some("DEMO"), Some("production")).await.unwrap();
+        assert_eq!(env.id, env_id);
+    }
+
+    #[tokio::test]
+    async fn resolve_environment_name_is_case_insensitive() {
+        let (_dir, db) = test_db().await;
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "Production", true).await.unwrap();
+
+        let env = resolve_environment(&db, None, Some("demo"), Some("PRODUCTION")).await.unwrap();
+        assert_eq!(env.id, env_id);
+    }
+
+    #[tokio::test]
+    async fn resolve_known_project_unknown_environment_errors() {
+        let (_dir, db) = test_db().await;
+        db.upsert_project(0, "demo", None, "generic").await.unwrap();
+
+        let err = resolve_environment(&db, None, Some("demo"), Some("nope")).await.unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn resolve_unknown_project_errors() {
+        let (_dir, db) = test_db().await;
+        let err = resolve_environment(&db, None, Some("ghost"), Some("production")).await.unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn resolve_project_alone_without_environment_errors() {
+        // Current behaviour: `resolve_environment` has only two accepted
+        // shapes — `environment_id` alone, or `project` + `environment`
+        // together. There is NO "project alone -> default environment"
+        // fallback in the code today, even though earlier design notes
+        // floated one. A project name with no environment name falls
+        // through to the same "provide environment_id, or both..." error as
+        // passing neither. Pinned here so adding that fallback later is a
+        // deliberate, visible diff to this test rather than a silent change.
+        let (_dir, db) = test_db().await;
+        db.upsert_project(0, "demo", None, "generic").await.unwrap();
+
+        let err = resolve_environment(&db, None, Some("demo"), None).await.unwrap_err();
+        assert!(err.contains("provide environment_id"));
+    }
+
+    #[tokio::test]
+    async fn resolve_with_no_scope_params_errors() {
+        let (_dir, db) = test_db().await;
+        let err = resolve_environment(&db, None, None, None).await.unwrap_err();
+        assert!(err.contains("provide environment_id"));
+    }
+
+    #[tokio::test]
+    async fn resolve_environment_id_takes_precedence_over_project_and_environment() {
+        let (_dir, db) = test_db().await;
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+
+        // Mismatched project/environment names are ignored when environment_id is present.
+        let env = resolve_environment(&db, Some(env_id), Some("does-not-exist"), Some("also-not-real"))
+            .await
+            .unwrap();
+        assert_eq!(env.id, env_id);
+    }
+
+    // ─── inject_environment ─────────────────────────────────────────────
+
+    async fn seeded_env_with_item(db: &VaultDb, key: &[u8; 32], var_key: &str, value: &str) -> i64 {
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+        let item = plain_secret(var_key, value);
+        let encrypted = crate::vault::encrypt_item(key, &item).unwrap();
+        let item_id = db.upsert_item(0, "secret", &encrypted, &item.created, false).await.unwrap();
+        db.add_item_owner(item_id, project_id).await.unwrap();
+        db.upsert_environment_var(env_id, var_key, item_id).await.unwrap();
+        env_id
+    }
+
+    #[tokio::test]
+    async fn inject_writes_key_value_to_configured_path() {
+        let (dir, db) = test_db().await;
+        let (_, _, key) = crate::crypto::init_vault_crypto(b"pw").unwrap();
+        let env_id = seeded_env_with_item(&db, &key, "DB_HOST", "localhost").await;
+        let path = dir.path().join(".env");
+        db.set_environment_paths(env_id, &[path.to_str().unwrap().to_string()]).await.unwrap();
+
+        let result = inject_environment(&db, &key, env_id, None, None).await.unwrap();
+
+        assert_eq!(result.written, vec!["DB_HOST".to_string()]);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("DB_HOST=localhost"));
+        // The written file's parent must stay inside the tempdir — the
+        // fixture issue #7's path-traversal assertions build on this.
+        assert_eq!(path.parent().unwrap(), dir.path());
+    }
+
+    #[tokio::test]
+    async fn inject_merges_with_existing_file_preserving_unrelated_keys() {
+        let (dir, db) = test_db().await;
+        let (_, _, key) = crate::crypto::init_vault_crypto(b"pw").unwrap();
+        let env_id = seeded_env_with_item(&db, &key, "DB_HOST", "localhost").await;
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "PORT=3000\nDB_HOST=old-value\n").unwrap();
+        db.set_environment_paths(env_id, &[path.to_str().unwrap().to_string()]).await.unwrap();
+
+        inject_environment(&db, &key, env_id, None, None).await.unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("PORT=3000"), "unrelated key must survive");
+        assert!(content.contains("DB_HOST=localhost"), "managed key must be updated");
+    }
+
+    #[tokio::test]
+    async fn inject_output_path_is_added_to_configured_paths() {
+        let (dir, db) = test_db().await;
+        let (_, _, key) = crate::crypto::init_vault_crypto(b"pw").unwrap();
+        let env_id = seeded_env_with_item(&db, &key, "DB_HOST", "localhost").await;
+        let configured = dir.path().join(".env");
+        db.set_environment_paths(env_id, &[configured.to_str().unwrap().to_string()]).await.unwrap();
+        let extra = dir.path().join(".env.extra");
+
+        let result = inject_environment(&db, &key, env_id, Some(extra.to_str().unwrap().to_string()), None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.paths.len(), 2);
+        assert!(extra.exists());
+        assert!(configured.exists());
+    }
+
+    #[tokio::test]
+    async fn inject_output_dir_used_only_when_no_paths_configured() {
+        let (dir, db) = test_db().await;
+        let (_, _, key) = crate::crypto::init_vault_crypto(b"pw").unwrap();
+        let env_id = seeded_env_with_item(&db, &key, "DB_HOST", "localhost").await;
+        // no configured paths, no output_path
+
+        let result = inject_environment(&db, &key, env_id, None, Some(dir.path().to_str().unwrap().to_string()))
+            .await
+            .unwrap();
+
+        let expected = dir.path().join(".env.production");
+        assert_eq!(result.paths, vec![expected.to_str().unwrap().to_string()]);
+        assert!(expected.exists());
+    }
+
+    #[tokio::test]
+    async fn inject_unknown_environment_errors_not_found() {
+        let (_dir, db) = test_db().await;
+        let (_, _, key) = crate::crypto::init_vault_crypto(b"pw").unwrap();
+        let err = inject_environment(&db, &key, 999_999, None, None).await.unwrap_err();
+        assert_eq!(err, "environment not found");
+    }
+
+    #[tokio::test]
+    async fn inject_no_paths_and_no_output_errors() {
+        let (_dir, db) = test_db().await;
+        let (_, _, key) = crate::crypto::init_vault_crypto(b"pw").unwrap();
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+
+        let err = inject_environment(&db, &key, env_id, None, None).await.unwrap_err();
+        assert_eq!(err, "environment has no paths configured");
+    }
+
+    // ─── save_environment multi-owner guard ────────────────────────────
+
+    #[tokio::test]
+    async fn save_environment_links_item_already_owned_by_project() {
+        let (_dir, db) = test_db().await;
+        let (_, _, key) = crate::crypto::init_vault_crypto(b"pw").unwrap();
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let item = plain_secret("DB_HOST", "localhost");
+        let encrypted = crate::vault::encrypt_item(&key, &item).unwrap();
+        let item_id = db.upsert_item(0, "secret", &encrypted, &item.created, false).await.unwrap();
+        db.add_item_owner(item_id, project_id).await.unwrap();
+
+        let input = EnvironmentInput {
+            id: 0,
+            project_id,
+            name: "production".to_string(),
+            is_default: true,
+            paths: vec![],
+            vars: vec![EnvironmentVar { id: 0, key: "DB_HOST".to_string(), item_id }],
+        };
+
+        let env_id = save_environment(&db, input).await.unwrap();
+        let vars = db.get_environment_vars(env_id).await.unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].item_id, Some(item_id));
+    }
+
+    #[tokio::test]
+    async fn save_environment_grants_ownership_for_global_item() {
+        let (_dir, db) = test_db().await;
+        let (_, _, key) = crate::crypto::init_vault_crypto(b"pw").unwrap();
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let item = plain_secret("SHARED", "shared-value");
+        let encrypted = crate::vault::encrypt_item(&key, &item).unwrap();
+        let item_id = db.upsert_item(0, "secret", &encrypted, &item.created, true).await.unwrap();
+        // Not yet owned by project_id, but is_global = true.
+
+        let input = EnvironmentInput {
+            id: 0,
+            project_id,
+            name: "production".to_string(),
+            is_default: true,
+            paths: vec![],
+            vars: vec![EnvironmentVar { id: 0, key: "SHARED".to_string(), item_id }],
+        };
+
+        save_environment(&db, input).await.unwrap();
+        assert!(db.list_owning_projects(item_id).await.unwrap().contains(&project_id));
+    }
+
+    #[tokio::test]
+    async fn save_environment_rejects_unowned_non_global_item() {
+        let (_dir, db) = test_db().await;
+        let (_, _, key) = crate::crypto::init_vault_crypto(b"pw").unwrap();
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let other_project = db.upsert_project(0, "other", None, "generic").await.unwrap();
+        let item = plain_secret("PRIVATE", "value");
+        let encrypted = crate::vault::encrypt_item(&key, &item).unwrap();
+        let item_id = db.upsert_item(0, "secret", &encrypted, &item.created, false).await.unwrap();
+        db.add_item_owner(item_id, other_project).await.unwrap();
+
+        let input = EnvironmentInput {
+            id: 0,
+            project_id,
+            name: "production".to_string(),
+            is_default: true,
+            paths: vec![],
+            vars: vec![EnvironmentVar { id: 0, key: "PRIVATE".to_string(), item_id }],
+        };
+
+        let err = save_environment(&db, input).await.unwrap_err();
+        assert!(err.contains("not global"));
+    }
+
+    #[tokio::test]
+    async fn save_environment_replaces_previous_var_set() {
+        let (_dir, db) = test_db().await;
+        let (_, _, key) = crate::crypto::init_vault_crypto(b"pw").unwrap();
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let item_a = plain_secret("A", "va");
+        let item_b = plain_secret("B", "vb");
+        let enc_a = crate::vault::encrypt_item(&key, &item_a).unwrap();
+        let enc_b = crate::vault::encrypt_item(&key, &item_b).unwrap();
+        let id_a = db.upsert_item(0, "secret", &enc_a, &item_a.created, false).await.unwrap();
+        let id_b = db.upsert_item(0, "secret", &enc_b, &item_b.created, false).await.unwrap();
+        db.add_item_owner(id_a, project_id).await.unwrap();
+        db.add_item_owner(id_b, project_id).await.unwrap();
+
+        let env_id = save_environment(&db, EnvironmentInput {
+            id: 0, project_id, name: "production".to_string(), is_default: true,
+            paths: vec![], vars: vec![EnvironmentVar { id: 0, key: "A".to_string(), item_id: id_a }],
+        }).await.unwrap();
+
+        save_environment(&db, EnvironmentInput {
+            id: env_id, project_id, name: "production".to_string(), is_default: true,
+            paths: vec![], vars: vec![EnvironmentVar { id: 0, key: "B".to_string(), item_id: id_b }],
+        }).await.unwrap();
+
+        let vars = db.get_environment_vars(env_id).await.unwrap();
+        assert_eq!(vars.len(), 1, "second save must replace, not append to, the var set");
+        assert_eq!(vars[0].key, "B");
+    }
 }

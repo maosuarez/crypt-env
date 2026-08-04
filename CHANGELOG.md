@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.2] - 2026-08-04
+
+### Changed
+
+- **MCP: unified the environment-scope parameter name on `environment_id`** (issue #10). `crypt_env_inject_environment` and `crypt_env_generate_example_env` were the only two MCP tools naming the environment identifier `id` instead of `environment_id`, matching every other environment-scoped tool. This let an LLM caller that inferred the parameter name from the majority pass `environment_id` to these two tools and have it silently ignored — in the case where `project`+`environment` were also present, the resolver would fall through and inject a *different* environment's full decrypted variable set with no error. Both schemas now advertise `environment_id` with the canonical description used by every other scoped tool; the ambiguity error in `crypt_env_inject_env_by_name` now names `environment_id` instead of `id` as well.
+  - The bare `id` key is accepted as an unadvertised, deprecated alias for the whole 1.0.x line (`// DEPRECATED(remove in 1.1.0): environment 'id' alias, issue #10`). Calls using `id` still succeed, but the response text appends a fixed deprecation notice so the model is told to switch. Removed in 1.1.0.
+  - New in-crate tests (`src-tauri/src/bin/crypt-env-mcp.rs`, `#[cfg(test)] mod tests`) assert every environment-scoped tool declares `environment_id` and not a bare `id`, that the five item/category/workspace tools keep their bare `id`, and that the resolver prefers `environment_id` over the alias.
+  - `docs/reference.md` updated to drop the "inconsistent naming" note and describe the resolved state + deprecation window.
+
 ## [1.0.1] - 2026-07-28
 
 ### Fixed

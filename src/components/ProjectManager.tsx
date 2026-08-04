@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { platform } from '@tauri-apps/plugin-os';
 import { Icon } from './ui/Icon';
 import { TagInput } from './ui/TagInput';
 import { useVaultStore } from '../store';
@@ -544,6 +545,24 @@ export function ProjectManager() {
   const [saving,    setSaving]    = useState(false);
   const [injecting, setInjecting] = useState(false);
 
+  // WSL bridge (issue #3) — ephemeral machine state, not vault state, so a
+  // plain local state is enough (no Zustand store, no TanStack Query).
+  const [isWindows,      setIsWindows]      = useState(false);
+  const [wslDistros,     setWslDistros]     = useState<string[]>([]);
+  const [wslBusy,        setWslBusy]        = useState(false);
+  const [wslPickerOpen,  setWslPickerOpen]  = useState(false);
+
+  useEffect(() => {
+    setIsWindows(platform() === 'windows');
+  }, []);
+
+  useEffect(() => {
+    if (!isWindows) return;
+    invoke<string[]>('wsl_list_distros')
+      .then(setWslDistros)
+      .catch(() => setWslDistros([]));
+  }, [isWindows]);
+
   useEffect(() => { load(); }, []);
 
   // Keep the selected project/environment in sync once the store reloads
@@ -727,19 +746,38 @@ export function ProjectManager() {
     setEnvPaths((prev) => prev.filter((_, i) => i !== idx));
   };
 
+  // Shared tail of "a path was picked" handling, reused by both the plain
+  // browse button and the WSL-seeded one (plan §3.4).
+  const applyPickedEnvPath = (picked: string | null) => {
+    if (!picked) return;
+    const trimmed = picked.trim();
+    if (!envPaths.includes(trimmed)) setEnvPaths((prev) => [...prev, trimmed]);
+    if (!projName && isCreatingProj) {
+      const folder = folderNameFromPath(trimmed);
+      if (folder) setProjName(folder);
+    }
+  };
+
   const handlePickEnvPath = async () => {
     try {
       const picked = await invoke<string | null>('project_pick_env_path');
-      if (picked) {
-        const trimmed = picked.trim();
-        if (!envPaths.includes(trimmed)) setEnvPaths((prev) => [...prev, trimmed]);
-        if (!projName && isCreatingProj) {
-          const folder = folderNameFromPath(trimmed);
-          if (folder) setProjName(folder);
-        }
-      }
+      applyPickedEnvPath(picked);
     } catch (e) {
       showToast(String(e), 'error');
+    }
+  };
+
+  const handleBrowseWsl = async (distro: string) => {
+    setWslPickerOpen(false);
+    setWslBusy(true);
+    try {
+      const home = await invoke<string>('wsl_distro_home', { distro });
+      const picked = await invoke<string | null>('project_pick_env_path', { startDir: home });
+      applyPickedEnvPath(picked);
+    } catch (e) {
+      showToast(String(e), 'error');
+    } finally {
+      setWslBusy(false);
     }
   };
 
@@ -1166,6 +1204,39 @@ export function ProjectManager() {
                     >
                       <Icon name="external" size={12} />
                     </button>
+                    {isWindows && wslDistros.length > 0 && (
+                      <div className="relative">
+                        <button
+                          onClick={() => {
+                            if (wslBusy) return;
+                            if (wslDistros.length === 1) {
+                              handleBrowseWsl(wslDistros[0]);
+                            } else {
+                              setWslPickerOpen((v) => !v);
+                            }
+                          }}
+                          disabled={wslBusy}
+                          title="Browse a WSL distro's filesystem for a .env file — starts the distro if it isn't running, which can take a few seconds"
+                          className="flex items-center gap-1 px-2.5 py-[6px] rounded-[3px] text-[10px] font-bold font-ui text-tx2 border border-bd2 hover:text-tx transition-colors disabled:opacity-40"
+                        >
+                          <Icon name="terminal" size={12} />
+                          {wslBusy ? '…' : 'WSL'}
+                        </button>
+                        {wslPickerOpen && wslDistros.length > 1 && (
+                          <div className="absolute left-0 top-8 z-50 min-w-[160px] bg-bg border border-bd rounded-[3px] shadow-lg py-1 flex flex-col">
+                            {wslDistros.map((distro) => (
+                              <button
+                                key={distro}
+                                onClick={() => handleBrowseWsl(distro)}
+                                className="flex items-center gap-2 px-3 py-1.5 text-left w-full text-[11px] font-mono text-tx2 hover:bg-raised hover:text-tx transition-colors"
+                              >
+                                {distro}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     <button
                       onClick={addPath}
                       disabled={!newPath.trim()}

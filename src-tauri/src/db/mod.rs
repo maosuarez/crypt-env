@@ -99,14 +99,22 @@ pub struct VaultDb {
 /// `409 CONFLICT`. Never substring-match sqlx's own error text — it's not a
 /// stable API and would leak SQL identifiers to the HTTP client on any
 /// mismatch.
-const PROJECT_NAME_CONFLICT: &str = "conflict: a project with this name already exists";
+///
+/// `pub` (not `pub(crate)`): every `[[bin]]` target in this package (the
+/// `crypt-env` CLI, the `crypt-env-mcp` server) is its own crate, separate
+/// from this `crypt_env_lib` library crate, even though they share one
+/// Cargo.toml — `pub(crate)` items here are invisible to code in `src/bin/`.
+/// Any consumer of this conflict-detection contract (e.g. issue #4) needs
+/// `pub` to reach it with `crypt_env_lib::db::PROJECT_NAME_CONFLICT`.
+pub const PROJECT_NAME_CONFLICT: &str = "conflict: a project with this name already exists";
 
 /// Same sentinel contract as `PROJECT_NAME_CONFLICT`, for
-/// `idx_environments_name_nocase`. `pub(crate)` (not private) because
-/// `project::ensure_no_case_collision`'s app-level (Unicode-aware) pre-check
-/// returns this exact same string on its own — reusing the constant instead
-/// of a second string literal keeps the two layers from drifting apart.
-pub(crate) const ENVIRONMENT_NAME_CONFLICT: &str =
+/// `idx_environments_name_nocase`. `pub` for the same cross-crate reason, and
+/// also because `project::ensure_no_case_collision`'s app-level
+/// (Unicode-aware) pre-check returns this exact same string on its own —
+/// reusing the constant instead of a second string literal keeps the two
+/// layers from drifting apart.
+pub const ENVIRONMENT_NAME_CONFLICT: &str =
     "conflict: an environment with this name already exists in this project";
 
 /// Detects a unique-constraint violation via `sqlx::Error::Database(_).
@@ -316,7 +324,17 @@ impl VaultDb {
         // Never `let _ = ...`: if the index can't be created for some other
         // reason, `init_schema` must fail loudly rather than leave the vault
         // unprotected with no signal.
-        let mut name_dedup_renames = self.dedupe_project_names_nocase().await?;
+        //
+        // Each dedup pass persists its own `RenameRecord`s to
+        // `env_name_dedup_v1` *as it renames each row* (inside
+        // `dedupe_project_names_nocase`/`dedupe_environment_names_nocase`
+        // themselves), not batched up and written here after both indexes
+        // succeed — the report is the sole reversal path for an otherwise
+        // irreversible rename, so a rename must never be able to happen
+        // without also being recorded, even if a later step in this function
+        // (e.g. the second `CREATE UNIQUE INDEX`) fails or the process is
+        // killed mid-migration.
+        self.dedupe_project_names_nocase().await?;
         sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name_nocase ON projects(name COLLATE NOCASE)")
             .execute(&self.pool)
             .await
@@ -327,15 +345,13 @@ impl VaultDb {
         // introduce a `default` row into a project that already has a
         // differently-cased `Default` — this block runs after the whole
         // `migrations` loop, so that case is caught too.
-        name_dedup_renames.extend(self.dedupe_environment_names_nocase().await?);
+        self.dedupe_environment_names_nocase().await?;
         sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_environments_name_nocase ON environments(project_id, name COLLATE NOCASE)",
         )
         .execute(&self.pool)
         .await
         .map_err(|e| format!("migration: could not enforce unique environment names (idx_environments_name_nocase): {e}"))?;
-
-        self.persist_rename_report(name_dedup_renames).await?;
 
         // One-time (not re-run every launch): pre-existing items that end up with
         // zero owners after the backfill above predate the whole project/ownership
@@ -402,14 +418,20 @@ impl VaultDb {
                     .await
                     .map_err(|e| format!("dedupe project names: {e}"))?;
 
-                renames.push(RenameRecord {
+                let record = RenameRecord {
                     table: "projects".to_string(),
                     id,
                     project_id: None,
                     from: original_name,
                     to: new_name,
                     at: now_iso8601(),
-                });
+                };
+                // Persisted immediately, per rename — not batched up and
+                // written once at the end of `init_schema` — so a rename can
+                // never land in the DB without also being recorded in the
+                // one report that makes it (by hand) reversible.
+                self.persist_rename_report(vec![record.clone()]).await?;
+                renames.push(record);
             }
         }
         Ok(renames)
@@ -418,15 +440,27 @@ impl VaultDb {
     /// Finds the first `<base>-<n>` (n starting at 2) that doesn't
     /// case-insensitively collide with any other project name, excluding
     /// `exclude_id` (the row being renamed itself).
+    ///
+    /// Compares via `LOWER(name) = LOWER(?)` — both sides folded by SQLite's
+    /// own (ASCII-only) `LOWER()` — rather than folding the candidate in Rust
+    /// with `to_lowercase()` (full Unicode) and binding that. Folding in Rust
+    /// would, for a non-ASCII `base` (e.g. `producciÓn`, itself already
+    /// SQLite-folded and so still carrying an unfolded `Ó`), fold *further*
+    /// than SQLite's `LOWER(name)` ever would on the stored side — so a real
+    /// collision (e.g. against a pre-existing `producciÓn-2`) would compare
+    /// unequal and be missed, the candidate would be accepted as "free", and
+    /// the following `UPDATE` would then trip the table's exact-match
+    /// `UNIQUE(project_id, name)` (or here, `UNIQUE` on `name`) constraint —
+    /// turning a routine dedup into a hard `init_schema` failure. See the
+    /// non-ASCII regression test for the reproduction.
     async fn next_free_project_name(&self, base: &str, exclude_id: i64) -> Result<String, String> {
         let mut suffix = 2i64;
         loop {
             let candidate = format!("{base}-{suffix}");
-            let candidate_lower = candidate.to_lowercase();
             let exists: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM projects WHERE LOWER(name) = ?1 AND id != ?2",
+                "SELECT COUNT(*) FROM projects WHERE LOWER(name) = LOWER(?1) AND id != ?2",
             )
-            .bind(&candidate_lower)
+            .bind(&candidate)
             .bind(exclude_id)
             .fetch_one(&self.pool)
             .await
@@ -490,14 +524,18 @@ impl VaultDb {
                     .await
                     .map_err(|e| format!("dedupe environment names: {e}"))?;
 
-                renames.push(RenameRecord {
+                let record = RenameRecord {
                     table: "environments".to_string(),
                     id,
                     project_id: Some(project_id),
                     from: original_name,
                     to: new_name,
                     at: now_iso8601(),
-                });
+                };
+                // Persisted immediately, per rename — see the matching
+                // comment in `dedupe_project_names_nocase`.
+                self.persist_rename_report(vec![record.clone()]).await?;
+                renames.push(record);
             }
         }
         Ok(renames)
@@ -506,6 +544,13 @@ impl VaultDb {
     /// Finds the first `<base>-<n>` (n starting at 2) that doesn't
     /// case-insensitively collide with any other environment in `project_id`,
     /// excluding `exclude_id` (the row being renamed itself).
+    ///
+    /// See `next_free_project_name` for why this compares via
+    /// `LOWER(name) = LOWER(?)` (both sides folded by SQLite, ASCII-only)
+    /// instead of pre-folding the candidate in Rust with `to_lowercase()`
+    /// (full Unicode) — the mismatch between the two folds is exactly what
+    /// let a non-ASCII collision slip past this check and then trip the
+    /// dedup `UPDATE` on the table's exact-match unique constraint.
     async fn next_free_environment_name(
         &self,
         project_id: i64,
@@ -515,12 +560,11 @@ impl VaultDb {
         let mut suffix = 2i64;
         loop {
             let candidate = format!("{base}-{suffix}");
-            let candidate_lower = candidate.to_lowercase();
             let exists: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM environments WHERE project_id = ?1 AND LOWER(name) = ?2 AND id != ?3",
+                "SELECT COUNT(*) FROM environments WHERE project_id = ?1 AND LOWER(name) = LOWER(?2) AND id != ?3",
             )
             .bind(project_id)
-            .bind(&candidate_lower)
+            .bind(&candidate)
             .bind(exclude_id)
             .fetch_one(&self.pool)
             .await
@@ -545,7 +589,25 @@ impl VaultDb {
         }
         let existing = self.get_setting("env_name_dedup_v1").await?;
         let mut all: Vec<RenameRecord> = match existing {
-            Some(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Some(json) => match serde_json::from_str(&json) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    // Never silently drop prior history on a parse failure
+                    // (schema drift, a partial/corrupt write) — that history
+                    // is the sole reversal path for an otherwise irreversible
+                    // rename. Log it loudly and preserve the raw value
+                    // verbatim under a side key before starting a fresh list,
+                    // so nothing is lost even though it can't be merged
+                    // structurally.
+                    eprintln!(
+                        "env_name_dedup_v1: existing report failed to parse ({e}) — \
+                         preserving it verbatim under env_name_dedup_v1_corrupt \
+                         and starting a fresh report"
+                    );
+                    self.set_setting("env_name_dedup_v1_corrupt", &json).await?;
+                    Vec::new()
+                }
+            },
             None => Vec::new(),
         };
         all.append(&mut renames);

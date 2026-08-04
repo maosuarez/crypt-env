@@ -249,7 +249,7 @@ async fn resolve_scope(
     project::resolve_environment(&vault.db, environment_id, project, environment)
         .await
         .map_err(|msg| {
-            if msg.starts_with("ambiguous match") {
+            if msg.starts_with(project::AMBIGUOUS_MATCH_PREFIX) {
                 err_json(StatusCode::CONFLICT, &msg, "AMBIGUOUS_SCOPE").into_response()
             } else {
                 err_validation("project/environment", &msg)

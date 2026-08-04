@@ -241,6 +241,13 @@ pub async fn delete_environment(db: &VaultDb, id: i64) -> Result<(), String> {
     db.delete_environment(id).await
 }
 
+/// Stable prefix on the `Err` string `resolve_environment` returns when a
+/// case-insensitive project/environment lookup matches more than one
+/// candidate. `pub` so callers match on this constant instead of a bare
+/// string literal — today that's the HTTP layer's `resolve_scope`, mapping
+/// it to `409 AMBIGUOUS_SCOPE`.
+pub const AMBIGUOUS_MATCH_PREFIX: &str = "ambiguous match";
+
 /// Resolves the environment identified either by numeric `environment_id`,
 /// or by a case-insensitive `project` name + `environment` name pair — the
 /// same two lookup shapes CLI's `project inject --id` / `--project
@@ -250,14 +257,15 @@ pub async fn delete_environment(db: &VaultDb, id: i64) -> Result<(), String> {
 ///
 /// Rejects ambiguity instead of guessing: if more than one project matches
 /// `project`, or more than one environment within the resolved project
-/// matches `environment`, this returns an `Err` naming every colliding
-/// candidate rather than silently taking the first (`ORDER BY id ASC`)
-/// match. This is required, not defence-in-depth — SQLite's `NOCASE` (used by
-/// `idx_projects_name_nocase` / `idx_environments_name_nocase`) folds ASCII
-/// `A-Z` only, while the `to_lowercase()` comparisons here fold full
-/// Unicode. So `PRODUCCIÓN` and `producción` can both satisfy the index
-/// (SQLite sees two distinct names) while still colliding here — the index
-/// alone does not close that case; this check does.
+/// matches `environment`, this returns an `Err` starting with
+/// `AMBIGUOUS_MATCH_PREFIX` and naming every colliding candidate, rather than
+/// silently taking the first (`ORDER BY id ASC`) match. This is required, not
+/// defence-in-depth — SQLite's `NOCASE` (used by `idx_projects_name_nocase` /
+/// `idx_environments_name_nocase`) folds ASCII `A-Z` only, while the
+/// `to_lowercase()` comparisons here fold full Unicode. So `PRODUCCIÓN` and
+/// `producción` can both satisfy the index (SQLite sees two distinct names)
+/// while still colliding here — the index alone does not close that case;
+/// this check does.
 pub async fn resolve_environment(
     db: &VaultDb,
     environment_id: Option<i64>,
@@ -283,7 +291,7 @@ pub async fn resolve_environment(
                 .map(|proj| format!("{} (id {})", proj.name, proj.id))
                 .collect();
             return Err(format!(
-                "ambiguous match for project '{p}': {}. Pass environment_id instead.",
+                "{AMBIGUOUS_MATCH_PREFIX} for project '{p}': {}. Pass environment_id instead.",
                 options.join(", ")
             ));
         }
@@ -300,7 +308,7 @@ pub async fn resolve_environment(
             let options: Vec<String> =
                 matching_envs.iter().map(|env| format!("{} (id {})", env.name, env.id)).collect();
             return Err(format!(
-                "ambiguous match for environment '{e}': {}. Pass environment_id instead.",
+                "{AMBIGUOUS_MATCH_PREFIX} for environment '{e}': {}. Pass environment_id instead.",
                 options.join(", ")
             ));
         }

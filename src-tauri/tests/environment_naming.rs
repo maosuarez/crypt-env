@@ -339,10 +339,49 @@ async fn t8_non_ascii_collision_survives_index_but_rejected_by_resolver() {
         Err(e) => e,
         Ok(_) => panic!("expected an ambiguous match error"),
     };
-    assert!(err.contains("ambiguous match"), "got: {err}");
+    assert!(err.contains(project::AMBIGUOUS_MATCH_PREFIX), "got: {err}");
     for env in &envs {
         assert!(err.contains(&env.id.to_string()), "error must name candidate id {}: {err}", env.id);
     }
+}
+
+// Regression: dedup's candidate-search must fold exactly like SQLite's own
+// LOWER() (ASCII-only), not Rust's `to_lowercase()` (full Unicode). A prior
+// version bound a Rust-folded candidate against `LOWER(name)` (SQLite-folded)
+// — for a non-ASCII base, the two folds disagree, so a real collision against
+// a pre-existing suffixed sibling was missed, the "free" candidate was
+// accepted, and the following UPDATE then hit the table's exact-match unique
+// constraint: `init_schema` returned `Err` and the vault could not be opened
+// at all. This seeds exactly that shape (two colliding non-ASCII names plus a
+// pre-existing `-2`) and asserts `VaultDb::open` succeeds.
+#[tokio::test]
+async fn non_ascii_collision_with_pre_existing_suffix_does_not_brick_open() {
+    let dir = tempdir().unwrap();
+    let (path, path_str) = db_path(&dir, "non_ascii_suffix.db");
+
+    {
+        let pool = raw_pool(&path).await;
+        seed_minimal_schema(&pool).await;
+        seed_project(&pool, 1, "acme").await;
+        seed_environment(&pool, 1, 1, "PRODUCCI\u{d3}N").await;
+        seed_environment(&pool, 2, 1, "prODUCCI\u{d3}N").await;
+        seed_environment(&pool, 3, 1, "producci\u{d3}n-2").await;
+        pool.close().await;
+    }
+
+    let db = VaultDb::open(&path_str)
+        .await
+        .expect("must not brick on a non-ASCII collision with a pre-existing suffixed sibling");
+
+    let envs = db.list_environments(1).await.unwrap();
+    let by_id: HashMap<i64, String> = envs.into_iter().map(|e| (e.id, e.name)).collect();
+    assert_eq!(by_id.get(&1).unwrap(), "PRODUCCI\u{d3}N", "lowest id keeps its name unchanged");
+    assert_eq!(
+        by_id.get(&2).unwrap(),
+        "producci\u{d3}n-3",
+        "loser must skip the taken -2 suffix (correctly detected via SQLite's own LOWER(), not Rust's to_lowercase())"
+    );
+    assert_eq!(by_id.get(&3).unwrap(), "producci\u{d3}n-2", "pre-existing suffixed sibling must be untouched");
 }
 
 // T11: save_project auto-creates "default"; saving a sibling environment named

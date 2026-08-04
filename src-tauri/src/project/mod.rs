@@ -150,6 +150,11 @@ pub async fn save_project(db: &VaultDb, input: ProjectInput) -> Result<i64, Stri
         .upsert_project(input.id, &input.name, input.description.as_deref(), &input.template)
         .await?;
     if is_new {
+        // A brand-new project has no environments yet, so this can never
+        // actually collide — kept anyway so `save_environment` stays the
+        // single choke point for the case-insensitivity rule rather than
+        // special-casing the auto-created 'default' environment.
+        ensure_no_case_collision(db, project_id, 0, "default").await?;
         db.upsert_environment(0, project_id, "default", true).await?;
     }
     let category_ids = category_names_to_ids(db, &input.categories).await?;
@@ -165,11 +170,42 @@ pub async fn project_delete_preview(db: &VaultDb, id: i64) -> Result<ProjectDele
     db.preview_delete_project(id).await
 }
 
+/// Case-insensitive collision check against this environment's siblings in
+/// the same project, skipping `exclude_id` (so renaming an environment to a
+/// different case of its own name is allowed; pass `0` when creating new).
+///
+/// Unicode-aware (Rust `to_lowercase()`), unlike the DB's `NOCASE` index
+/// (SQLite `NOCASE` folds ASCII `A-Z` only) — this is what actually catches a
+/// non-ASCII collision like `PRODUCCIÓN` vs `producción`, which satisfies the
+/// index but would otherwise reach `resolve_environment`'s ambiguity check
+/// only after already being persisted. Racy on its own (TOCTOU between this
+/// read and `db.upsert_environment`'s write) — the DB's unique index is the
+/// authoritative backstop for the ASCII case; neither layer is redundant,
+/// each covers the other's gap.
+async fn ensure_no_case_collision(
+    db: &VaultDb,
+    project_id: i64,
+    exclude_id: i64,
+    name: &str,
+) -> Result<(), String> {
+    let siblings = db.list_environments(project_id).await?;
+    let lower = name.to_lowercase();
+    let collides = siblings
+        .iter()
+        .any(|env| env.id != exclude_id && env.name.to_lowercase() == lower);
+    if collides {
+        return Err(crate::db::ENVIRONMENT_NAME_CONFLICT.to_string());
+    }
+    Ok(())
+}
+
 /// Persists an environment's vars, granting item ownership to `project_id` as
 /// a side effect for any referenced item it doesn't already own — but only
 /// when that item is global. A local item can never silently gain a second
 /// owner through this path; the caller must mark it global first.
 pub async fn save_environment(db: &VaultDb, input: EnvironmentInput) -> Result<i64, String> {
+    ensure_no_case_collision(db, input.project_id, input.id, &input.name).await?;
+
     let env_id = db
         .upsert_environment(input.id, input.project_id, &input.name, input.is_default)
         .await?;
@@ -211,6 +247,17 @@ pub async fn delete_environment(db: &VaultDb, id: i64) -> Result<(), String> {
 /// --environment` already offers against `GET /projects`. Every HTTP
 /// endpoint that needs to scope its work to a single project+environment
 /// reuses this instead of inventing a second lookup convention.
+///
+/// Rejects ambiguity instead of guessing: if more than one project matches
+/// `project`, or more than one environment within the resolved project
+/// matches `environment`, this returns an `Err` naming every colliding
+/// candidate rather than silently taking the first (`ORDER BY id ASC`)
+/// match. This is required, not defence-in-depth — SQLite's `NOCASE` (used by
+/// `idx_projects_name_nocase` / `idx_environments_name_nocase`) folds ASCII
+/// `A-Z` only, while the `to_lowercase()` comparisons here fold full
+/// Unicode. So `PRODUCCIÓN` and `producción` can both satisfy the index
+/// (SQLite sees two distinct names) while still colliding here — the index
+/// alone does not close that case; this check does.
 pub async fn resolve_environment(
     db: &VaultDb,
     environment_id: Option<i64>,
@@ -226,10 +273,41 @@ pub async fn resolve_environment(
         let p_lower = p.to_lowercase();
         let e_lower = e.to_lowercase();
         let projects = list_projects(db).await?;
-        return projects
+
+        let matching_projects: Vec<Project> =
+            projects.into_iter().filter(|proj| proj.name.to_lowercase() == p_lower).collect();
+
+        if matching_projects.len() > 1 {
+            let options: Vec<String> = matching_projects
+                .iter()
+                .map(|proj| format!("{} (id {})", proj.name, proj.id))
+                .collect();
+            return Err(format!(
+                "ambiguous match for project '{p}': {}. Pass environment_id instead.",
+                options.join(", ")
+            ));
+        }
+
+        let proj = match matching_projects.into_iter().next() {
+            Some(proj) => proj,
+            None => return Err(format!("project/environment not found: {p} / {e}")),
+        };
+
+        let matching_envs: Vec<Environment> =
+            proj.environments.into_iter().filter(|env| env.name.to_lowercase() == e_lower).collect();
+
+        if matching_envs.len() > 1 {
+            let options: Vec<String> =
+                matching_envs.iter().map(|env| format!("{} (id {})", env.name, env.id)).collect();
+            return Err(format!(
+                "ambiguous match for environment '{e}': {}. Pass environment_id instead.",
+                options.join(", ")
+            ));
+        }
+
+        return matching_envs
             .into_iter()
-            .find(|proj| proj.name.to_lowercase() == p_lower)
-            .and_then(|proj| proj.environments.into_iter().find(|env| env.name.to_lowercase() == e_lower))
+            .next()
             .ok_or_else(|| format!("project/environment not found: {p} / {e}"));
     }
 

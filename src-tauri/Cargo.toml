@@ -97,6 +97,11 @@ windows = { version = "0.58", features = [
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros"] }
+# Issue #12: integration tests need to seed a DB that already contains a
+# case-colliding name pair, which is impossible through the public API once
+# the NOCASE unique index exists. Zero extra compilation — sqlx is already a
+# normal dependency above; this just makes it usable from `tests/`.
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 
 [[bin]]
 name = "crypt-env"

@@ -238,7 +238,7 @@ jobs:
 
           WIN_SIG=$(read_sig release/CryptEnv_${VERSION}_x64-setup.exe.sig)
           APP_TAR_SIG=$(read_sig release/CryptEnv.app.tar.gz.sig)
-          APPIMAGE_SIG=$(read_sig release/crypt-env_${VERSION}_amd64.AppImage.sig)
+          APPIMAGE_SIG=$(read_sig release/CryptEnv_${VERSION}_amd64.AppImage.sig)
 
           cat > release/latest.json <<EOF
           {
@@ -256,7 +256,7 @@ jobs:
               },
               "linux-x86_64": {
                 "signature": "${APPIMAGE_SIG}",
-                "url": "${BASE_URL}/crypt-env_${VERSION}_amd64.AppImage"
+                "url": "${BASE_URL}/CryptEnv_${VERSION}_amd64.AppImage"
               }
             }
           }
@@ -294,7 +294,7 @@ jobs:
             ### Linux
             Download the `.deb` package and install with:
             ```
-            sudo dpkg -i crypt-env_*_amd64.deb
+            sudo dpkg -i CryptEnv_*_amd64.deb
             ```
             Or use the `.AppImage` — make it executable and run it directly.
 

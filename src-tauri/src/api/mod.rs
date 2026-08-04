@@ -569,10 +569,30 @@ struct CreateItemBody {
     key: Option<String>,
 }
 
+/// Separate extractor (rather than folding `on_conflict` into `EnvScopeQuery`,
+/// which every scoped GET/PUT/DELETE endpoint also uses) so that only
+/// `POST /items` gives the parameter any meaning — everywhere else it would
+/// be silently accepted and ignored, which is worse than a second struct.
+#[derive(Deserialize)]
+struct ConflictQuery {
+    on_conflict: Option<String>,
+}
+
+fn parse_link_mode(raw: Option<&str>) -> Result<crate::db::LinkMode, axum::response::Response> {
+    match raw {
+        None => Ok(crate::db::LinkMode::Update),
+        Some("update") => Ok(crate::db::LinkMode::Update),
+        Some("replace") => Ok(crate::db::LinkMode::Replace),
+        Some("error") => Ok(crate::db::LinkMode::Error),
+        Some(_) => Err(err_validation("on_conflict", "must be one of: update, replace, error")),
+    }
+}
+
 async fn handle_create_item(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Query(scope): Query<EnvScopeQuery>,
+    Query(conflict): Query<ConflictQuery>,
     Json(mut body): Json<CreateItemBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
@@ -583,6 +603,11 @@ async fn handle_create_item(
         };
         return err_json(code, msg, err_code).into_response();
     }
+
+    let mode = match parse_link_mode(conflict.on_conflict.as_deref()) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
 
     let env = match resolve_scope(
         &state,
@@ -615,7 +640,7 @@ async fn handle_create_item(
         body.item.created = now_ts_str();
     }
 
-    let new_id = {
+    let outcome = {
         let vault = state.vault.lock().await;
         let key = match vault.key.as_ref() {
             Some(k) => k.clone(),
@@ -625,27 +650,51 @@ async fn handle_create_item(
             }
         };
 
-        // Create + own the item atomically (same primitive as the Tauri
-        // command `vault_create_project_item`), then link it into this
-        // environment's vars under `key_name`.
-        let new_id = match crate::vault::create_project_item(&vault.db, &key, &body.item, env.project_id).await {
-            Ok(id) => id,
-            Err(e) => {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                    .into_response()
-            }
-        };
-
-        if let Err(e) = vault.db.upsert_environment_var(env.id, &key_name, new_id).await {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response();
-        }
-
-        new_id
+        crate::vault::create_or_update_env_item(
+            &vault.db,
+            &key,
+            &body.item,
+            env.project_id,
+            env.id,
+            &key_name,
+            mode,
+        )
+        .await
     };
 
-    body.item.id = new_id;
-    body.item.is_global = Some(false);
-    (StatusCode::CREATED, Json(redact_item(body.item))).into_response()
+    match outcome {
+        Ok(crate::vault::UpsertOutcome::Created(item)) => {
+            (StatusCode::CREATED, Json(redact_item(item))).into_response()
+        }
+        Ok(crate::vault::UpsertOutcome::Updated(item)) => {
+            (StatusCode::OK, Json(redact_item(item))).into_response()
+        }
+        Ok(crate::vault::UpsertOutcome::Conflict { item_id, reason }) => match reason {
+            crate::vault::ConflictReason::Shared => err_json(
+                StatusCode::CONFLICT,
+                &format!(
+                    "key '{key_name}' is linked to item {item_id}, which is shared (global, multi-linked, \
+                     or multi-owned). Use ?on_conflict=replace to repoint this link to a new copy, or \
+                     PUT /items/{item_id} to change the shared value everywhere."
+                ),
+                "SHARED_ITEM_CONFLICT",
+            )
+            .into_response(),
+            crate::vault::ConflictReason::KeyExists => err_json(
+                StatusCode::CONFLICT,
+                &format!("key '{key_name}' already exists in this environment"),
+                "KEY_EXISTS",
+            )
+            .into_response(),
+            crate::vault::ConflictReason::StateChanged => err_json(
+                StatusCode::CONFLICT,
+                &format!("key '{key_name}' changed concurrently, retry the request"),
+                "CONFLICT_RETRY",
+            )
+            .into_response(),
+        },
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+    }
 }
 
 async fn handle_update_item(
@@ -782,6 +831,43 @@ async fn handle_delete_item(
         Err(e) => {
             err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response()
         }
+    }
+}
+
+/// Read-only, redacted report of items with no `environment_vars` reference
+/// and `is_global = 0` (issue #9 §3.6). Deliberately no REST prune endpoint —
+/// a static MCP token should not be able to bulk-delete vault rows; the
+/// destructive half stays behind the GUI's confirmation
+/// (`vault_prune_orphan_items`), matching every other destructive vault
+/// operation. Lets `crypt-env doctor` surface a one-line orphan count.
+async fn handle_list_orphans(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("no autorizado", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("bóveda bloqueada", "VAULT_LOCKED"),
+            _ => ("error interno", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let vault = state.vault.lock().await;
+    let key = match vault.key.as_ref() {
+        Some(k) => k.clone(),
+        None => {
+            return err_json(StatusCode::FORBIDDEN, "bóveda bloqueada", "VAULT_LOCKED")
+                .into_response()
+        }
+    };
+
+    match crate::vault::list_orphan_items(&vault.db, &key).await {
+        Ok(items) => {
+            let redacted: Vec<VaultItem> = items.into_iter().map(redact_item).collect();
+            (StatusCode::OK, Json(redacted)).into_response()
+        }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
 }
 
@@ -3061,6 +3147,7 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         .route("/items/:id", put(handle_update_item))
         .route("/items/:id", delete(handle_delete_item))
         .route("/items/:id/reveal", post(handle_reveal_item))
+        .route("/maintenance/orphans", get(handle_list_orphans))
         .route("/categories", get(handle_list_categories))
         .route("/categories", post(handle_create_category))
         .route("/categories/:id", put(handle_update_category))

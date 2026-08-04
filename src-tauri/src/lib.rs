@@ -31,6 +31,7 @@ use project::{
     environment_delete, environment_inject, environment_save, project_delete, project_export,
     project_import, project_list, project_pick_env_path, project_preview_delete, project_save,
 };
+use project::relay_commands::{project_relay_receive, project_relay_send};
 
 struct PendingUpdate(std::sync::Mutex<Option<tauri_plugin_updater::Update>>);
 
@@ -214,6 +215,8 @@ pub fn run() {
             environment_save,
             environment_delete,
             environment_inject,
+            project_relay_send,
+            project_relay_receive,
             check_for_update,
             install_update,
             app_is_first_run,

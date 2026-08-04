@@ -70,6 +70,40 @@ pub struct DbEnvironmentVar {
     pub literal: Option<String>,
 }
 
+// ─── Project-relay receive (issue #4) ─────────────────────────────────────────
+// Plain-data input to `insert_received_project` — the `db` layer never sees a
+// vault key or a `PlainItem`, only ciphertext strings the caller (the
+// `project`/`share` layers) already produced. See CLAUDE.md's module rule:
+// `db` does not know about encryption.
+
+/// One item to insert, already encrypted by the caller. `name` is used only
+/// to resolve `ReceivedVar::item_name` references within this same call —
+/// it is never stored (the vault item's name lives inside its ciphertext).
+pub struct ReceivedProjectItem {
+    pub name: String,
+    pub item_type: String,
+    pub ciphertext: String,
+    pub created: String,
+}
+
+pub struct ReceivedVar {
+    pub key: String,
+    pub item_name: String,
+}
+
+pub struct ReceivedEnvironment {
+    pub name: String,
+    pub is_default: bool,
+    pub vars: Vec<ReceivedVar>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct InsertedProject {
+    pub project_id: i64,
+    pub environment_ids: Vec<i64>,
+    pub item_ids: Vec<i64>,
+}
+
 pub struct VaultDb {
     pool: SqlitePool,
     path: String,
@@ -1172,6 +1206,135 @@ impl VaultDb {
             .fetch_one(&self.pool)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    /// Inserts an entire received project (from a relay `ProjectBundle`) in
+    /// one transaction: project row, items (already-encrypted ciphertext,
+    /// never decrypted here), `item_projects` ownership, environments and
+    /// `environment_vars` — all-or-nothing (issue #4 D7). A failure partway
+    /// through must not leave orphaned rows, since the relay payload has
+    /// already been burned by the time this runs and cannot be re-fetched.
+    ///
+    /// Checks for a case-insensitive project-name collision **before**
+    /// writing anything, returning a `"conflict: ..."`-prefixed error the
+    /// caller maps to HTTP 409 — this is an application-level, Unicode-aware
+    /// pre-check (`str::to_lowercase`), not a reliance on the DB's ASCII-only
+    /// `NOCASE` unique index, so it (a) never surfaces a raw SQLite
+    /// constraint-violation string and (b) also catches non-ASCII collisions
+    /// the index would miss. TODO(#12): once `idx_projects_name_nocase`'s
+    /// shared collision helper / `PROJECT_NAME_CONFLICT` constant lands,
+    /// swap this loop for it instead of duplicating the convention.
+    pub async fn insert_received_project(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        template: &str,
+        items: &[ReceivedProjectItem],
+        environments: &[ReceivedEnvironment],
+    ) -> Result<InsertedProject, String> {
+        let existing_names: Vec<String> = sqlx::query_scalar("SELECT name FROM projects")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        let name_lower = name.to_lowercase();
+        if existing_names.iter().any(|n| n.to_lowercase() == name_lower) {
+            // Named error (D5): the caller (Tauri command / HTTP handler) has
+            // no other way to learn which name collided, since the bundle
+            // that carried it has already been decrypted server-side and
+            // will be burned from the relay before any retry — so the name
+            // is echoed back here rather than only asserting a generic
+            // conflict, letting the GUI pre-fill a rename suggestion.
+            return Err(format!("conflict: a project named '{name}' already exists"));
+        }
+
+        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
+        let now = now_ts();
+
+        let project_id = sqlx::query(
+            "INSERT INTO projects (name, description, template, created, updated) VALUES (?1,?2,?3,?4,?5)",
+        )
+        .bind(name)
+        .bind(description)
+        .bind(template)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?
+        .last_insert_rowid();
+
+        // Items — ciphertext only, is_global = false (D7: provenance is one
+        // project; the receiver opts in to global explicitly afterwards).
+        let mut item_id_by_name: HashMap<String, i64> = HashMap::new();
+        let mut item_ids = Vec::with_capacity(items.len());
+        for it in items {
+            let item_id = sqlx::query(
+                "INSERT INTO items (item_type, data, created, updated, is_global) VALUES (?1,?2,?3,?4,0)",
+            )
+            .bind(&it.item_type)
+            .bind(&it.ciphertext)
+            .bind(&it.created)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?
+            .last_insert_rowid();
+
+            sqlx::query("INSERT INTO item_projects (item_id, project_id) VALUES (?1, ?2)")
+                .bind(item_id)
+                .bind(project_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            item_id_by_name.insert(it.name.clone(), item_id);
+            item_ids.push(item_id);
+        }
+
+        // Environments + vars, resolving each var's item_name against the
+        // items just inserted above.
+        let mut environment_ids = Vec::with_capacity(environments.len());
+        for env in environments {
+            let is_default_i: i64 = if env.is_default { 1 } else { 0 };
+            let env_id = sqlx::query(
+                "INSERT INTO environments (project_id, name, is_default, created, updated) VALUES (?1,?2,?3,?4,?5)",
+            )
+            .bind(project_id)
+            .bind(&env.name)
+            .bind(is_default_i)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?
+            .last_insert_rowid();
+
+            for v in &env.vars {
+                // Defensive only — the bundle builder never emits a var
+                // whose item_name isn't also in `items` (see
+                // `project::relay::build_project_bundle`), so this should
+                // never actually skip anything in practice.
+                let item_id = match item_id_by_name.get(&v.item_name) {
+                    Some(id) => *id,
+                    None => continue,
+                };
+                sqlx::query(
+                    "INSERT INTO environment_vars (environment_id, key, item_id, literal) VALUES (?1,?2,?3,NULL)",
+                )
+                .bind(env_id)
+                .bind(&v.key)
+                .bind(item_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            }
+
+            environment_ids.push(env_id);
+        }
+
+        tx.commit().await.map_err(|e| e.to_string())?;
+
+        Ok(InsertedProject { project_id, environment_ids, item_ids })
     }
 
     pub async fn wipe_and_reset(&mut self) -> Result<(), String> {

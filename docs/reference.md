@@ -42,8 +42,8 @@ Authentication: Header `X-Vault-Token` containing either a session token (from P
 | POST | /environments/:id/inject | token | Inject environment's variables into its configured .env path(s). Takes a JSON body `{output_path?, output_dir?}` (previously bodyless — an empty `{}` body preserves the old behavior). `output_path`, if given, is added to (not a replacement for) the environment's configured `paths[]` — all get written. If `paths[]` is empty and no `output_path`, falls back to `{output_dir}/.env.<environment-name>`. Returns paths written and keys injected |
 | POST | /relay/send | token | Encrypt selected items with Argon2id-derived key and upload to Supabase relay. Returns code + passphrase. Requires relay_supabase_url and relay_supabase_anon_key in settings |
 | POST | /relay/receive | token | Download from Supabase relay, decrypt with key+passphrase, import items, **scoped** (same query params as GET /items). Imported items are owned by the resolved project and linked into the resolved environment, with the same collision-skip behavior as `/share/connect`. Burns after read (best-effort delete) |
-| POST | /workspaces/:id/relay/send | token | Share complete workspace (definition + all decrypted referenced secrets) via relay. Returns code + passphrase. Legacy, workspace-table-backed, out of scope for the projects/environments migration |
-| POST | /workspaces/relay/receive | token | Receive shared workspace from relay. Recreates secrets and rebuilds workspace with variables re-linked. Legacy, same as above — items imported this way are NOT linked into any project/environment and are invisible to the scoped endpoints above |
+| POST | /projects/:id/relay/send | token | Share a whole project via relay: structure (environment names, `isDefault`) plus decrypted values for the selected `environment_ids`, deduped by item across environments. Returns `{code, passphrase, project, environment_count, item_count}`. Requires relay_supabase_url and relay_supabase_anon_key in settings |
+| POST | /projects/relay/receive | token | Receive a shared project from relay. Always creates a **new** project (never merges) — a case-insensitive name collision returns `409 CONFLICT`; retry with `project_name_override` in the body. Received items are owned by the new project only (`isGlobal: false`), never linked into any pre-existing project. Returns `{project, environments, item_count}`. Burns after read (best-effort delete) |
 
 ### Notes
 
@@ -248,8 +248,6 @@ Authentication: Automatic — MCP server reads the REST API session token from d
 | `crypt_env_inject_env_by_name` | `project_path`, `environment` | `output_path` (unused, kept for compatibility) | Inject environment variables for a project directory and environment name. Matches by real environment name; if no matching environment is found, returns an error with next steps — the previous item-naming-convention fallback was removed (see Notes) |
 | `crypt_env_relay_send` | `item_ids` | — | Send via internet relay. Returns code + passphrase (show immediately, only once) |
 | `crypt_env_relay_receive` | `code`, `passphrase`, `environment_id` or (`project`+`environment`) | — | Receive via internet relay. Imported items are owned by the resolved project and linked into the resolved environment, same collision-skip behavior as `crypt_env_share_connect` |
-| `crypt_env_share_workspace_send` | — | `id` or `name` | Share complete workspace (definition + all decrypted secrets) via relay. Returns code + passphrase |
-| `crypt_env_share_workspace_receive` | `code`, `passphrase` | — | Receive shared workspace from relay. Recreates secrets and rebuilds workspace with variables re-linked |
 | `crypt_env_list_mcp_servers` | — | `scope` | List registered MCP servers from Claude config. Scope: global/project/all. Env values never returned |
 | `crypt_env_add_mcp_server` | `name`, `command` | `args`, `env`, `scope` | Add MCP server to Claude config. `env` stores KEY: "" placeholders — never real values |
 | `crypt_env_update_mcp_server` | `name` | `command`, `args`, `env`, `scope` | Merge-update existing MCP server entry |
@@ -279,7 +277,7 @@ Authentication: Automatic — MCP server reads the REST API session token from d
 
 Global items (`isGlobal: true`, not linked into the queried environment) are invisible to `crypt_env_list_items`, `crypt_env_search_items`, `crypt_env_generate_env`, and `crypt_env_inject_env` — there is currently no MCP tool that can discover a project's reusable global secrets; only items explicitly linked into the scoped environment are reachable.
 
-`crypt_env_share_workspace_send` and `crypt_env_share_workspace_receive` are retained for backward compatibility — they share complete workspaces (definition + decrypted secrets) via relay, not individual items.
+Whole-project relay sharing (`POST /projects/:id/relay/send` / `/projects/relay/receive`) intentionally has **no MCP tool** — sending an entire project's decrypted secrets to a third-party relay from a single agent-callable tool, with no way for the agent to meaningfully obtain the sender's confirmation, is a materially different trust decision than the existing per-item `crypt_env_relay_send`/`_receive`. If ever wanted, it needs its own consent design as a separate change.
 
 MCP server is single-threaded with a blocking I/O loop (`stdin.lock().lines()`) — a slow or stalled request blocks all subsequent MCP tool calls and the LLM host may time out other concurrent requests.
 

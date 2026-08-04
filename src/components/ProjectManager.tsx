@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Icon } from './ui/Icon';
 import { TagInput } from './ui/TagInput';
+import { ProjectShareModal, type ProjectShareMode } from './ProjectShareModal';
 import { useVaultStore } from '../store';
 import { useProjectStore } from '../store/projectStore';
 import {
@@ -530,6 +531,7 @@ export function ProjectManager() {
   const [isCreatingProj,  setIsCreatingProj]  = useState(false);
   const [templateModal,   setTemplateModal]   = useState(false);
   const [confirmDelProj,  setConfirmDelProj]  = useState(false);
+  const [shareModalMode,  setShareModalMode]  = useState<ProjectShareMode | null>(null);
 
   // Environment form state
   const [envName,       setEnvName]       = useState('');
@@ -835,6 +837,12 @@ export function ProjectManager() {
               LOAD TEMPLATE
             </button>
             <button
+              onClick={() => setShareModalMode('receive')}
+              className="text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors whitespace-nowrap"
+            >
+              RECEIVE PROJECT
+            </button>
+            <button
               onClick={handleNewProject}
               className="flex items-center gap-1 text-[11px] font-bold font-ui text-accent border border-accent-d rounded-[3px] px-2.5 py-[4px] hover:bg-accent-b transition-colors"
             >
@@ -959,6 +967,12 @@ export function ProjectManager() {
             <div className="flex-1 text-[13px] font-semibold text-center text-tx truncate px-1">
               {selectedProject.name}
             </div>
+            <button
+              onClick={() => setShareModalMode('send')}
+              className="text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors whitespace-nowrap"
+            >
+              SHARE PROJECT
+            </button>
             <button
               onClick={handleExportProject}
               className="text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors whitespace-nowrap"
@@ -1284,6 +1298,19 @@ export function ProjectManager() {
           project={selectedProject}
           onCancel={() => setConfirmDelProj(false)}
           onConfirm={handleDeleteProject}
+        />
+      )}
+
+      {shareModalMode && (
+        <ProjectShareModal
+          mode={shareModalMode}
+          project={shareModalMode === 'send' ? (selectedProject ?? undefined) : undefined}
+          items={items}
+          onClose={() => setShareModalMode(null)}
+          onReceived={async () => {
+            await load();
+            await refreshVaultItems();
+          }}
         />
       )}
     </div>

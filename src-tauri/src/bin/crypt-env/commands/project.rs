@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use clap::{Args, Subcommand};
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use serde::Deserialize;
 
-use crate::client::{authenticated_delete, authenticated_get, authenticated_post, CliError, API_BASE};
+use crate::client::{authenticated_delete, authenticated_get, authenticated_post, CliError, ItemSummary, API_BASE};
 
 // ─── CLI argument structs ─────────────────────────────────────────────────────
 
@@ -40,21 +42,51 @@ pub enum ProjectCmd {
         #[arg(long)]
         id: i64,
     },
+    /// Share a whole project (structure + values, selected environments) via internet relay
+    Share {
+        /// Project ID (numeric)
+        #[arg(long, conflicts_with = "name")]
+        id: Option<i64>,
+        /// Project name (case-insensitive, used if --id is not given)
+        #[arg(long)]
+        name: Option<String>,
+        /// Comma-separated environment names to include (default: the project's
+        /// default environment only). Pass "all" to include every environment.
+        #[arg(long)]
+        envs: Option<String>,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Receive a project shared via internet relay — always creates a new project
+    Receive {
+        /// Relay code (e.g. X7K2-M9P4)
+        #[arg(long)]
+        code: String,
+        /// Passphrase provided by the sender
+        #[arg(long)]
+        passphrase: String,
+        /// Project name to use instead of the sender's, if it collides with an existing one
+        #[arg(long = "as")]
+        as_name: Option<String>,
+    },
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────
 
 #[derive(Deserialize, Debug)]
-#[allow(dead_code)]
 struct EnvironmentVar {
     key: String,
+    #[serde(rename = "itemId")]
+    item_id: i64,
 }
 
 #[derive(Deserialize, Debug)]
-#[allow(dead_code)]
 struct EnvironmentSummary {
     id: i64,
     name: String,
+    #[serde(default, rename = "isDefault")]
+    is_default: bool,
     #[serde(default)]
     paths: Vec<String>,
     #[serde(default)]
@@ -85,6 +117,8 @@ pub fn run(args: ProjectArgs) -> Result<(), CliError> {
         ProjectCmd::Inject { id, project, environment } => run_inject(id, project, environment),
         ProjectCmd::Delete { id } => run_delete(id),
         ProjectCmd::DeleteEnv { id } => run_delete_env(id),
+        ProjectCmd::Share { id, name, envs, yes } => run_share(id, name, envs, yes),
+        ProjectCmd::Receive { code, passphrase, as_name } => run_receive(code, passphrase, as_name),
     }
 }
 
@@ -230,4 +264,215 @@ fn run_delete_env(id: i64) -> Result<(), CliError> {
 
     println!("Environment {id} deleted.");
     Ok(())
+}
+
+// ─── Share ────────────────────────────────────────────────────────────────────
+// Any environment whose name looks production-like gets a distinct warning in
+// the manifest before the confirmation prompt (D4) — a heuristic, not a hard
+// gate: it only ever adds friction, never removes it.
+const PROD_NAME_PATTERN: &[&str] = &["prod", "production", "live", "release"];
+
+fn looks_production(env_name: &str) -> bool {
+    let lower = env_name.to_lowercase();
+    PROD_NAME_PATTERN.iter().any(|p| lower.contains(p))
+}
+
+fn resolve_project(id: Option<i64>, name: Option<&str>) -> Result<ProjectSummary, CliError> {
+    let projects = fetch_projects()?;
+    if let Some(id) = id {
+        return projects.into_iter().find(|p| p.id == id).ok_or_else(|| CliError::NotFound(format!("project {id}")));
+    }
+    if let Some(name) = name {
+        let name_lower = name.to_lowercase();
+        return projects
+            .into_iter()
+            .find(|p| p.name.to_lowercase() == name_lower)
+            .ok_or_else(|| CliError::NotFound(format!("project '{name}'")));
+    }
+    Err(CliError::Api("provide --id or --name to identify the project".into()))
+}
+
+/// Selects which environments to include, given `--envs` (comma-separated
+/// names, or "all"). Omitted defaults to the project's default environment
+/// only — the same safety default as the GUI's checklist (D4): under-sharing
+/// costs one extra round trip, over-sharing is unrecoverable.
+fn select_environments<'a>(project: &'a ProjectSummary, envs: Option<&str>) -> Result<Vec<&'a EnvironmentSummary>, CliError> {
+    if project.environments.is_empty() {
+        return Err(CliError::Api(format!("project '{}' has no environments", project.name)));
+    }
+
+    match envs {
+        None => {
+            let default_env = project
+                .environments
+                .iter()
+                .find(|e| e.is_default)
+                .unwrap_or(&project.environments[0]);
+            Ok(vec![default_env])
+        }
+        Some("all") => Ok(project.environments.iter().collect()),
+        Some(list) => {
+            let mut selected = Vec::new();
+            for want in list.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let want_lower = want.to_lowercase();
+                let env = project
+                    .environments
+                    .iter()
+                    .find(|e| e.name.to_lowercase() == want_lower)
+                    .ok_or_else(|| CliError::NotFound(format!("environment '{want}' in project '{}'", project.name)))?;
+                selected.push(env);
+            }
+            if selected.is_empty() {
+                return Err(CliError::Api("--envs resolved to no environments".into()));
+            }
+            Ok(selected)
+        }
+    }
+}
+
+/// Fetches item metadata (name, never value) linked into `environment_id`, so
+/// the manifest can show `KEY -> item name` instead of raw item ids — reuses
+/// the existing `GET /items` endpoint rather than adding a new one (D4).
+fn fetch_environment_item_names(environment_id: i64) -> Result<HashMap<i64, String>, CliError> {
+    let resp = authenticated_get(&format!("{API_BASE}/items?environment_id={environment_id}"))?;
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        return Err(CliError::VaultLocked);
+    }
+    if !resp.status().is_success() {
+        let text = resp.text().unwrap_or_default();
+        return Err(CliError::Api(format!("list items failed: {text}")));
+    }
+    let items: Vec<ItemSummary> = resp.json().map_err(|e| CliError::Api(e.to_string()))?;
+    Ok(items
+        .into_iter()
+        .map(|i| (i.id, i.name.or(i.title).unwrap_or_else(|| format!("#{}", i.id))))
+        .collect())
+}
+
+fn run_share(id: Option<i64>, name: Option<String>, envs: Option<String>, yes: bool) -> Result<(), CliError> {
+    let project = resolve_project(id, name.as_deref())?;
+    let selected = select_environments(&project, envs.as_deref())?;
+
+    println!(
+        "About to share project '{}' ({} environment{}):",
+        project.name,
+        selected.len(),
+        if selected.len() != 1 { "s" } else { "" }
+    );
+    for env in &selected {
+        let warn = if looks_production(&env.name) { "  /!\\ PRODUCTION-LIKE NAME" } else { "" };
+        println!("  {}{}", env.name, warn);
+        if env.vars.is_empty() {
+            println!("    (no variables)");
+            continue;
+        }
+        let names = fetch_environment_item_names(env.id)?;
+        for v in &env.vars {
+            let item_name = names.get(&v.item_id).cloned().unwrap_or_else(|| format!("#{}", v.item_id));
+            println!("    {} -> {}", v.key, item_name);
+        }
+    }
+    println!();
+    println!("Values leave this machine via the encrypted relay. Never shown here.");
+
+    if !yes {
+        print!("Proceed? [y/N]: ");
+        if !prompt_confirm()? {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    let environment_ids: Vec<i64> = selected.iter().map(|e| e.id).collect();
+    let body = serde_json::json!({ "environment_ids": environment_ids });
+    let resp = authenticated_post(&format!("{API_BASE}/projects/{}/relay/send", project.id), &body)?;
+
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        return Err(CliError::VaultLocked);
+    }
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(CliError::NotFound(format!("project {}", project.id)));
+    }
+    if !resp.status().is_success() {
+        let text = resp.text().unwrap_or_default();
+        return Err(CliError::Api(format!("project share failed: {text}")));
+    }
+
+    #[derive(Deserialize)]
+    struct ShareResult {
+        code: String,
+        passphrase: String,
+        environment_count: usize,
+        item_count: usize,
+    }
+    let result: ShareResult = resp.json().map_err(|e| CliError::Api(e.to_string()))?;
+
+    println!();
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║  RELAY SHARE CODE AND PASSPHRASE — show to recipient now ║");
+    println!("╠══════════════════════════════════════════════════════════╣");
+    println!("║  Code:       {:<46} ║", result.code);
+    println!("║  Passphrase: {:<46} ║", result.passphrase);
+    println!("╚══════════════════════════════════════════════════════════╝");
+    println!();
+    println!(
+        "{} environment(s), {} item(s). The passphrase is shown once. Provide both to the recipient.",
+        result.environment_count, result.item_count
+    );
+
+    Ok(())
+}
+
+// ─── Receive ──────────────────────────────────────────────────────────────────
+
+fn run_receive(code: String, passphrase: String, as_name: Option<String>) -> Result<(), CliError> {
+    let mut body = serde_json::json!({ "code": code, "passphrase": passphrase });
+    if let Some(name) = &as_name {
+        body["project_name_override"] = serde_json::json!(name);
+    }
+
+    let resp = authenticated_post(&format!("{API_BASE}/projects/relay/receive"), &body)?;
+
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        return Err(CliError::VaultLocked);
+    }
+    if resp.status() == reqwest::StatusCode::CONFLICT {
+        let text = resp.text().unwrap_or_default();
+        return Err(CliError::Api(format!("{text} — retry with --as NAME to choose a different project name")));
+    }
+    if !resp.status().is_success() {
+        let text = resp.text().unwrap_or_default();
+        return Err(CliError::Api(format!("project receive failed: {text}")));
+    }
+
+    #[derive(Deserialize)]
+    struct ReceiveResult {
+        project: String,
+        environments: Vec<String>,
+        item_count: usize,
+    }
+    let result: ReceiveResult = resp.json().map_err(|e| CliError::Api(e.to_string()))?;
+
+    println!(
+        "Received project '{}' — {} environment(s), {} item(s):",
+        result.project,
+        result.environments.len(),
+        result.item_count
+    );
+    for name in &result.environments {
+        println!("  + {name}");
+    }
+    println!("Run `crypt-env project list` to see it — set paths on each environment before injecting.");
+
+    Ok(())
+}
+
+// ─── Prompt helper ────────────────────────────────────────────────────────────
+
+fn prompt_confirm() -> Result<bool, CliError> {
+    use std::io::{self, Write};
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).map_err(CliError::Io)?;
+    Ok(matches!(input.trim().to_lowercase().as_str(), "y" | "yes"))
 }

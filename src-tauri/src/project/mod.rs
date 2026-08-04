@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use tauri::State;
 
 use crate::db::{DbEnvironmentVar, ProjectDeleteImpact, VaultDb};
+use crate::envfile;
 use crate::vault::SharedState;
 
 // ─── Frontend-facing types ────────────────────────────────────────────────────
@@ -86,6 +88,39 @@ pub struct ProjectInput {
 pub struct InjectResult {
     pub paths: Vec<String>,
     pub written: Vec<String>,
+    /// Owner-configured paths (`environment.paths[]`) that were `Foreign`
+    /// (pre-existing, not carrying the crypt-env marker) at the time of
+    /// this inject. Written anyway — configured paths are grandfathered,
+    /// never hard-gated (see §4.4 of the issue #8 plan) — but reported so
+    /// the caller can see it. A path only ever appears here once: writing
+    /// through leaves the marker in place, so the next inject finds it
+    /// `Managed` and it drops off this list.
+    #[serde(rename = "unmanagedPaths")]
+    pub unmanaged_paths: Vec<String>,
+    /// `.bak` paths created because a write target was `Foreign` — see
+    /// `envfile::commit`. Empty unless a pre-existing unmanaged file was
+    /// just overwritten.
+    pub backups: Vec<String>,
+}
+
+/// Result of `environment_inject_preview` — resolves and inspects paths
+/// without decrypting anything or writing a byte. Lets the GUI show a
+/// confirm dialog naming the exact files that would be overwritten before
+/// the user commits to `overwrite: true`.
+#[derive(Serialize)]
+pub struct InjectPreview {
+    pub paths: Vec<String>,
+    pub foreign: Vec<String>,
+}
+
+/// Where a write-target path came from, for gating purposes (§4.4 of the
+/// issue #8 plan): a path the vault owner saved into `environment.paths[]`
+/// through the GUI is pre-consented and only ever reported if unmanaged; a
+/// path an API/MCP caller invented on this one request is hard-gated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathOrigin {
+    Configured,
+    CallerSupplied,
 }
 
 // ─── Pure logic (no Tauri/Axum coupling) ──────────────────────────────────────
@@ -257,6 +292,62 @@ async fn get_environment_full(db: &VaultDb, id: i64) -> Result<Option<Environmen
     }))
 }
 
+/// Resolves this environment's write targets (its configured `paths[]` plus
+/// an optional `output_path`/`output_dir`-derived path) and classifies each
+/// one via `envfile::inspect`, without decrypting anything or writing a
+/// byte. Shared by `inject_environment` (phases 1-2 below) and
+/// `inject_environment_preview` (which stops here).
+async fn resolve_and_inspect(
+    db: &VaultDb,
+    environment_id: i64,
+    output_path: Option<String>,
+    output_dir: Option<String>,
+) -> Result<(crate::db::DbEnvironment, Vec<(String, PathOrigin)>, HashMap<String, envfile::Target>), String> {
+    let env = db
+        .get_environment(environment_id)
+        .await?
+        .ok_or("environment not found")?;
+
+    let mut resolved: Vec<(String, PathOrigin)> =
+        env.paths.iter().cloned().map(|p| (p, PathOrigin::Configured)).collect();
+
+    if let Some(p) = output_path {
+        if !resolved.iter().any(|(existing, _)| existing == &p) {
+            resolved.push((p, PathOrigin::CallerSupplied));
+        }
+    } else if resolved.is_empty() {
+        if let Some(dir) = output_dir {
+            let dir = dir.trim_end_matches(['/', '\\']);
+            resolved.push((format!("{dir}/.env.{}", env.name), PathOrigin::CallerSupplied));
+        }
+    }
+
+    let mut inspected: HashMap<String, envfile::Target> = HashMap::new();
+    for (path, _) in &resolved {
+        let target = envfile::inspect(Path::new(path)).map_err(|e| format!("inspect {path}: {e}"))?;
+        inspected.insert(path.clone(), target);
+    }
+
+    Ok((env, resolved, inspected))
+}
+
+/// Read-only dry run of `inject_environment`'s path resolution and gate,
+/// for the GUI's pre-inject confirm dialog: lists every configured path
+/// that is currently `Foreign` (would be reported in `unmanaged_paths` on
+/// an actual inject) so the user can be asked before anything is touched.
+pub async fn inject_environment_preview(db: &VaultDb, environment_id: i64) -> Result<InjectPreview, String> {
+    let (_, resolved, inspected) = resolve_and_inspect(db, environment_id, None, None).await?;
+
+    let paths: Vec<String> = resolved.iter().map(|(p, _)| p.clone()).collect();
+    let foreign: Vec<String> = resolved
+        .iter()
+        .filter(|(p, _)| matches!(inspected.get(p), Some(envfile::Target::Foreign)))
+        .map(|(p, _)| p.clone())
+        .collect();
+
+    Ok(InjectPreview { paths, foreign })
+}
+
 /// Decrypt referenced vault items and write KEY=VALUE pairs into every path
 /// configured on this environment, plus `output_path` (if given — added to
 /// the configured set, never replacing it) or, when the environment has no
@@ -265,41 +356,56 @@ async fn get_environment_full(db: &VaultDb, id: i64) -> Result<Option<Environmen
 /// file content (existing keys not in the environment are preserved).
 /// `written` reports the union of keys touched across ALL paths, not just
 /// the first one.
+///
+/// Gate strictly precedes decryption (issue #8): every resolved path is
+/// classified before a single secret is decrypted or a byte is written. A
+/// `output_path`/`output_dir`-derived path (`CallerSupplied`) that is
+/// `Foreign` is hard-refused unless `overwrite` is `true`. A path the vault
+/// owner saved into `environment.paths[]` (`Configured`) is never refused —
+/// only reported in `unmanaged_paths` — since gating those would break
+/// every pre-existing installation on upgrade (see §4.4 of the issue #8
+/// plan); it is written through, taking a `.bak` of its prior contents on
+/// this first touch, and self-heals (becomes `Managed`) from then on.
 pub async fn inject_environment(
     db: &VaultDb,
     vault_key: &[u8; 32],
     environment_id: i64,
     output_path: Option<String>,
     output_dir: Option<String>,
+    overwrite: bool,
 ) -> Result<InjectResult, String> {
-    let env = db
-        .get_environment(environment_id)
-        .await?
-        .ok_or("environment not found")?;
+    // Phase 1 — resolve, tracking provenance.
+    let (env, resolved, mut cached) =
+        resolve_and_inspect(db, environment_id, output_path, output_dir).await?;
 
-    let mut paths = env.paths;
-    if let Some(p) = output_path {
-        if !paths.contains(&p) {
-            paths.push(p);
-        }
-    } else if paths.is_empty() {
-        if let Some(dir) = output_dir {
-            let dir = dir.trim_end_matches(['/', '\\']);
-            paths.push(format!("{dir}/.env.{}", env.name));
-        }
-    }
-
-    if paths.is_empty() {
+    if resolved.is_empty() {
         return Err("environment has no paths configured".into());
     }
 
+    // Phase 2 — gate, strictly before any decryption or write.
+    let mut refused: Vec<PathBuf> = Vec::new();
+    let mut unmanaged: Vec<String> = Vec::new();
+    for (path, origin) in &resolved {
+        if matches!(cached.get(path), Some(envfile::Target::Foreign)) {
+            match origin {
+                PathOrigin::CallerSupplied => refused.push(PathBuf::from(path)),
+                PathOrigin::Configured => unmanaged.push(path.clone()),
+            }
+        }
+    }
+
+    if !refused.is_empty() && !overwrite {
+        return Err(envfile::refuse_message(&refused));
+    }
+
+    let paths: Vec<String> = resolved.iter().map(|(p, _)| p.clone()).collect();
     let vars = db.get_environment_vars(environment_id).await?;
 
     if vars.is_empty() {
-        return Ok(InjectResult { paths, written: vec![] });
+        return Ok(InjectResult { paths, written: vec![], unmanaged_paths: unmanaged, backups: vec![] });
     }
 
-    // Decrypt vault items needed
+    // Phase 3 — decrypt, only reachable past the gate above.
     let raw_items = db.list_items().await?;
     let mut item_values: HashMap<i64, String> = HashMap::new();
     for (item_id, _, data, _, _) in &raw_items {
@@ -321,11 +427,25 @@ pub async fn inject_environment(
         inject_map.insert(v.key.clone(), value);
     }
 
-    // Write inject_map into each configured .env path
-    let mut written: HashSet<String> = HashSet::new();
+    // Marker names the project + environment (informational only, never
+    // parsed back — see `envfile::marker_line`).
+    let project_name = db
+        .get_project_name(env.project_id)
+        .await?
+        .unwrap_or_else(|| "unknown".to_string());
+    let marker = envfile::marker_line(&project_name, &env.name);
 
-    for path in &paths {
-        let existing = std::fs::read_to_string(path).unwrap_or_default();
+    // Phase 4 — write. `written` reports the union of keys touched across
+    // ALL paths, not just the first one.
+    let mut written: HashSet<String> = HashSet::new();
+    let mut backups: Vec<String> = Vec::new();
+    let mut done: Vec<String> = Vec::new();
+
+    for (path, origin) in &resolved {
+        let existing = match cached.remove(path) {
+            Some(envfile::Target::Managed(content)) => content,
+            _ => String::new(),
+        };
         let mut lines: Vec<String> = existing.lines().map(String::from).collect();
         let mut updated_keys: HashSet<String> = HashSet::new();
 
@@ -354,13 +474,44 @@ pub async fn inject_environment(
         }
 
         let content = lines.join("\n") + "\n";
-        std::fs::write(path, content).map_err(|e| format!("write .env ({}): {e}", path))?;
+
+        // Configured paths are pre-consented by the vault owner (§4.4) and
+        // are written through even if Foreign — never hard-gated. Caller-
+        // supplied paths only reach here Absent or Managed, unless the
+        // caller explicitly passed `overwrite: true` past the gate above.
+        let effective_overwrite = overwrite || *origin == PathOrigin::Configured;
+        let opts = envfile::WriteOptions { overwrite: effective_overwrite, mode: envfile::FileMode::Private0600 };
+
+        match envfile::commit(Path::new(path), &content, &marker, &opts) {
+            Ok(committed) => {
+                if let Some(bak) = committed.backup {
+                    backups.push(bak.to_string_lossy().into_owned());
+                }
+                done.push(path.clone());
+            }
+            Err(e @ envfile::EnvFileError::BackupExists(_)) | Err(e @ envfile::EnvFileError::TargetExists(_)) => {
+                // Keep the bare message so `err.starts_with(BACKUP_EXISTS_PREFIX
+                // | TARGET_EXISTS_PREFIX)` still matches in the HTTP handler
+                // and this maps to 409, not the generic 500 below.
+                // (`TargetExists` should be unreachable here in practice —
+                // `effective_overwrite` is always `true` for every path that
+                // reaches this loop — kept as a defensive fallback.)
+                return Err(e.to_string());
+            }
+            Err(e) => {
+                // Stop-and-report: cross-file atomicity across arbitrary
+                // user-chosen locations is not achievable (§4.5) — name
+                // the failing path and everything already written.
+                let already = if done.is_empty() { "none".to_string() } else { done.join(", ") };
+                return Err(format!("write .env ({path}): {e} (already written: {already})"));
+            }
+        }
     }
 
     let mut written_keys: Vec<String> = written.into_iter().collect();
     written_keys.sort();
 
-    Ok(InjectResult { paths, written: written_keys })
+    Ok(InjectResult { paths, written: written_keys, unmanaged_paths: unmanaged, backups })
 }
 
 // ─── Tauri commands ───────────────────────────────────────────────────────────
@@ -405,11 +556,28 @@ pub async fn environment_delete(state: State<'_, SharedState>, id: i64) -> Resul
 }
 
 #[tauri::command]
-pub async fn environment_inject(state: State<'_, SharedState>, id: i64) -> Result<InjectResult, String> {
+pub async fn environment_inject(
+    state: State<'_, SharedState>,
+    id: i64,
+    overwrite: bool,
+) -> Result<InjectResult, String> {
     let s = state.lock().await;
     let key = s.key.as_ref().ok_or("vault is locked")?;
     let vault_key: [u8; 32] = **key;
-    inject_environment(&s.db, &vault_key, id, None, None).await
+    inject_environment(&s.db, &vault_key, id, None, None, overwrite).await
+}
+
+/// Dry run for the GUI's pre-inject confirm dialog — see
+/// `inject_environment_preview`. Only ever inspects `environment.paths[]`:
+/// the GUI never supplies a caller `output_path`/`output_dir`, so there is
+/// nothing to hard-gate here, only `Foreign` configured paths to surface.
+#[tauri::command]
+pub async fn environment_inject_preview(
+    state: State<'_, SharedState>,
+    id: i64,
+) -> Result<InjectPreview, String> {
+    let s = state.lock().await;
+    inject_environment_preview(&s.db, id).await
 }
 
 #[tauri::command]

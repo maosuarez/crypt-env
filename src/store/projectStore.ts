@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { Project, EnvironmentVar, InjectResult, ProjectDeleteImpact, VaultItem } from '../types';
+import type { Project, EnvironmentVar, InjectResult, InjectPreview, ProjectDeleteImpact, VaultItem } from '../types';
 
 export interface EnvironmentInput {
   id?:        number;
@@ -22,7 +22,8 @@ interface ProjectStore {
   previewDelete:     (id: number) => Promise<ProjectDeleteImpact>;
   saveEnvironment:   (input: EnvironmentInput) => Promise<number>;
   removeEnvironment: (id: number) => Promise<void>;
-  inject:            (environmentId: number) => Promise<InjectResult>;
+  inject:            (environmentId: number, overwrite?: boolean) => Promise<InjectResult>;
+  previewInject:     (environmentId: number) => Promise<InjectPreview>;
   createProjectItem: (projectId: number, item: Omit<VaultItem, 'id' | 'created'>) => Promise<VaultItem>;
   clearError:        () => void;
 }
@@ -84,8 +85,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     await get().load();
   },
 
-  inject: async (environmentId) => {
-    return invoke<InjectResult>('environment_inject', { id: environmentId });
+  inject: async (environmentId, overwrite = false) => {
+    return invoke<InjectResult>('environment_inject', { id: environmentId, overwrite });
+  },
+
+  previewInject: (environmentId) => {
+    return invoke<InjectPreview>('environment_inject_preview', { id: environmentId });
   },
 
   createProjectItem: (projectId, item) => {

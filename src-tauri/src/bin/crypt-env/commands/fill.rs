@@ -19,6 +19,15 @@ pub struct FillArgs {
     /// Environment name (defaults to crypt-env.json or the project's default environment)
     #[arg(long = "env")]
     pub env: Option<String>,
+
+    /// Overwrite the output file even if it already exists and was not
+    /// created by crypt-env. The prior contents are copied to `<path>.bak`
+    /// first. Without this flag, an existing unmanaged file causes the
+    /// command to fail loudly (HTTP 409) rather than silently truncate it.
+    /// No interactive prompt: `fill` must behave identically under a
+    /// terminal or a pipe/CI runner.
+    #[arg(short = 'f', long = "force")]
+    pub force: bool,
 }
 
 #[derive(Deserialize)]
@@ -39,6 +48,7 @@ pub fn run(args: FillArgs) -> Result<(), CliError> {
     let body = serde_json::json!({
         "template": template,
         "output_path": output_path.to_string_lossy(),
+        "overwrite": args.force,
     });
 
     let url = resolved_scope.append_query(&format!("{API_BASE}/fill"));
@@ -50,6 +60,12 @@ pub fn run(args: FillArgs) -> Result<(), CliError> {
     if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
         let text = resp.text().unwrap_or_default();
         return Err(CliError::Api(format!("scope error: {text}")));
+    }
+    if resp.status() == reqwest::StatusCode::CONFLICT {
+        // Existing file not created by crypt-env: print the server's
+        // message (names the path and the `--force` remedy) as-is.
+        let text = resp.text().unwrap_or_default();
+        return Err(CliError::Api(text));
     }
     if !resp.status().is_success() {
         let text = resp.text().unwrap_or_default();

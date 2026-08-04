@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 
 use crate::crypto;
 use crate::db::{DbCategory, DbWorkspaceVar};
+use crate::envfile;
 use crate::project::{self, EnvironmentInput, ProjectInput};
 use crate::share::{ShareState, ShareSessionState};
 use crate::share::relay;
@@ -103,6 +104,36 @@ async fn cors_guard(
 
 fn err_json(status: StatusCode, msg: &str, code: &str) -> impl IntoResponse {
     (status, Json(ErrorBody { error: msg.to_string(), code: code.to_string() }))
+}
+
+/// Builds the `envfile` marker line for a resolved environment: looks up
+/// its project's name for the `(project: ..., environment: ...)` text.
+/// Falls back to "unknown" if the project lookup fails — this is
+/// informational text only (§4.3 of the issue #8 plan), never parsed back,
+/// so a lookup failure here must never block the write itself.
+async fn build_marker(state: &ApiState, env: &project::Environment) -> String {
+    let project_name = {
+        let vault = state.vault.lock().await;
+        vault.db.get_project_name(env.project_id).await.ok().flatten()
+    };
+    envfile::marker_line(project_name.as_deref().unwrap_or("unknown"), &env.name)
+}
+
+/// Maps an `envfile::EnvFileError` to the HTTP response shape shared by
+/// `/fill` and `/environments/:id/example` (§1.3 of the issue #8 plan).
+fn err_envfile(e: envfile::EnvFileError) -> axum::response::Response {
+    match e {
+        envfile::EnvFileError::TargetExists(_) => {
+            err_json(StatusCode::CONFLICT, &e.to_string(), "TARGET_EXISTS").into_response()
+        }
+        envfile::EnvFileError::BackupExists(_) => {
+            err_json(StatusCode::CONFLICT, &e.to_string(), "BACKUP_EXISTS").into_response()
+        }
+        envfile::EnvFileError::Io(..) => {
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot write file: {e}"), "INTERNAL_ERROR")
+                .into_response()
+        }
+    }
 }
 
 /// Verifica el header X-Vault-Token.
@@ -1230,33 +1261,44 @@ struct TempEnvFile {
     content_len: usize,
     /// Set to true by `persist()` to suppress cleanup in `Drop`.
     persisted: bool,
+    /// Whether a file already existed at `path` before this guard committed
+    /// to it (per `envfile::Committed::pre_existed`). Determines what
+    /// `Drop` may safely do to it on the error path — see `Drop` below.
+    pre_existed: bool,
+    /// Path of the `.bak` copy `envfile::commit` created, if any — surfaced
+    /// to the caller in the response so they know it exists.
+    backup: Option<std::path::PathBuf>,
 }
 
 impl TempEnvFile {
-    /// Write `content` to `path` and return a guard that will clean up on drop.
+    /// Delegates to `envfile::commit` for the existence gate, `.bak`
+    /// backup and marker/permission policy, and records whether the path
+    /// existed before this write so `Drop` knows whether it may delete the
+    /// inode outright or must only zero its contents.
     ///
-    /// On Unix the file is created with mode 0o600 (owner read/write only),
-    /// preventing other users on the same system from reading the secrets.
+    /// This replaces the previous write-then-`chmod` ordering, where a
+    /// failed `set_permissions` returned `Err` *after* the target had
+    /// already been truncated, leaving a secret file at umask permissions
+    /// with no guard armed. `envfile::commit` sets the mode at open time.
     ///
-    /// On Windows, `%APPDATA%` and other per-user directories already inherit
-    /// restrictive NTFS ACLs from their parent — only the owning user account
-    /// and SYSTEM have access. The standard library provides no portable API
-    /// for setting Windows ACLs from Rust, so no additional permission change
-    /// is needed or applied here.
-    fn create(path: std::path::PathBuf, content: &str) -> Result<Self, std::io::Error> {
-        std::fs::write(&path, content.as_bytes())?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&path, perms)?;
-        }
-
+    /// On Windows, `%APPDATA%` and other per-user directories already
+    /// inherit restrictive NTFS ACLs from their parent — only the owning
+    /// user account and SYSTEM have access. The standard library provides
+    /// no portable API for setting Windows ACLs from Rust, so no
+    /// additional permission change is needed or applied there.
+    fn create_guarded(
+        path: std::path::PathBuf,
+        content: &str,
+        marker: &str,
+        opts: &envfile::WriteOptions,
+    ) -> Result<Self, envfile::EnvFileError> {
+        let committed = envfile::commit(&path, content, marker, opts)?;
         Ok(Self {
             path,
             content_len: content.len(),
             persisted: false,
+            pre_existed: committed.pre_existed,
+            backup: committed.backup,
         })
     }
 
@@ -1277,10 +1319,22 @@ impl Drop for TempEnvFile {
         }
         // Overwrite with zeros first to hinder file-system recovery of secrets.
         // Use max(content_len, 1) so we always issue at least one write attempt
-        // even if content_len is somehow zero.
+        // even if content_len is somehow zero. A zero pass is defense-in-depth,
+        // not an erasure guarantee, on journaling/copy-on-write filesystems.
         let zeros = vec![0u8; self.content_len.max(1)];
         let _ = std::fs::write(&self.path, &zeros);
-        let _ = std::fs::remove_file(&self.path);
+
+        if self.pre_existed {
+            // The original bytes are already gone by this point (and
+            // preserved in a `.bak` if the gate required one), so leaving
+            // our plaintext on disk is the worse of the two failures — but
+            // deleting a path we did not create would destroy the inode,
+            // its permissions and its existence, which callers may depend
+            // on. Truncate to zero length instead of removing it.
+            let _ = std::fs::File::create(&self.path);
+        } else {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -1296,6 +1350,11 @@ struct FillBody {
     /// `{output_dir}/.env.<environment-name>` instead of returning content
     /// inline — the default-filename-with-environment-suffix convention.
     output_dir: Option<String>,
+    /// If the resolved target exists and was not created by crypt-env,
+    /// the write is refused with `409 TARGET_EXISTS` unless this is `true`
+    /// — in which case the prior contents are copied to `<path>.bak` first.
+    #[serde(default)]
+    overwrite: bool,
 }
 
 #[derive(Serialize)]
@@ -1309,6 +1368,10 @@ struct FillResponse {
     injected: usize,
     not_found: usize,
     missing_keys: Vec<String>,
+    /// Path of the `.bak` copy, present only when `overwrite: true` caused
+    /// an existing unmanaged file to be backed up before being replaced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup: Option<String>,
 }
 
 async fn handle_fill(
@@ -1445,17 +1508,14 @@ async fn handle_fill(
                 .into_response();
             }
         }
-        let guard = match TempEnvFile::create(path, &filled) {
+
+        let marker = build_marker(&state, &env).await;
+        let opts = envfile::WriteOptions { overwrite: body.overwrite, mode: envfile::FileMode::Private0600 };
+        let guard = match TempEnvFile::create_guarded(path, &filled, &marker, &opts) {
             Ok(g) => g,
-            Err(e) => {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("cannot write file: {e}"),
-                    "INTERNAL_ERROR",
-                )
-                .into_response();
-            }
+            Err(e) => return err_envfile(e),
         };
+        let backup = guard.backup.as_ref().map(|p| p.to_string_lossy().into_owned());
         // Disarm: caller is now responsible for the file.
         let final_path = guard.persist();
         return (
@@ -1466,6 +1526,7 @@ async fn handle_fill(
                 injected,
                 not_found,
                 missing_keys,
+                backup,
             }),
         )
             .into_response();
@@ -1480,6 +1541,7 @@ async fn handle_fill(
             injected,
             not_found,
             missing_keys,
+            backup: None,
         }),
     )
         .into_response()
@@ -2095,6 +2157,12 @@ async fn handle_delete_environment(
 struct InjectBody {
     output_path: Option<String>,
     output_dir: Option<String>,
+    /// If any caller-supplied path (`output_path`/`output_dir`-derived) is
+    /// `Foreign`, the write is refused with `409 TARGET_EXISTS` unless this
+    /// is `true` — in which case the prior contents are copied to
+    /// `<path>.bak` first. Owner-configured `environment.paths[]` are never
+    /// gated by this flag (see `project::inject_environment`'s doc comment).
+    overwrite: bool,
 }
 
 async fn handle_inject_environment(
@@ -2121,13 +2189,19 @@ async fn handle_inject_environment(
         }
     };
 
-    match project::inject_environment(&vault.db, &vault_key, id, body.output_path, body.output_dir).await {
+    match project::inject_environment(&vault.db, &vault_key, id, body.output_path, body.output_dir, body.overwrite).await {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
         Err(e) if e == "environment not found" => {
             err_json(StatusCode::NOT_FOUND, &e, "NOT_FOUND").into_response()
         }
         Err(e) if e == "environment has no paths configured" => {
             err_json(StatusCode::UNPROCESSABLE_ENTITY, &e, "VALIDATION_ERROR").into_response()
+        }
+        Err(e) if e.starts_with(envfile::TARGET_EXISTS_PREFIX) => {
+            err_json(StatusCode::CONFLICT, &e, "TARGET_EXISTS").into_response()
+        }
+        Err(e) if e.starts_with(envfile::BACKUP_EXISTS_PREFIX) => {
+            err_json(StatusCode::CONFLICT, &e, "BACKUP_EXISTS").into_response()
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
@@ -2148,6 +2222,8 @@ async fn handle_inject_environment(
 struct ExampleBody {
     output_path: Option<String>,
     output_dir: Option<String>,
+    /// See `FillBody::overwrite` / `InjectBody::overwrite` — same policy.
+    overwrite: bool,
 }
 
 #[derive(Serialize)]
@@ -2157,6 +2233,10 @@ struct ExampleResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     keys: Vec<String>,
+    /// Path of the `.bak` copy, present only when `overwrite: true` caused
+    /// an existing unmanaged file to be backed up before being replaced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup: Option<String>,
 }
 
 async fn handle_environment_example(
@@ -2213,20 +2293,24 @@ async fn handle_environment_example(
                 .into_response();
             }
         }
-        // Plain write is fine here (no RAII zero-wipe needed) — the content
-        // contains only key names, never a secret value.
-        if let Err(e) = std::fs::write(&path, &content) {
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("cannot write file: {e}"),
-                "INTERNAL_ERROR",
-            )
-            .into_response();
-        }
-        return (StatusCode::OK, Json(ExampleResponse { content: None, path: Some(out), keys })).into_response();
+        // No RAII zero-wipe needed here — the content holds no secret value,
+        // only key names. It still gets the same existence gate and marker
+        // as `/fill` and `/inject`: an unmanaged file at this path is just
+        // as real a target for silent clobbering as a secret-bearing one.
+        // `FileMode::Inherit` (not `Private0600`) because this file exists
+        // to be committed and shared — forcing owner-only permissions on a
+        // `.env.example` would be surprising on a shared build machine.
+        let marker = build_marker(&state, &env).await;
+        let opts = envfile::WriteOptions { overwrite: body.overwrite, mode: envfile::FileMode::Inherit };
+        let committed = match envfile::commit(&path, &content, &marker, &opts) {
+            Ok(c) => c,
+            Err(e) => return err_envfile(e),
+        };
+        let backup = committed.backup.map(|p| p.to_string_lossy().into_owned());
+        return (StatusCode::OK, Json(ExampleResponse { content: None, path: Some(out), keys, backup })).into_response();
     }
 
-    (StatusCode::OK, Json(ExampleResponse { content: Some(content), path: None, keys })).into_response()
+    (StatusCode::OK, Json(ExampleResponse { content: Some(content), path: None, keys, backup: None })).into_response()
 }
 
 // ─── Relay handlers ───────────────────────────────────────────────────────────

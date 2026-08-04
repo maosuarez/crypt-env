@@ -333,13 +333,14 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_fill_env",
-            "description": "Fills a .env.example template with real secret values from a project+environment scope, matching keys against that environment's linked variables. Secret values never appear in the response — use crypt_env_list_items first to discover available keys, then write a .env.example, then call this to produce the final .env the service will read. Requires scope: 'environment_id', or both 'project' and 'environment'. Write destination: 'output_path' writes exactly there; 'output_dir' (no output_path) writes to '{output_dir}/.env.<environment-name>'; neither returns the filled content inline.",
+            "description": "Fills a .env.example template with real secret values from a project+environment scope, matching keys against that environment's linked variables. Secret values never appear in the response — use crypt_env_list_items first to discover available keys, then write a .env.example, then call this to produce the final .env the service will read. Requires scope: 'environment_id', or both 'project' and 'environment'. Write destination: 'output_path' writes exactly there; 'output_dir' (no output_path) writes to '{output_dir}/.env.<environment-name>'; neither returns the filled content inline. Writes refuse to clobber a file crypt-env did not create — see 'overwrite'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "template": { "type": "string", "description": "Content of the .env.example (lines like KEY= or KEY=description)" },
                     "output_path": { "type": "string", "description": "Absolute path where the filled .env should be written, e.g. /home/user/my-project/.env" },
                     "output_dir": { "type": "string", "description": "Directory to write the filled .env into, using the '.env.<environment-name>' naming convention. Ignored if output_path is given." },
+                    "overwrite": { "type": "boolean", "description": "Destructive. Set true ONLY when the user has explicitly confirmed replacing the file at output_path. The previous contents are copied to <path>.bak first. Leave unset otherwise: the call will safely fail with a conflict naming the path if the target exists and was not created by crypt-env." },
                     "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
                     "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
                     "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
@@ -517,7 +518,7 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_inject_environment",
-            "description": "Inject an environment's vars into its configured .env path(s). Identify by environment id, or by 'project' + 'environment' names. If the environment has no configured paths, provide 'output_path' or 'output_dir' to write there instead.",
+            "description": "Inject an environment's vars into its configured .env path(s). Identify by environment id, or by 'project' + 'environment' names. If the environment has no configured paths, provide 'output_path' or 'output_dir' to write there instead. Writes refuse to clobber a file crypt-env did not create — see 'overwrite'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -525,13 +526,14 @@ fn tool_definitions() -> serde_json::Value {
                     "project": { "type": "string", "description": "Project name (case-insensitive, used with 'environment' if id not given)" },
                     "environment": { "type": "string", "description": "Environment name within the project (case-insensitive, e.g. production, local, test)" },
                     "output_path": { "type": "string", "description": "Absolute path to write the .env to, in addition to the environment's configured paths." },
-                    "output_dir": { "type": "string", "description": "Directory to write '.env.<environment-name>' into. Used as fallback when the environment has no configured paths and no output_path is given." }
+                    "output_dir": { "type": "string", "description": "Directory to write '.env.<environment-name>' into. Used as fallback when the environment has no configured paths and no output_path is given." },
+                    "overwrite": { "type": "boolean", "description": "Destructive. Set true ONLY when the user has explicitly confirmed replacing the file at output_path. The previous contents are copied to <path>.bak first. Leave unset otherwise: the call will safely fail with a conflict naming the path if the target exists and was not created by crypt-env." }
                 }
             }
         },
         {
             "name": "crypt_env_generate_example_env",
-            "description": "Generates a safe-to-commit '.env.example'-style placeholder for an environment: every linked variable key with an empty value (KEY=). Never reads or returns secret values. Identify by environment id, or by 'project' + 'environment' names.",
+            "description": "Generates a safe-to-commit '.env.example'-style placeholder for an environment: every linked variable key with an empty value (KEY=). Never reads or returns secret values. Identify by environment id, or by 'project' + 'environment' names. Writes refuse to clobber a file crypt-env did not create — see 'overwrite'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -539,7 +541,8 @@ fn tool_definitions() -> serde_json::Value {
                     "project": { "type": "string", "description": "Project name (case-insensitive, used with 'environment' if id not given)" },
                     "environment": { "type": "string", "description": "Environment name within the project (case-insensitive, e.g. production, local, test)" },
                     "output_path": { "type": "string", "description": "Absolute path to write the placeholder .env.example to. If omitted, content is returned inline (still placeholders only, never secrets)." },
-                    "output_dir": { "type": "string", "description": "Directory to write '.env.example.<environment-name>' into. Ignored if output_path is given." }
+                    "output_dir": { "type": "string", "description": "Directory to write '.env.example.<environment-name>' into. Ignored if output_path is given." },
+                    "overwrite": { "type": "boolean", "description": "Destructive. Set true ONLY when the user has explicitly confirmed replacing the file at output_path. The previous contents are copied to <path>.bak first. Leave unset otherwise: the call will safely fail with a conflict naming the path if the target exists and was not created by crypt-env." }
                 }
             }
         },
@@ -1277,7 +1280,9 @@ fn tool_fill_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
     let mut sep = '?';
     append_scope_params(&mut url, &mut sep, args);
 
-    let mut body = serde_json::json!({ "template": template });
+    let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let mut body = serde_json::json!({ "template": template, "overwrite": overwrite });
     if let Some(p) = output_path {
         body["output_path"] = serde_json::json!(p);
     }
@@ -1301,6 +1306,9 @@ fn tool_fill_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
     }
     if status == 422 {
         return tool_err(format!("scope or validation error: {text}"));
+    }
+    if status == 409 {
+        return tool_err(format!("target_exists: {text}. Ask the user before retrying with overwrite=true."));
     }
     if status >= 400 {
         return tool_err(format!("fill failed (HTTP {status}): {text}"));
@@ -1889,7 +1897,9 @@ fn tool_inject_environment(args: &serde_json::Value, token: &str) -> serde_json:
         Err(e) => return e,
     };
 
-    let mut inject_body = serde_json::json!({});
+    let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let mut inject_body = serde_json::json!({ "overwrite": overwrite });
     if let Some(p) = args.get("output_path").and_then(|v| v.as_str()) {
         inject_body["output_path"] = serde_json::json!(p);
     }
@@ -1914,6 +1924,9 @@ fn tool_inject_environment(args: &serde_json::Value, token: &str) -> serde_json:
 
     if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
     if status == 404 { return tool_err(format!("environment {environment_id} not found")); }
+    if status == 409 {
+        return tool_err(format!("target_exists: {text}. Ask the user before retrying with overwrite=true."));
+    }
     if status >= 400 { return tool_err(format!("inject failed (HTTP {status}): {text}")); }
 
     match serde_json::from_str::<serde_json::Value>(&text) {
@@ -1932,7 +1945,9 @@ fn tool_generate_example_env(args: &serde_json::Value, token: &str) -> serde_jso
         Err(e) => return e,
     };
 
-    let mut body = serde_json::json!({});
+    let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let mut body = serde_json::json!({ "overwrite": overwrite });
     if let Some(p) = args.get("output_path").and_then(|v| v.as_str()) {
         body["output_path"] = serde_json::json!(p);
     }
@@ -1957,6 +1972,9 @@ fn tool_generate_example_env(args: &serde_json::Value, token: &str) -> serde_jso
 
     if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
     if status == 404 { return tool_err(format!("environment {environment_id} not found")); }
+    if status == 409 {
+        return tool_err(format!("target_exists: {text}. Ask the user before retrying with overwrite=true."));
+    }
     if status >= 400 { return tool_err(format!("example generation failed (HTTP {status}): {text}")); }
 
     match serde_json::from_str::<serde_json::Value>(&text) {

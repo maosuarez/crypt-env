@@ -759,6 +759,17 @@ impl VaultDb {
         Ok(())
     }
 
+    /// Looks up a single project's name by id — used to build the
+    /// `envfile` marker line (project + environment names, informational
+    /// only) without loading the full project list.
+    pub async fn get_project_name(&self, project_id: i64) -> Result<Option<String>, String> {
+        sqlx::query_scalar("SELECT name FROM projects WHERE id = ?1")
+            .bind(project_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     pub async fn list_projects(&self) -> Result<Vec<DbProject>, String> {
         let rows = sqlx::query(
             "SELECT id, name, description, template, created, updated FROM projects ORDER BY id ASC",

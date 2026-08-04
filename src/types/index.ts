@@ -92,8 +92,25 @@ export type ProjectTemplate =
   | 'generic' | 'node' | 'postgres' | 'mongo' | 'docker' | 'python';
 
 export interface InjectResult {
+  paths:          string[];
+  written:        string[];
+  /** Owner-configured paths that were unmanaged (pre-existing, not created
+   *  by crypt-env) at the time of this inject — written anyway (configured
+   *  paths are never hard-gated), but surfaced so the caller can see it.
+   *  Self-heals: a path drops off this list on the next inject once it
+   *  carries the marker. */
+  unmanagedPaths: string[];
+  /** `.bak` paths created because a write target was unmanaged. */
+  backups:        string[];
+}
+
+/** Result of `environment_inject_preview` — resolves and inspects the
+ *  environment's configured paths without decrypting or writing anything,
+ *  so the GUI can show a confirm dialog before an inject that would
+ *  overwrite unmanaged files. */
+export interface InjectPreview {
   paths:   string[];
-  written: string[];
+  foreign: string[];
 }
 
 export interface ProjectDeleteImpact {

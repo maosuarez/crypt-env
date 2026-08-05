@@ -8,7 +8,7 @@ use crate::test_support::{link_var, locked_vault, req, router, seed_item, seed_p
 async fn resolves_by_environment_id() {
     let v = unlocked_vault().await;
     let app = router(&v);
-    let (status, json) = req(&app, "GET", &format!("/items?environment_id={}", v.env_id), Some(&v.token), None).await;
+    let (status, json) = req(&app, "GET", &format!("/items?environment_id={}&include_global=false", v.env_id), Some(&v.token), None).await;
     assert_eq!(status.as_u16(), 200u16);
     assert_eq!(json.as_array().unwrap().len(), 3);
 }
@@ -17,7 +17,7 @@ async fn resolves_by_environment_id() {
 async fn resolves_by_project_and_environment_names() {
     let v = unlocked_vault().await;
     let app = router(&v);
-    let (status, json) = req(&app, "GET", "/items?project=demo&environment=production", Some(&v.token), None).await;
+    let (status, json) = req(&app, "GET", "/items?project=demo&environment=production&include_global=false", Some(&v.token), None).await;
     assert_eq!(status.as_u16(), 200u16);
     assert_eq!(json.as_array().unwrap().len(), 3);
 }

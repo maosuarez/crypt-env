@@ -10,7 +10,7 @@ Authentication: Header `X-Vault-Token` containing either a session token (from P
 |--------|----------|------|-------------|
 | POST | /unlock | none | Derives AES-GCM key from master password + Argon2 salt, generates 16-byte session token with configurable TTL |
 | GET | /health | none | Returns version, status, vault_locked bool, mcp_token_configured. No longer returns item_count (removed — see Notes) |
-| GET | /items | token | List items (redacted — no secret values), **scoped**: requires `environment_id`, or `project`+`environment` (case-insensitive names) query params — 422 `VALIDATION_ERROR` if unresolvable. Returns only items linked in that environment's `environment_vars`. `type`/`category`/`search` filters apply on top |
+| GET | /items | token | List items (redacted — no secret values), **scoped**: requires `environment_id`, or `project`+`environment` (case-insensitive names) query params — 422 `VALIDATION_ERROR` if unresolvable. **Discovery endpoint** — see "Global items and scope" below: accepts `include_global=true\|false\|only` (default `true`), unioning in reusable global items not linked into this environment by default. Every item carries `isGlobal` and `linked`. `type`/`category`/`search` filters apply on top of the union |
 | POST | /items | token | Create item, **scoped** (same query params as GET /items). Validates: name (req, max 255), type (one of: secret/credential/link/note/command), value (req non-empty). Body accepts optional `key` (environment-var key, defaults to `name`). Accepts `?on_conflict=update\|replace\|error` (default `update`; invalid value → 422 `VALIDATION_ERROR`). On no collision: creates, owns it in the resolved project, links it under `key`, returns `201`. On a collision (an `environment_vars` row already linked to `key`): `update` re-encrypts onto the existing item **in place** if it is exclusive (non-global, linked only here, owned only by this project) and returns `200`; if the existing item is shared instead, returns `409 SHARED_ITEM_CONFLICT`. `replace` always creates a new item and repoints the link (`201`), deleting the superseded item only if it is now unreachable (unlinked and non-global) — a shared item survives, still referenced elsewhere. `error` returns `409 KEY_EXISTS` on any collision. Create-or-update-and-link is one SQLite transaction — no interleaving leaves an item owned but unlinked. Caller-supplied `isGlobal` is ignored on both `Created` and `Updated` outcomes — the response reports the value actually persisted (always `false` on this path). Encrypts with AES-GCM before storing |
 | GET | /items/:id | token | Get single item metadata (redacted). **Unscoped** — reachable by id regardless of project/environment (scope is a display filter, not an access boundary; see Notes) |
 | PUT | /items/:id | token | Update item. Merges — omitted fields keep existing values including secret fields. Unscoped, same as GET /items/:id |
@@ -20,7 +20,7 @@ Authentication: Header `X-Vault-Token` containing either a session token (from P
 | POST | /categories | token | Create category. Validates name (req, max 100) and color (req). Generates random hex cid |
 | PUT | /categories/:id | token | Update category fields. Passing `description: ""` clears it |
 | DELETE | /categories/:id | token | Delete category. Returns 204 |
-| GET | /commands | token | List items of type "command" with extracted `{{VAR}}` placeholders, **scoped** (same query params as GET /items) — limited to commands linked in the resolved environment |
+| GET | /commands | token | List items of type "command" with extracted `{{VAR}}` placeholders, **scoped** (same query params as GET /items). **Discovery endpoint** — same `include_global` contract as GET /items (default `true`); each command carries `isGlobal` and `linked` |
 | GET | /commands/:id | token | Get single command with placeholders. Unscoped |
 | GET | /settings | token | Get auto_lock_timeout (minutes) and hotkey. Unscoped — settings are global |
 | PUT | /settings | token | Update auto_lock_timeout and/or hotkey |
@@ -104,6 +104,10 @@ one documents the contract, the other proves it. A Postman collection may
 return only alongside a test that replays it through the same router and
 fails the build on drift — see the plan doc for the full reasoning.
 
+### Global items and scope
+
+**Discovery surfaces union globals; materialization surfaces never do; `linked` is the discriminator.** `GET /items` and `GET /commands` accept `include_global=true|false|only` (default `true`): `true` returns (items linked in the resolved environment) ∪ (all `isGlobal:true` items), deduplicated by id; `false` restricts to exactly what's linked — byte-for-byte what `/fill`/`/inject`/`/environments/:id/example` will materialize; `only` returns just the global set regardless of linkage (the REST equivalent of the GUI's Global Secrets screen), still requiring a valid scope. An invalid value 422s with `include_global` named in the message. Every returned item/command carries `isGlobal` (is it marked reusable) and `linked` (is it actually linked into the queried environment) so a caller can always tell "exists and reusable" apart from "will be written by fill/inject". `POST /fill`, `POST /environments/:id/inject`, `POST /environments/:id/example`, and `POST /share/listen` are unaffected by `include_global` — they resolve strictly through `environment_vars`, so linking a global into an environment remains a deliberate, explicit act.
+
 ### Notes
 
 `decrypt_all_items` decrypts the entire vault on every authenticated request (no caching, no index), making every GET /items a full decryption pass — O(n) per request regardless of filters. Scoped endpoints add a second cost on top: `resolve_scope` loads the full project→environment→vars graph (`GET /projects`-equivalent) before the item decryption pass, so every scoped request is now O(vault) + O(project graph).
@@ -175,10 +179,10 @@ Every command that reads or writes vault items scoped to a project (`add`, `fill
 | `doctor` | — | Check app health, vault lock state, token files, version, and validate `crypt-env.json` if present |
 | `fill` | `[PATH] [--project] [--env] [--force/-f]` | Fill a .env template with vault secrets from the resolved environment, via `POST /fill`. No PATH: looks for `.env.example` then `.env` in cwd; if neither exists, generates a fresh `.env` from the environment's own variable keys (inverse of `add`). `--force`/`-f` sends `overwrite: true` — required the first time the target already exists and wasn't created by crypt-env, otherwise the command exits non-zero with the server's 409 message on stderr. No interactive prompt (CI/pipe-safe) |
 | `inject` | `NAME [--shell TYPE] [--project] [--env]` | Prints shell assignment to stdout (safe for eval). Supported: pwsh, bash, zsh, sh. Prints verify hint to stderr |
-| `list` | `[--project] [--env]` | List saved commands in a table |
+| `list` | `[--project] [--env] [--scope-globals with\|without\|only]` | List saved commands in a table, with a SCOPE column (`linked`/`global`/`global+linked`). `--scope-globals` (default `with`) controls whether unlinked global commands are included |
 | `exec` | `NAME [ARGS] [--project] [--env]` | Execute a saved command by name |
 | `memory` | — | Save a command string interactively |
-| `search` | `QUERY [--project] [--env]` | Search items by name/title within scope. Prints table of ID, TYPE, NAME, CATEGORIES. No values shown |
+| `search` | `QUERY [--project] [--env] [--scope-globals with\|without\|only]` | Search items by name/title within scope. Prints table of ID, TYPE, NAME, SCOPE (`linked`/`global`/`global+linked`), CATEGORIES. `--scope-globals` (default `with`) controls whether unlinked global items are included. No values shown |
 | `set` | `NAME [--project] [--env]` | Print export/env assignment for a secret (stdout) |
 | `cmd` | `list/info/run [--project] [--env]` | Manage saved commands (list, get info, run) |
 | `share send` | `ITEM_IDS... [--project] [--env]` | Start LAN share as sender. Items must already be linked into the resolved environment. Polls for peer, shows fingerprint, prompts confirmation |
@@ -223,6 +227,8 @@ A crafted environment name (created via the GUI or with the static MCP token —
 `project list` shows all projects with nested environment details. Projects with no environments display "(none)" for environment and var count.
 
 `doctor` no longer reports vault item count — `GET /health` stopped returning `item_count` (it leaked vault size to unauthenticated callers).
+
+`cmd`/`exec` resolve a command by name against `GET /commands`, which now defaults to unioning in unlinked global commands (issue #13). When a linked command and a global command share the same name, the linked one wins and a one-line warning naming the shadowed global's id is printed to stderr — `crypt-env cmd`/`crypt-env exec` do not take `--scope-globals` themselves (they always resolve with the default union so a global command remains runnable from any project).
 
 ---
 
@@ -285,9 +291,9 @@ Authentication: Automatic — MCP server reads the REST API session token from d
 
 | Tool | Required | Optional | Description |
 |------|----------|----------|-------------|
-| `crypt_env_list_items` | `environment_id` or (`project`+`environment`) | `type`, `category` | List item metadata (no values), scoped to a project+environment (required — the underlying `GET /items` now enforces it). Filter by type or category on top |
+| `crypt_env_list_items` | `environment_id` or (`project`+`environment`) | `type`, `category`, `include_global` | List item metadata (no values), scoped to a project+environment (required — the underlying `GET /items` now enforces it). `include_global` (`true`\|`false`\|`only`, default `true`) also lists reusable global secrets not yet linked into this environment — these appear with `linked: false` and will NOT be written by generate/inject/fill until linked. Filter by type or category on top |
 | `crypt_env_get_item` | `id` | — | Get single item metadata (no value). Unscoped — `GET /items/:id` was not changed by this migration, reachable by id regardless of project |
-| `crypt_env_search_items` | `query`, `environment_id` or (`project`+`environment`) | — | Search items by name within scope. Returns metadata only |
+| `crypt_env_search_items` | `query`, `environment_id` or (`project`+`environment`) | `include_global` | Search items by name within scope. Same `include_global` contract as `crypt_env_list_items`. Returns metadata only |
 | `crypt_env_add_item` | `type`, `name`, `environment_id` or (`project`+`environment`) | `value`, `category`, `notes`, `url`, `username`, `key`, `on_conflict` | Add item to vault, owned by the resolved project and linked into the resolved environment under `key` (defaults to `name`). If `key` already exists in the target environment, the existing item is updated in place (`on_conflict` default `update`) — its previous value is destroyed. If that item is shared with other environments/projects (or is global), the call fails with `SHARED_ITEM_CONFLICT` instead of silently changing it elsewhere; retry with `on_conflict: "replace"` to create a new item and repoint just this link, or use `crypt_env_update_item` to change the shared value everywhere. `on_conflict: "error"` fails on any existing key. Value passes through MCP → REST in plaintext |
 | `crypt_env_update_item` | `id` | `name`, `value`, `url`, `username`, `password`, `title`, `description`, `notes`, `content`, `command`, `shell`, `categories` | Update item. Omitted fields keep existing values server-side. Unscoped — `PUT /items/:id` was not changed by this migration |
 | `crypt_env_delete_item` | `id` | — | Permanently delete item. Unscoped — `DELETE /items/:id` was not changed by this migration |
@@ -348,7 +354,7 @@ Authentication: Automatic — MCP server reads the REST API session token from d
 
 `crypt_env_inject_env_by_name` resolves by project directory + environment name. If a real environment is found, its paths are used. If not found, the tool now returns an error with next steps (pass an explicit `environment_id`, or `project`+`environment`) — the previous fallback to item-naming-convention matching (name prefix, category) was removed, since it relied on the now-scope-required `/items`/`/fill` endpoints in a way that could no longer work safely. `output_path` is accepted for backward compatibility but is currently unused.
 
-Global items (`isGlobal: true`, not linked into the queried environment) are invisible to `crypt_env_list_items`, `crypt_env_search_items`, `crypt_env_generate_env`, and `crypt_env_inject_env` — there is currently no MCP tool that can discover a project's reusable global secrets; only items explicitly linked into the scoped environment are reachable.
+Fixed (issue #13): `crypt_env_list_items` and `crypt_env_search_items` now default to `include_global=true`, unioning in reusable global items (`isGlobal: true`) that are not yet linked into the queried environment — each result carries `isGlobal` and `linked` so the agent can tell "exists and reusable" apart from "will actually be written". Pass `include_global=false` to see exactly the linked set, or `only` to see just the globals. The remaining gap is unchanged: `crypt_env_generate_env` and `crypt_env_inject_env` still resolve strictly by linkage (matching `/fill`'s/`/inject`'s materialization-only contract) — a global secret discovered via `crypt_env_list_items` still requires an explicit link into the environment (e.g. via `crypt_env_add_item`) before either of those tools can write it.
 
 `crypt_env_share_workspace_send` and `crypt_env_share_workspace_receive` are retained for backward compatibility — they share complete workspaces (definition + decrypted secrets) via relay, not individual items.
 

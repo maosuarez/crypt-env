@@ -39,11 +39,8 @@ pub fn run(args: ExecArgs) -> Result<(), CliError> {
     }
 
     let commands: Vec<CommandDetail> = resp.json().map_err(|e| CliError::Api(e.to_string()))?;
-    let name_lower = args.name.to_lowercase();
 
-    let cmd = commands
-        .into_iter()
-        .find(|c| c.name.to_lowercase() == name_lower)
+    let cmd = client::resolve_command_by_name(commands, &args.name)
         .ok_or_else(|| CliError::NotFound(args.name.clone()))?;
 
     let mut template = cmd.command.unwrap_or_default();

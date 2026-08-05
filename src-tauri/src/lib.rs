@@ -26,7 +26,7 @@ use vault::{
     vault_get_settings, vault_import_backup, vault_import_backup_data, vault_import_items,
     vault_is_setup, vault_list, vault_lock, vault_parse_import, vault_save_categories, vault_save_item,
     vault_save_settings, vault_unlock, vault_wipe, vault_create_project_item, vault_set_item_global,
-    vault_get_item_owners, SharedState, VaultState,
+    vault_get_item_owners, vault_list_orphan_items, vault_prune_orphan_items, SharedState, VaultState,
 };
 use vault::share_commands::{
     share_cancel, share_confirm_fingerprint, share_export_file, share_import_file,
@@ -185,6 +185,8 @@ pub fn run() {
             vault_create_project_item,
             vault_set_item_global,
             vault_get_item_owners,
+            vault_list_orphan_items,
+            vault_prune_orphan_items,
             vault_get_categories,
             vault_save_categories,
             vault_get_settings,

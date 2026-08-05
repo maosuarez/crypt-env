@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 use crate::biometric;
 use crate::crypto::{self, CryptoKey};
-use crate::db::{DbCategory, VaultDb};
+use crate::db::{DbCategory, LinkMode, LinkOutcome, VaultDb};
 
 pub mod import;
 pub mod share_commands;
@@ -301,6 +301,102 @@ pub async fn create_project_item(
     Ok(new_id)
 }
 
+/// `db`'s conflict classification, re-exported so callers outside this crate
+/// (namely `api`) match on the `vault` type rather than importing from `db`
+/// directly — `vault` is the layer that owns the create-or-update decision,
+/// `db` only executes it.
+pub use crate::db::ConflictReason;
+
+/// Result of `create_or_update_env_item` — mirrors `db::LinkOutcome` but
+/// carries the full (decrypted, redaction-pending) `VaultItem` on success
+/// instead of bare ids, since the HTTP response needs the whole shape.
+pub enum UpsertOutcome {
+    Created(VaultItem),
+    Updated(VaultItem),
+    Conflict { item_id: i64, reason: ConflictReason },
+}
+
+/// Orchestrates `POST /items`'s create-or-update-on-collision behaviour
+/// (issue #9): inspect the current state of `env_key` in `environment_id`,
+/// decide free / exclusive / shared, encrypt (preserving the existing row's
+/// `created` on the update branch so the ciphertext and the column agree),
+/// then hand the encrypted blob to `db::create_or_link_item`'s single
+/// transaction. This is the only layer that holds the vault key on this
+/// path — `db` never sees a `CryptoKey`.
+pub async fn create_or_update_env_item(
+    db: &VaultDb,
+    key: &CryptoKey,
+    item: &VaultItem,
+    project_id: i64,
+    environment_id: i64,
+    env_key: &str,
+    mode: LinkMode,
+) -> Result<UpsertOutcome, String> {
+    let conflict = db.inspect_env_key(environment_id, env_key).await?;
+
+    // Short-circuit without touching the key: no need to encrypt anything to
+    // return a conflict.
+    if let Some(c) = &conflict {
+        if mode == LinkMode::Error {
+            return Ok(UpsertOutcome::Conflict {
+                item_id: c.item_id,
+                reason: ConflictReason::KeyExists,
+            });
+        }
+        if mode == LinkMode::Update {
+            let exclusive = !c.is_global && c.link_count == 1 && c.owner_ids == [project_id];
+            if !exclusive {
+                return Ok(UpsertOutcome::Conflict {
+                    item_id: c.item_id,
+                    reason: ConflictReason::Shared,
+                });
+            }
+        }
+    }
+
+    // Build the item to persist. On the `Update` branch, stamp the existing
+    // row's `created` onto the blob so it matches `items.created`, which the
+    // update branch of `create_or_link_item` does not rewrite. On create /
+    // replace, keep the caller's `created` (already defaulted by the handler).
+    let mut to_persist = item.clone();
+    if mode == LinkMode::Update {
+        if let Some(c) = &conflict {
+            to_persist.created = c.created.clone();
+        }
+    }
+
+    let encrypted = encrypt_item(key, &to_persist)?;
+
+    let outcome = db
+        .create_or_link_item(
+            environment_id,
+            project_id,
+            env_key,
+            &to_persist.item_type,
+            &encrypted,
+            &to_persist.created,
+            mode,
+            conflict.map(|c| c.item_id),
+        )
+        .await?;
+
+    Ok(match outcome {
+        LinkOutcome::Created { item_id, is_global } => {
+            let mut saved = to_persist;
+            saved.id = item_id;
+            saved.is_global = Some(is_global);
+            UpsertOutcome::Created(saved)
+        }
+        LinkOutcome::Updated { item_id, is_global } => {
+            let mut saved = to_persist;
+            saved.id = item_id;
+            saved.is_global = Some(is_global);
+            UpsertOutcome::Updated(saved)
+        }
+        LinkOutcome::Conflict { item_id, reason } => UpsertOutcome::Conflict { item_id, reason },
+    })
+}
+
 /// Creates a new item and atomically grants ownership to `project_id` — the
 /// "add a typed variable inside a project" primitive. New items are never
 /// global by default (the caller must explicitly toggle that afterwards).
@@ -416,6 +512,53 @@ pub async fn vault_get_item_owners(
         .filter(|p| owner_ids.contains(&p.id))
         .map(|p| ItemOwner { project_id: p.id, project_name: p.name })
         .collect())
+}
+
+// ─── Issue #9: orphan report / prune (report by default, delete only on
+// explicit confirmation — see plan §3.6) ───────────────────────────────────
+
+/// Decrypts only the ids `db::list_orphan_item_ids` returns and redacts them,
+/// so the caller can judge what it is about to delete without any secret
+/// value leaving this process.
+pub async fn list_orphan_items(db: &VaultDb, key: &CryptoKey) -> Result<Vec<VaultItem>, String> {
+    let ids = db.list_orphan_item_ids().await?;
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let raw = db.list_items().await?;
+    Ok(raw
+        .into_iter()
+        .filter(|(id, ..)| ids.contains(id))
+        .filter_map(|(id, _, data, _, is_global)| decrypt_item(key, id, &data, is_global).ok())
+        .collect())
+}
+
+/// Deletes the given ids via `db::delete_items_cascade`, which re-checks the
+/// orphan predicate per id inside its own transaction — a concurrently
+/// re-linked or globalized item is left alone rather than destroyed.
+pub async fn prune_orphan_items(db: &VaultDb, ids: &[i64]) -> Result<(), String> {
+    db.delete_items_cascade(ids).await
+}
+
+#[tauri::command]
+pub async fn vault_list_orphan_items(
+    state: State<'_, SharedState>,
+) -> Result<Vec<VaultItem>, String> {
+    let mut s = state.lock().await;
+    let key = s.key.as_ref().ok_or("vault is locked")?.clone();
+    s.touch();
+    list_orphan_items(&s.db, &key).await
+}
+
+#[tauri::command]
+pub async fn vault_prune_orphan_items(
+    ids: Vec<i64>,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let mut s = state.lock().await;
+    s.key.as_ref().ok_or("vault is locked")?;
+    s.touch();
+    prune_orphan_items(&s.db, &ids).await
 }
 
 #[tauri::command]

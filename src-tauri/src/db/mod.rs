@@ -87,6 +87,60 @@ struct RenameRecord {
     at: String,
 }
 
+// ─── Issue #9: create-or-update on env-key collision ──────────────────────
+//
+// `db` knows only ids and counts here — no HTTP status codes (that mapping
+// lives in `api`) and no ciphertext (crypto lives in `vault`). See
+// `create_or_link_item` for the transactional write this classification
+// feeds.
+
+/// Read-only snapshot of the item currently linked to a `(environment_id,
+/// key)` pair, returned by `inspect_env_key`. Never carries `items.data`.
+#[derive(Debug, Clone)]
+pub struct EnvKeyConflict {
+    pub item_id: i64,
+    pub created: String,
+    pub is_global: bool,
+    /// Rows in `environment_vars` pointing at `item_id` (including this one).
+    pub link_count: i64,
+    pub owner_ids: Vec<i64>,
+}
+
+/// How `create_or_link_item` should behave on a collision. Mirrors the
+/// `on_conflict` query parameter accepted by `POST /items`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkMode {
+    /// Re-encrypt onto the existing row when it is exclusively owned by the
+    /// calling project and linked nowhere else; otherwise conflict.
+    Update,
+    /// Always create a new row and repoint the link; delete the superseded
+    /// item only if it is now unreachable (unlinked and non-global).
+    Replace,
+    /// Any collision at all is rejected — strict create semantics.
+    Error,
+}
+
+/// Outcome of `create_or_link_item`.
+#[derive(Debug, Clone)]
+pub enum LinkOutcome {
+    Created { item_id: i64, is_global: bool },
+    Updated { item_id: i64, is_global: bool },
+    Conflict { item_id: i64, reason: ConflictReason },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictReason {
+    /// The colliding item is linked elsewhere, multi-owned, or global —
+    /// mutating it in place would change a value seen outside the caller's
+    /// project+environment.
+    Shared,
+    /// `on_conflict=error` (or an `Error`-mode caller) rejects any collision.
+    KeyExists,
+    /// The transactional re-check found a different `item_id` linked than
+    /// the one the caller's earlier `inspect_env_key` call saw.
+    StateChanged,
+}
+
 pub struct VaultDb {
     pool: SqlitePool,
     path: String,
@@ -153,6 +207,14 @@ impl VaultDb {
         let stmts = [
             "PRAGMA journal_mode=WAL",
             "PRAGMA foreign_keys=ON",
+            // SQLite zeroes freed page content on every DELETE/UPDATE-that-frees
+            // when this is on, instead of merely unlinking it. Covers `delete_item`,
+            // `delete_project`'s cascades, the `Replace` conflict branch (§3.2), and
+            // the orphan prune path uniformly, rather than relying on call sites
+            // remembering to zero-then-delete (see `wipe_and_reset`'s file-level
+            // version of the same idea). Connection-level setting, no on-disk
+            // format impact — safe to remove at any time.
+            "PRAGMA secure_delete=ON",
             "CREATE TABLE IF NOT EXISTS vault_meta (
                 id            INTEGER PRIMARY KEY CHECK(id = 1),
                 kdf_salt      TEXT NOT NULL,
@@ -1530,6 +1592,300 @@ impl VaultDb {
             .fetch_one(&self.pool)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    // ─── Issue #9: create-or-update on env-key collision ──────────────────
+
+    /// Read-only snapshot of the item currently linked to `key` in
+    /// `environment_id`, plus enough shape (link/owner counts) for the caller
+    /// to classify it as exclusive vs shared without decrypting anything.
+    /// Never selects `items.data` — no ciphertext leaves this call.
+    pub async fn inspect_env_key(
+        &self,
+        environment_id: i64,
+        key: &str,
+    ) -> Result<Option<EnvKeyConflict>, String> {
+        let row = sqlx::query(
+            "SELECT i.id, i.created, i.is_global
+             FROM environment_vars ev
+             JOIN items i ON i.id = ev.item_id
+             WHERE ev.environment_id = ?1 AND ev.key = ?2",
+        )
+        .bind(environment_id)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // No row at all, or a legacy `literal`-only var (`item_id IS NULL`, so
+        // the JOIN drops it) → nothing to update in place. The create path
+        // runs and `upsert_environment_var`'s repoint replaces the literal,
+        // matching `migrate_literal_vars_to_items`'s upgrade semantics.
+        let row = match row {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let item_id: i64 = row.get(0);
+        let created: String = row.get(1);
+        let is_global_i: i64 = row.get(2);
+
+        let link_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM environment_vars WHERE item_id = ?1")
+                .bind(item_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| e.to_string())?;
+
+        let owner_ids = self.list_owning_projects(item_id).await?;
+
+        Ok(Some(EnvKeyConflict {
+            item_id,
+            created,
+            is_global: is_global_i != 0,
+            link_count,
+            owner_ids,
+        }))
+    }
+
+    /// The single transactional mutation behind `POST /items`'s on-conflict
+    /// handling. Receives an already-encrypted blob (crypto lives in `vault`,
+    /// never here) and performs the whole read-classify-write inside one
+    /// `sqlx::Transaction`, so there is no interleaving that leaves an item
+    /// owned but unlinked (M3) or a `Replace` delete racing its own repoint.
+    ///
+    /// `expected` is the `item_id` (if any) the caller saw during its earlier
+    /// (non-transactional) `inspect_env_key` call. The inspection is re-run
+    /// here, inside the transaction; if the current state disagrees, the
+    /// write is rejected as `Conflict { StateChanged }` rather than acting on
+    /// a classification that may no longer hold. In practice all writers
+    /// serialize on the process-wide `SharedState` mutex, so this is defence
+    /// in depth, not the primary mechanism.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_or_link_item(
+        &self,
+        environment_id: i64,
+        project_id: i64,
+        key: &str,
+        item_type: &str,
+        encrypted: &str,
+        created: &str,
+        mode: LinkMode,
+        expected: Option<i64>,
+    ) -> Result<LinkOutcome, String> {
+        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
+
+        let current = sqlx::query(
+            "SELECT i.id, i.is_global
+             FROM environment_vars ev
+             JOIN items i ON i.id = ev.item_id
+             WHERE ev.environment_id = ?1 AND ev.key = ?2",
+        )
+        .bind(environment_id)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let current_item_id = current.as_ref().map(|r| r.get::<i64, _>(0));
+
+        if current_item_id != expected {
+            tx.rollback().await.map_err(|e| e.to_string())?;
+            // `item_id` in the response is best-effort: whichever id the
+            // caller already knew about, for the error message.
+            return Ok(LinkOutcome::Conflict {
+                item_id: expected.or(current_item_id).unwrap_or(0),
+                reason: ConflictReason::StateChanged,
+            });
+        }
+
+        let now = now_ts();
+
+        match current_item_id {
+            None => {
+                // Free key → create, own, link.
+                let res = sqlx::query(
+                    "INSERT INTO items (item_type, data, created, updated, is_global) VALUES (?1, ?2, ?3, ?4, 0)",
+                )
+                .bind(item_type)
+                .bind(encrypted)
+                .bind(created)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+                let new_id = res.last_insert_rowid();
+
+                sqlx::query("INSERT OR IGNORE INTO item_projects (item_id, project_id) VALUES (?1, ?2)")
+                    .bind(new_id)
+                    .bind(project_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                sqlx::query(
+                    "INSERT INTO environment_vars (environment_id, key, item_id, literal) VALUES (?1, ?2, ?3, NULL)
+                     ON CONFLICT(environment_id, key) DO UPDATE SET item_id = excluded.item_id, literal = NULL",
+                )
+                .bind(environment_id)
+                .bind(key)
+                .bind(new_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+
+                tx.commit().await.map_err(|e| e.to_string())?;
+                Ok(LinkOutcome::Created { item_id: new_id, is_global: false })
+            }
+            Some(item_id) => {
+                let is_global_i: i64 = current.unwrap().get(1);
+                let is_global = is_global_i != 0;
+
+                match mode {
+                    LinkMode::Error => {
+                        tx.rollback().await.map_err(|e| e.to_string())?;
+                        Ok(LinkOutcome::Conflict { item_id, reason: ConflictReason::KeyExists })
+                    }
+                    LinkMode::Update => {
+                        let link_count: i64 =
+                            sqlx::query_scalar("SELECT COUNT(*) FROM environment_vars WHERE item_id = ?1")
+                                .bind(item_id)
+                                .fetch_one(&mut *tx)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        let owner_rows = sqlx::query("SELECT project_id FROM item_projects WHERE item_id = ?1")
+                            .bind(item_id)
+                            .fetch_all(&mut *tx)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let owner_ids: Vec<i64> = owner_rows.into_iter().map(|r| r.get(0)).collect();
+
+                        let exclusive = !is_global && link_count == 1 && owner_ids == [project_id];
+
+                        if !exclusive {
+                            tx.rollback().await.map_err(|e| e.to_string())?;
+                            return Ok(LinkOutcome::Conflict { item_id, reason: ConflictReason::Shared });
+                        }
+
+                        sqlx::query("UPDATE items SET data = ?1, updated = ?2 WHERE id = ?3")
+                            .bind(encrypted)
+                            .bind(&now)
+                            .bind(item_id)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|e| e.to_string())?;
+
+                        tx.commit().await.map_err(|e| e.to_string())?;
+                        Ok(LinkOutcome::Updated { item_id, is_global: false })
+                    }
+                    LinkMode::Replace => {
+                        let res = sqlx::query(
+                            "INSERT INTO items (item_type, data, created, updated, is_global) VALUES (?1, ?2, ?3, ?4, 0)",
+                        )
+                        .bind(item_type)
+                        .bind(encrypted)
+                        .bind(created)
+                        .bind(&now)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        let new_id = res.last_insert_rowid();
+
+                        sqlx::query("INSERT OR IGNORE INTO item_projects (item_id, project_id) VALUES (?1, ?2)")
+                            .bind(new_id)
+                            .bind(project_id)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|e| e.to_string())?;
+
+                        sqlx::query("UPDATE environment_vars SET item_id = ?1, literal = NULL WHERE environment_id = ?2 AND key = ?3")
+                            .bind(new_id)
+                            .bind(environment_id)
+                            .bind(key)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|e| e.to_string())?;
+
+                        // Delete only if now unreachable — a property of the
+                        // statement (NOT EXISTS), not of application logic
+                        // that could drift. Safe no-op when `item_id` is still
+                        // linked elsewhere or is global.
+                        sqlx::query(
+                            "DELETE FROM items WHERE id = ?1 AND is_global = 0
+                             AND NOT EXISTS (SELECT 1 FROM environment_vars WHERE item_id = ?1)",
+                        )
+                        .bind(item_id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                        sqlx::query(
+                            "DELETE FROM item_projects WHERE item_id = ?1
+                             AND NOT EXISTS (SELECT 1 FROM items WHERE id = ?1)",
+                        )
+                        .bind(item_id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                        tx.commit().await.map_err(|e| e.to_string())?;
+                        Ok(LinkOutcome::Created { item_id: new_id, is_global: false })
+                    }
+                }
+            }
+        }
+    }
+
+    /// The issue's reproduction query, verbatim: ids of items with zero
+    /// `environment_vars` references and `is_global = 0`. Global items have a
+    /// reachable surface (Global Secrets) even when unlinked; non-global
+    /// unlinked items have none — that asymmetry is why the predicate omits
+    /// `is_global = 1` rows. See plan §4.6 for the condition under which this
+    /// predicate would need to gain a `item_projects` clause (it does not
+    /// today — re-verified against `main` immediately before this shipped).
+    pub async fn list_orphan_item_ids(&self) -> Result<Vec<i64>, String> {
+        let rows = sqlx::query(
+            "SELECT i.id FROM items i
+             LEFT JOIN environment_vars ev ON ev.item_id = i.id
+             WHERE ev.id IS NULL AND i.is_global = 0",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(rows.into_iter().map(|r| r.get(0)).collect())
+    }
+
+    /// Deletes `item_projects` then `items` for the given ids, in one
+    /// transaction, re-checking the orphan predicate per id inside the
+    /// transaction so a concurrently re-linked item is skipped rather than
+    /// destroyed underneath its new link.
+    pub async fn delete_items_cascade(&self, ids: &[i64]) -> Result<(), String> {
+        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
+        for id in ids {
+            // Re-check the full orphan predicate (unlinked AND non-global) per
+            // id, inside the transaction: a concurrently re-linked item, or
+            // one promoted to global, is skipped rather than destroyed
+            // underneath its new reachability.
+            sqlx::query(
+                "DELETE FROM item_projects WHERE item_id = ?1
+                 AND EXISTS (SELECT 1 FROM items WHERE id = ?1 AND is_global = 0)
+                 AND NOT EXISTS (SELECT 1 FROM environment_vars WHERE item_id = ?1)",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            sqlx::query(
+                "DELETE FROM items WHERE id = ?1 AND is_global = 0
+                 AND NOT EXISTS (SELECT 1 FROM environment_vars WHERE item_id = ?1)",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().await.map_err(|e| e.to_string())
     }
 
     pub async fn wipe_and_reset(&mut self) -> Result<(), String> {

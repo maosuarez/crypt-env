@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 use crate::crypto;
 use crate::db::{DbCategory, DbWorkspaceVar};
 use crate::envfile;
+use crate::fsguard;
 use crate::project::{self, EnvironmentInput, ProjectInput};
 use crate::share::{ShareState, ShareSessionState};
 use crate::share::relay;
@@ -1432,6 +1433,51 @@ async fn handle_fill(
         Err(resp) => return resp,
     };
 
+    // Resolve and validate the write target *before* any decryption happens
+    // (issue #7, objective 3): on rejection, no plaintext has been produced
+    // for this request, on disk or in memory.
+    //
+    // `output_path` is exact caller intent for *this* request and is passed
+    // through verbatim — validating it is issue #8's territory (clobber /
+    // no-clobber), not this one. `output_dir` only ever decides the
+    // *filename* inside it, and that filename is derived from the
+    // environment's `name` — untrusted, persisted data — so it goes through
+    // `fsguard::resolve_within`, which guarantees the result cannot land
+    // outside the caller-supplied directory.
+    let write_target: Option<PathBuf> = if let Some(out) = body.output_path.as_deref() {
+        Some(PathBuf::from(out))
+    } else if let Some(dir) = body.output_dir.as_deref() {
+        match fsguard::resolve_within(dir, &format!(".env.{}", env.name)) {
+            Ok(p) => Some(p),
+            Err(fsguard::ContainmentError::BaseUnusable(msg)) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("cannot use output directory: {msg}"),
+                    "INTERNAL_ERROR",
+                )
+                .into_response();
+            }
+            Err(e) => {
+                // Never echo the environment name or the resolved path (see
+                // plan §4/D5) — the id is enough to identify the row, and a
+                // rejection firing at all means a hostile name reached a
+                // sink and layer 2 caught it.
+                eprintln!(
+                    "[api] /fill rejected: environment id {} — output_dir not contained ({e:?})",
+                    env.id
+                );
+                return err_json(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "output_dir: environment name does not resolve to a path contained within the requested directory",
+                    "PATH_NOT_CONTAINED",
+                )
+                .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
     let items = match decrypt_all_items(&state).await {
         Ok(i) => i,
         Err(StatusCode::FORBIDDEN) => {
@@ -1510,33 +1556,29 @@ async fn handle_fill(
         filled.push('\n');
     }
 
-    // Explicit output_path: write to exactly that file. No output_path but an
-    // output_dir: write to the default-filename-with-environment-suffix
-    // convention inside it. Neither: return content inline (unchanged).
-    let write_target = if let Some(out) = body.output_path {
-        Some(out)
-    } else if let Some(dir) = body.output_dir {
-        let dir = dir.trim_end_matches(['/', '\\']);
-        Some(format!("{dir}/.env.{}", env.name))
-    } else {
-        None
-    };
-
     // When writing to disk: write via RAII guard, return stats only (no
-    // secret content in the response).
+    // secret content in the response). `write_target` was already resolved
+    // and validated above, before decryption.
     //
     // The guard zeros and deletes the file if any error occurs before persist().
     // On success, persist() disarms the guard so the caller can consume the file.
-    if let Some(out) = write_target {
-        let path = std::path::PathBuf::from(&out);
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("cannot create directory: {e}"),
-                    "INTERNAL_ERROR",
-                )
-                .into_response();
+    if let Some(path) = write_target {
+        // Only the explicit `output_path` branch needs a directory created
+        // here: it is exact caller intent with no interpolated name in it.
+        // The `output_dir` branch's base was already created inside
+        // `fsguard::resolve_within` above, on the caller-supplied directory
+        // alone (issue #7, objective 4 — no `create_dir_all` ever sees a
+        // path with an interpolated name in it).
+        if body.output_path.is_some() {
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return err_json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("cannot create directory: {e}"),
+                        "INTERNAL_ERROR",
+                    )
+                    .into_response();
+                }
             }
         }
 
@@ -2058,6 +2100,14 @@ async fn handle_save_project(
             err_json(StatusCode::CONFLICT, "a project with this name already exists", "CONFLICT")
                 .into_response()
         }
+        // `project::save_project` runs `validate_project_name` as its first
+        // statement (issue #7's choke point) and prefixes its message with
+        // "name: " on failure — surface that as a caller error, not a
+        // server fault. Safe to echo: `validate_project_name` returns the
+        // rule that was broken and never the input `name` itself.
+        Err(e) if e.starts_with("name: ") => {
+            err_json(StatusCode::UNPROCESSABLE_ENTITY, &e, "VALIDATION_ERROR").into_response()
+        }
         // Never echo `e` here: on any other failure it may carry raw sqlx/SQL
         // text (table, column, index names), which CLAUDE.md forbids in an
         // API response. Log the detail server-side instead — never the
@@ -2160,6 +2210,14 @@ async fn handle_save_environment(
         Ok(id) => {
             let status = if is_new { StatusCode::CREATED } else { StatusCode::OK };
             (status, Json(serde_json::json!({ "id": id }))).into_response()
+        }
+        // `project::save_environment` runs `validate_environment_name` as
+        // its first statement (issue #7's choke point — the same check the
+        // Tauri command, CLI, and an imported `.cryptenv-proj` template all
+        // go through) and prefixes its message with "name: " on failure.
+        // Safe to echo: the message names the rule, never the input `name`.
+        Err(e) if e.starts_with("name: ") => {
+            err_json(StatusCode::UNPROCESSABLE_ENTITY, &e, "VALIDATION_ERROR").into_response()
         }
         // Same "conflict:" sentinel contract as `handle_save_project` — set
         // either by `db::upsert_environment`'s unique-index violation (ASCII
@@ -2331,25 +2389,54 @@ async fn handle_environment_example(
     // values are never read or decrypted here.
     let content = keys.iter().map(|k| format!("{k}=")).collect::<Vec<_>>().join("\n") + "\n";
 
-    let write_target = if let Some(p) = body.output_path {
-        Some(p)
-    } else if let Some(dir) = body.output_dir {
-        let dir = dir.trim_end_matches(['/', '\\']);
-        Some(format!("{dir}/.env.example.{}", env.name))
+    // Same containment split as `/fill` (issue #7): `output_path` is exact
+    // caller intent, passed through verbatim; `output_dir` only picks the
+    // filename inside it, and that filename is derived from the untrusted,
+    // persisted environment `name`, so it goes through `fsguard`. Content
+    // here is placeholder keys only (never decrypted), so there is no
+    // decrypt-ordering concern like `/fill`'s objective 3 — but the code
+    // shape is kept the same so the two sinks stay diff-comparable.
+    let write_target: Option<PathBuf> = if let Some(p) = body.output_path.as_deref() {
+        Some(PathBuf::from(p))
+    } else if let Some(dir) = body.output_dir.as_deref() {
+        match fsguard::resolve_within(dir, &format!(".env.example.{}", env.name)) {
+            Ok(p) => Some(p),
+            Err(fsguard::ContainmentError::BaseUnusable(msg)) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("cannot use output directory: {msg}"),
+                    "INTERNAL_ERROR",
+                )
+                .into_response();
+            }
+            Err(e) => {
+                eprintln!(
+                    "[api] /environments/{{id}}/example rejected: environment id {} — output_dir not contained ({e:?})",
+                    env.id
+                );
+                return err_json(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "output_dir: environment name does not resolve to a path contained within the requested directory",
+                    "PATH_NOT_CONTAINED",
+                )
+                .into_response();
+            }
+        }
     } else {
         None
     };
 
-    if let Some(out) = write_target {
-        let path = std::path::PathBuf::from(&out);
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("cannot create directory: {e}"),
-                    "INTERNAL_ERROR",
-                )
-                .into_response();
+    if let Some(path) = write_target {
+        if body.output_path.is_some() {
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return err_json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("cannot create directory: {e}"),
+                        "INTERNAL_ERROR",
+                    )
+                    .into_response();
+                }
             }
         }
         // No RAII zero-wipe needed here — the content holds no secret value,
@@ -2359,6 +2446,10 @@ async fn handle_environment_example(
         // `FileMode::Inherit` (not `Private0600`) because this file exists
         // to be committed and shared — forcing owner-only permissions on a
         // `.env.example` would be surprising on a shared build machine.
+        //
+        // `path` is already containment-checked above (issue #7): the
+        // `output_dir` branch routes through `fsguard::resolve_within`, so
+        // the reported path is the post-canonicalization one.
         let marker = build_marker(&state, &env).await;
         let opts = envfile::WriteOptions { overwrite: body.overwrite, mode: envfile::FileMode::Inherit };
         let committed = match envfile::commit(&path, &content, &marker, &opts) {
@@ -2366,7 +2457,8 @@ async fn handle_environment_example(
             Err(e) => return err_envfile(e),
         };
         let backup = committed.backup.map(|p| p.to_string_lossy().into_owned());
-        return (StatusCode::OK, Json(ExampleResponse { content: None, path: Some(out), keys, backup })).into_response();
+        let resolved = path.to_string_lossy().into_owned();
+        return (StatusCode::OK, Json(ExampleResponse { content: None, path: Some(resolved), keys, backup })).into_response();
     }
 
     (StatusCode::OK, Json(ExampleResponse { content: Some(content), path: None, keys, backup: None })).into_response()

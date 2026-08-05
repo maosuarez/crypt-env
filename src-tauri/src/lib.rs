@@ -7,6 +7,7 @@ pub mod cli;
 pub mod crypto;
 pub mod db;
 pub mod envfile;
+pub mod fsguard;
 pub mod mcp;
 pub mod project;
 pub mod share;

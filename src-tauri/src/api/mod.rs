@@ -37,6 +37,26 @@ pub struct ApiState {
     share: Arc<ShareState>,
 }
 
+impl ApiState {
+    /// Builds a fresh state: no active session, rate limiter reset, new share
+    /// session. Used by `start_server` and by `crate::test_support::router`
+    /// so both build `ApiState` identically — no duplicated initialisation to
+    /// drift. `pub(crate)` (not `pub`): visible to the in-crate test harness
+    /// without widening the crate's public API.
+    pub(crate) fn new(vault: SharedState) -> Self {
+        ApiState {
+            vault,
+            session_token: Arc::new(Mutex::new(None)),
+            token_expires: Arc::new(Mutex::new(None)),
+            unlock_rate: Mutex::new(RateLimitState {
+                attempts: 0,
+                window_start: Instant::now(),
+            }),
+            share: Arc::new(ShareState::new()),
+        }
+    }
+}
+
 // ─── Tipos de respuesta ───────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -3039,19 +3059,15 @@ async fn handle_workspace_relay_receive(
 
 // ─── Función pública de arranque ──────────────────────────────────────────────
 
-pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
-    let api_state = Arc::new(ApiState {
-        vault,
-        session_token: Arc::new(Mutex::new(None)),
-        token_expires: Arc::new(Mutex::new(None)),
-        unlock_rate: Mutex::new(RateLimitState {
-            attempts: 0,
-            window_start: Instant::now(),
-        }),
-        share: Arc::new(ShareState::new()),
-    });
-
-    let app = Router::new()
+/// Builds the plain `axum::Router` with all 36 routes plus the `cors_guard`
+/// middleware layer, given an already-constructed `ApiState`. `pub(crate)`
+/// (not `pub`): reachable from `api::tests` (a descendant module) and from
+/// `crate::test_support::router` (same crate), but never part of the crate's
+/// external public API — no production caller outside this crate can build a
+/// router or bind it to a socket other than the one fixed inside
+/// `start_server` below.
+pub(crate) fn build_router(state: Arc<ApiState>) -> Router {
+    Router::new()
         .route("/health", get(handle_health))
         .route("/unlock", post(handle_unlock))
         .route("/fill", post(handle_fill))
@@ -3088,8 +3104,13 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         .route("/relay/receive", post(handle_relay_receive))
         .route("/workspaces/:id/relay/send", post(handle_workspace_relay_send))
         .route("/workspaces/relay/receive", post(handle_workspace_relay_receive))
-        .with_state(api_state)
-        .layer(middleware::from_fn(cors_guard));
+        .with_state(state)
+        .layer(middleware::from_fn(cors_guard))
+}
+
+pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
+    let api_state = Arc::new(ApiState::new(vault));
+    let app = build_router(api_state);
 
     const ADDR: &str = "127.0.0.1:47821";
 
@@ -3120,3 +3141,6 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         eprintln!("[api] REST server error: {e}");
     }
 }
+
+#[cfg(test)]
+mod tests;

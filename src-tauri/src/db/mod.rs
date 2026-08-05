@@ -1332,4 +1332,93 @@ mod tests {
         assert_eq!(db2.list_projects().await.unwrap().len(), 1);
         assert_eq!(db2.list_environments(1).await.unwrap().len(), 1);
     }
+
+    // ─── upsert_environment_var (R2: ON CONFLICT repoint, not insert) ─────
+
+    async fn fresh_env() -> (tempfile::TempDir, VaultDb, i64) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.db");
+        let db = VaultDb::open(path.to_str().unwrap()).await.unwrap();
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+        (dir, db, env_id)
+    }
+
+    #[tokio::test]
+    async fn upsert_environment_var_first_insert_creates_a_row() {
+        let (_dir, db, env_id) = fresh_env().await;
+        let row_id = db.upsert_environment_var(env_id, "DB_HOST", 42).await.unwrap();
+
+        let vars = db.get_environment_vars(env_id).await.unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].id, row_id);
+        assert_eq!(vars[0].item_id, Some(42));
+    }
+
+    #[tokio::test]
+    async fn upsert_environment_var_same_key_twice_repoints_not_duplicates() {
+        let (_dir, db, env_id) = fresh_env().await;
+        let first_id = db.upsert_environment_var(env_id, "DB_HOST", 42).await.unwrap();
+        let second_id = db.upsert_environment_var(env_id, "DB_HOST", 99).await.unwrap();
+
+        assert_eq!(first_id, second_id, "same key must repoint the same row, not insert a new one");
+        let vars = db.get_environment_vars(env_id).await.unwrap();
+        assert_eq!(vars.len(), 1, "ON CONFLICT must not leave two rows for the same (environment_id, key)");
+        assert_eq!(vars[0].item_id, Some(99));
+    }
+
+    #[tokio::test]
+    async fn upsert_environment_var_two_different_keys_yield_two_rows() {
+        let (_dir, db, env_id) = fresh_env().await;
+        db.upsert_environment_var(env_id, "DB_HOST", 1).await.unwrap();
+        db.upsert_environment_var(env_id, "DB_PASSWORD", 2).await.unwrap();
+
+        let vars = db.get_environment_vars(env_id).await.unwrap();
+        assert_eq!(vars.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn upsert_environment_var_same_key_in_different_environments_are_independent() {
+        let (dir, db, env_a) = fresh_env().await;
+        let _ = &dir;
+        let project_id = db.upsert_project(0, "other", None, "generic").await.unwrap();
+        let env_b = db.upsert_environment(0, project_id, "staging", true).await.unwrap();
+
+        db.upsert_environment_var(env_a, "SHARED_KEY", 1).await.unwrap();
+        db.upsert_environment_var(env_b, "SHARED_KEY", 2).await.unwrap();
+
+        let vars_a = db.get_environment_vars(env_a).await.unwrap();
+        let vars_b = db.get_environment_vars(env_b).await.unwrap();
+        assert_eq!(vars_a.len(), 1);
+        assert_eq!(vars_b.len(), 1);
+        assert_eq!(vars_a[0].item_id, Some(1));
+        assert_eq!(vars_b[0].item_id, Some(2));
+    }
+
+    #[tokio::test]
+    async fn upsert_environment_var_updating_one_key_leaves_others_untouched() {
+        let (_dir, db, env_id) = fresh_env().await;
+        db.upsert_environment_var(env_id, "DB_HOST", 1).await.unwrap();
+        db.upsert_environment_var(env_id, "DB_PASSWORD", 2).await.unwrap();
+
+        db.upsert_environment_var(env_id, "DB_HOST", 100).await.unwrap();
+
+        let mut vars = db.get_environment_vars(env_id).await.unwrap();
+        vars.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].key, "DB_HOST");
+        assert_eq!(vars[0].item_id, Some(100));
+        assert_eq!(vars[1].key, "DB_PASSWORD");
+        assert_eq!(vars[1].item_id, Some(2), "unrelated key must be untouched by repointing DB_HOST");
+    }
+
+    #[tokio::test]
+    async fn upsert_environment_var_returned_id_matches_subsequent_lookup() {
+        let (_dir, db, env_id) = fresh_env().await;
+        let row_id = db.upsert_environment_var(env_id, "DB_HOST", 1).await.unwrap();
+
+        let vars = db.get_environment_vars(env_id).await.unwrap();
+        let found = vars.iter().find(|v| v.key == "DB_HOST").unwrap();
+        assert_eq!(found.id, row_id);
+    }
 }

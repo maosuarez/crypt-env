@@ -45,6 +45,64 @@ Authentication: Header `X-Vault-Token` containing either a session token (from P
 | POST | /workspaces/:id/relay/send | token | Share complete workspace (definition + all decrypted referenced secrets) via relay. Returns code + passphrase. Legacy, workspace-table-backed, out of scope for the projects/environments migration |
 | POST | /workspaces/relay/receive | token | Receive shared workspace from relay. Recreates secrets and rebuilds workspace with variables re-linked. Legacy, same as above — items imported this way are NOT linked into any project/environment and are invisible to the scoped endpoints above |
 
+### Examples
+
+`curl` examples against the local server. `-k` is required — the certificate
+is self-signed (see Notes below). Replace `$TOKEN` with a session token from
+`/unlock` or the static MCP token from Settings.
+
+```bash
+# Unlock — returns a session token with a configurable TTL
+curl -sk -X POST https://127.0.0.1:47821/unlock \
+  -H 'Content-Type: application/json' \
+  -d '{"master_password": "your-master-password"}'
+
+# List items — scoped by environment_id
+curl -sk https://127.0.0.1:47821/items?environment_id=1 \
+  -H "X-Vault-Token: $TOKEN"
+
+# List items — scoped by project + environment names (case-insensitive)
+curl -sk 'https://127.0.0.1:47821/items?project=demo&environment=production' \
+  -H "X-Vault-Token: $TOKEN"
+
+# Create an item, linked into an environment as DB_HOST
+curl -sk -X POST 'https://127.0.0.1:47821/items?environment_id=1' \
+  -H "X-Vault-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"type": "secret", "name": "DB_HOST", "value": "localhost", "key": "DB_HOST"}'
+
+# Reveal a plaintext value — requires explicit confirm
+curl -sk -X POST https://127.0.0.1:47821/items/1/reveal \
+  -H "X-Vault-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"confirm": true}'
+
+# Fill a .env template inline, scoped by project + environment
+curl -sk -X POST 'https://127.0.0.1:47821/fill?project=demo&environment=production' \
+  -H "X-Vault-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"template": "DB_HOST=\nPORT=3000\n"}'
+
+# List all projects with their nested environments
+curl -sk https://127.0.0.1:47821/projects -H "X-Vault-Token: $TOKEN"
+
+# Inject an environment's variables into its configured .env path(s)
+curl -sk -X POST https://127.0.0.1:47821/environments/1/inject \
+  -H "X-Vault-Token: $TOKEN" -H 'Content-Type: application/json' -d '{}'
+```
+
+The server is HTTPS-only on `127.0.0.1:47821` with a self-signed certificate
+generated on first launch (`tls::ensure_tls_config`) — clients must either
+pass `-k`/`--insecure` (as above) or trust that certificate explicitly.
+
+**On the retired Postman collection**: `src-tauri/tests/crypt-env-api.postman_collection.json`
+was deleted (tech-debt issue #11) — it asserted a `GET /health` field that no
+longer exists and none of its 15 requests carried the (now mandatory)
+project/environment scope, so every one of them 422'd. Nothing in CI ever
+executed it, so it silently drifted out of date across a whole schema
+migration. This reference section plus the `api::tests::*` suite (executed
+on every push/PR — see `.github/workflows/test.yml`) are the replacement:
+one documents the contract, the other proves it. A Postman collection may
+return only alongside a test that replays it through the same router and
+fails the build on drift — see the plan doc for the full reasoning.
+
 ### Notes
 
 `decrypt_all_items` decrypts the entire vault on every authenticated request (no caching, no index), making every GET /items a full decryption pass — O(n) per request regardless of filters. Scoped endpoints add a second cost on top: `resolve_scope` loads the full project→environment→vars graph (`GET /projects`-equivalent) before the item decryption pass, so every scoped request is now O(vault) + O(project graph).
@@ -69,7 +127,7 @@ Projects/environments model replaces the old workspaces. A Project contains mult
 
 `projects.name` has a case-insensitive UNIQUE index (`idx_projects_name_nocase`) — duplicate-name creation now returns 409 instead of silently succeeding. `environments.name` is only unique per-project under SQLite's default (case-sensitive) collation — two environments in the same project differing only by case (e.g. `Production`/`production`) can still coexist, and name-pair resolution (case-insensitive, picks the lowest-id match) will silently prefer one over the other with no ambiguity error. Known limitation, not fixed.
 
-**Known, deferred issues** (found in review, not fixed in this pass): (1) a crafted environment `name` (only validated non-empty) combined with `output_dir` on `/fill`, `/environments/:id/inject`, or `/environments/:id/example` can path-traverse outside the intended directory, because `create_dir_all` on the joined path materializes the intermediate component that makes `..` segments resolve — reachable by anything holding the static MCP token via `POST /environments`. (2) `/fill`, `/environments/:id/inject`, and `/environments/:id/example` all write via a plain `std::fs::write` to `output_path` with no existence check — pointing one at a real, unrelated file truncates it. (3) `POST /items` on a key that already exists in the environment creates a new item row and repoints the link, orphaning (not deleting) the previous item — repeated `add`-equivalent calls grow the vault unboundedly and "rotating" a secret this way doesn't actually remove the old value.
+**Known, deferred issues** (found in review, not fixed in this pass): (1) a crafted environment `name` (only validated non-empty) combined with `output_dir` on `/fill`, `/environments/:id/inject`, or `/environments/:id/example` can path-traverse outside the intended directory, because `create_dir_all` on the joined path materializes the intermediate component that makes `..` segments resolve — reachable by anything holding the static MCP token via `POST /environments`. (2) `/fill`, `/environments/:id/inject`, and `/environments/:id/example` all write via a plain `std::fs::write` to `output_path` with no existence check — pointing one at a real, unrelated file truncates it. (3) `POST /items` on a key that already exists in the environment creates a new item row and repoints the link, orphaning (not deleting) the previous item — repeated `add`-equivalent calls grow the vault unboundedly and "rotating" a secret this way doesn't actually remove the old value. (4) `PUT /items/:id`'s "merge" behavior only applies to the `Option<T>` fields on `VaultItem` — `type` has no `#[serde(default)]`, so a client omitting it entirely gets a 422 from axum's `Json` extractor before the merge logic (or `validate_update`) ever runs; every partial update must still resend `type`. Found and pinned by `api::tests::items::update_item_partial_update_preserves_other_fields` (issue #11), not changed there since that's a behavior fix out of scope for a test-only PR.
 
 ---
 

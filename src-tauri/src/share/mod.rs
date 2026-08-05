@@ -880,3 +880,118 @@ pub async fn import_package(
 
     Ok(outcome)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::VaultDb;
+
+    fn plain(name: &str, value: &str) -> PlainItem {
+        PlainItem {
+            item_type: "secret".to_string(),
+            name: name.to_string(),
+            value: Some(value.to_string()),
+            username: None,
+            password: None,
+            url: None,
+            notes: None,
+            category: None,
+            command: None,
+        }
+    }
+
+    async fn test_db() -> (tempfile::TempDir, VaultDb, [u8; 32]) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.db");
+        let db = VaultDb::open(path.to_str().unwrap()).await.unwrap();
+        let (_, _, key) = crate::crypto::init_vault_crypto(b"pw").unwrap();
+        (dir, db, key)
+    }
+
+    #[tokio::test]
+    async fn import_without_link_creates_unowned_items() {
+        let (_dir, db, key) = test_db().await;
+        let items = vec![plain("DB_HOST", "localhost")];
+
+        let outcome = import_plain_items_into_vault(&items, &key, &db, None).await.unwrap();
+
+        assert_eq!(outcome.names, vec!["DB_HOST".to_string()]);
+        assert!(outcome.skipped_keys.is_empty());
+        let raw = db.list_items().await.unwrap();
+        assert_eq!(raw.len(), 1);
+        let (id, ..) = raw[0].clone();
+        assert!(db.list_owning_projects(id).await.unwrap().is_empty(), "no link => no ownership grant");
+    }
+
+    #[tokio::test]
+    async fn import_with_link_grants_ownership_and_links_the_environment_var() {
+        let (_dir, db, key) = test_db().await;
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+        let items = vec![plain("DB_HOST", "localhost")];
+
+        let outcome = import_plain_items_into_vault(&items, &key, &db, Some((project_id, env_id))).await.unwrap();
+
+        assert!(outcome.skipped_keys.is_empty());
+        let vars = db.get_environment_vars(env_id).await.unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].key, "DB_HOST");
+        let item_id = vars[0].item_id.unwrap();
+        assert!(db.list_owning_projects(item_id).await.unwrap().contains(&project_id));
+    }
+
+    #[tokio::test]
+    async fn import_skips_relinking_a_key_already_linked_to_a_different_item() {
+        let (_dir, db, key) = test_db().await;
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+        // Pre-existing link the receiver already had.
+        db.upsert_environment_var(env_id, "DB_HOST", 12345).await.unwrap();
+
+        let items = vec![plain("DB_HOST", "incoming-value")];
+        let outcome = import_plain_items_into_vault(&items, &key, &db, Some((project_id, env_id))).await.unwrap();
+
+        assert_eq!(outcome.skipped_keys, vec!["DB_HOST".to_string()], "must not silently repoint an existing link");
+        // The item is still imported (and owned) even though not linked.
+        assert_eq!(outcome.names, vec!["DB_HOST".to_string()]);
+        let vars = db.get_environment_vars(env_id).await.unwrap();
+        assert_eq!(vars[0].item_id, Some(12345), "existing link must be untouched");
+    }
+
+    #[tokio::test]
+    async fn import_skips_linking_an_unsafe_key_but_still_imports_the_item() {
+        let (_dir, db, key) = test_db().await;
+        let project_id = db.upsert_project(0, "demo", None, "generic").await.unwrap();
+        let env_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+        let mut bad = plain("BAD=KEY", "value");
+        bad.name = "BAD=KEY".to_string(); // contains '=', corrupts a KEY=value line
+
+        let outcome = import_plain_items_into_vault(&[bad], &key, &db, Some((project_id, env_id))).await.unwrap();
+
+        assert_eq!(outcome.skipped_keys, vec!["BAD=KEY".to_string()]);
+        assert!(db.get_environment_vars(env_id).await.unwrap().is_empty());
+        assert_eq!(db.list_items().await.unwrap().len(), 1, "item is still imported, just not linked");
+    }
+
+    #[tokio::test]
+    async fn import_multiple_items_preserves_order_in_names() {
+        let (_dir, db, key) = test_db().await;
+        let items = vec![plain("A", "1"), plain("B", "2"), plain("C", "3")];
+
+        let outcome = import_plain_items_into_vault(&items, &key, &db, None).await.unwrap();
+
+        assert_eq!(outcome.names, vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn imported_items_are_never_global() {
+        let (_dir, db, key) = test_db().await;
+        let items = vec![plain("DB_HOST", "localhost")];
+
+        import_plain_items_into_vault(&items, &key, &db, None).await.unwrap();
+
+        let raw = db.list_items().await.unwrap();
+        let (_, _, _, _, is_global) = raw[0].clone();
+        assert!(!is_global, "imported items must never be created as global");
+    }
+}

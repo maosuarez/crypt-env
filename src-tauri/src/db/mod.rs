@@ -1720,7 +1720,13 @@ impl VaultDb {
         .await
         .map_err(|e| e.to_string())?;
 
-        let current_item_id = current.as_ref().map(|r| r.get::<i64, _>(0));
+        // Carry `is_global` alongside the id so the occupied-key branch below
+        // reads it straight off the matched row instead of re-unwrapping
+        // `current` (bare `unwrap()` is forbidden in production code).
+        let current_row = current
+            .as_ref()
+            .map(|r| (r.get::<i64, _>(0), r.get::<i64, _>(1) != 0));
+        let current_item_id = current_row.map(|(id, _)| id);
 
         if current_item_id != expected {
             tx.rollback().await.map_err(|e| e.to_string())?;
@@ -1734,7 +1740,7 @@ impl VaultDb {
 
         let now = now_ts();
 
-        match current_item_id {
+        match current_row {
             None => {
                 // Free key → create, own, link.
                 let res = sqlx::query(
@@ -1770,9 +1776,7 @@ impl VaultDb {
                 tx.commit().await.map_err(|e| e.to_string())?;
                 Ok(LinkOutcome::Created { item_id: new_id, is_global: false })
             }
-            Some(item_id) => {
-                let is_global_i: i64 = current.unwrap().get(1);
-                let is_global = is_global_i != 0;
+            Some((item_id, is_global)) => {
 
                 match mode {
                     LinkMode::Error => {

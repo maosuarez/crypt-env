@@ -580,29 +580,6 @@ fn tool_definitions() -> serde_json::Value {
             }
         },
         {
-            "name": "crypt_env_share_workspace_send",
-            "description": "Share a COMPLETE workspace via internet relay: its definition PLUS the decrypted values of every referenced secret, bundled into one encrypted package. The receiver reconstructs a ready-to-inject workspace in a single step — no need to share individual items. Returns a code and passphrase. IMPORTANT: Show the code and passphrase to the user immediately; the passphrase is only shown once. Identify the workspace by name or id.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "integer", "description": "Workspace ID" },
-                    "name": { "type": "string", "description": "Workspace name (case-insensitive, used if id not given)" }
-                }
-            }
-        },
-        {
-            "name": "crypt_env_share_workspace_receive",
-            "description": "Receive a complete workspace shared via internet relay using a code and passphrase from the sender. Recreates the bundled secrets in the vault and rebuilds the workspace with its variables re-linked, ready to inject into a .env with crypt_env_inject_environment.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "code": { "type": "string", "description": "Relay code provided by the sender (e.g. X7K2-M9P4)" },
-                    "passphrase": { "type": "string", "description": "Passphrase provided by the sender" }
-                },
-                "required": ["code", "passphrase"]
-            }
-        },
-        {
             "name": "crypt_env_list_mcp_servers",
             "description": "List registered MCP servers from Claude config files. Returns name, command, args, and env key names — never env values.",
             "inputSchema": {
@@ -2129,99 +2106,6 @@ fn tool_relay_receive(args: &serde_json::Value, token: &str) -> serde_json::Valu
     }
 }
 
-fn tool_share_workspace_send(args: &serde_json::Value, token: &str) -> serde_json::Value {
-    // Resolve workspace ID: use id directly, or find by name (mirrors inject_workspace).
-    let workspace_id: i64 = if let Some(id) = args.get("id").and_then(|v| v.as_i64()) {
-        id
-    } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
-        let resp = match vault_get("/workspaces", token) {
-            Ok(r) => r,
-            Err(e) => return tool_err(e),
-        };
-        if resp.status().as_u16() == 403 {
-            return tool_err("vault_locked: unlock the vault first");
-        }
-        let text = match resp.text() {
-            Ok(t) => t,
-            Err(e) => return tool_err(format!("error reading workspaces: {e}")),
-        };
-        let list: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => return tool_err("error parsing workspace list"),
-        };
-        let name_lower = name.to_lowercase();
-        let found = list.as_array().and_then(|arr| {
-            arr.iter().find(|ws| {
-                ws.get("name")
-                    .and_then(|n| n.as_str())
-                    .map(|n| n.to_lowercase() == name_lower)
-                    .unwrap_or(false)
-            })
-        }).and_then(|ws| ws.get("id").and_then(|v| v.as_i64()));
-        match found {
-            Some(id) => id,
-            None => return tool_err(format!("workspace '{name}' not found")),
-        }
-    } else {
-        return tool_err("required: 'id' (integer) or 'name' (string)");
-    };
-
-    let resp = match vault_post(
-        &format!("/workspaces/{workspace_id}/relay/send"),
-        token,
-        &serde_json::json!({}),
-    ) {
-        Ok(r) => r,
-        Err(e) => return tool_err(e),
-    };
-
-    let status = resp.status().as_u16();
-    let text = match resp.text() {
-        Ok(t) => t,
-        Err(e) => return tool_err(format!("error reading response: {e}")),
-    };
-
-    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
-    if status == 404 { return tool_err(format!("workspace {workspace_id} not found")); }
-    if status >= 400 { return tool_err(format!("workspace share failed (HTTP {status}): {text}")); }
-
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
-        Err(_) => tool_ok(text),
-    }
-}
-
-fn tool_share_workspace_receive(args: &serde_json::Value, token: &str) -> serde_json::Value {
-    let code = match args.get("code").and_then(|v| v.as_str()) {
-        Some(c) => c.to_string(),
-        None => return tool_err("required parameter: 'code'"),
-    };
-    let passphrase = match args.get("passphrase").and_then(|v| v.as_str()) {
-        Some(p) => p.to_string(),
-        None => return tool_err("required parameter: 'passphrase'"),
-    };
-
-    let body = serde_json::json!({ "code": code, "passphrase": passphrase });
-    let resp = match vault_post("/workspaces/relay/receive", token, &body) {
-        Ok(r) => r,
-        Err(e) => return tool_err(e),
-    };
-
-    let status = resp.status().as_u16();
-    let text = match resp.text() {
-        Ok(t) => t,
-        Err(e) => return tool_err(format!("error reading response: {e}")),
-    };
-
-    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
-    if status >= 400 { return tool_err(format!("workspace receive failed (HTTP {status}): {text}")); }
-
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
-        Err(_) => tool_ok(text),
-    }
-}
-
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
 
 // ─── Category tool implementations ───────────────────────────────────────────
@@ -3159,8 +3043,6 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_
         "crypt_env_generate_example_env" => tool_generate_example_env(args, token),
         "crypt_env_relay_send" => tool_relay_send(args, token),
         "crypt_env_relay_receive" => tool_relay_receive(args, token),
-        "crypt_env_share_workspace_send" => tool_share_workspace_send(args, token),
-        "crypt_env_share_workspace_receive" => tool_share_workspace_receive(args, token),
         "crypt_env_list_mcp_servers" => tool_list_mcp_servers(args, token),
         "crypt_env_add_mcp_server" => tool_add_mcp_server(args, token),
         "crypt_env_update_mcp_server" => tool_update_mcp_server(args, token),

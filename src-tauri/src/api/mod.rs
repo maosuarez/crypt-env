@@ -14,7 +14,9 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::crypto;
-use crate::db::{DbCategory, DbWorkspaceVar};
+// `DbWorkspaceVar` went unused when issue #4 replaced the workspace-relay
+// handlers with the project-relay ones.
+use crate::db::DbCategory;
 use crate::envfile;
 use crate::fsguard;
 use crate::project::{self, EnvironmentInput, ProjectInput};
@@ -3032,21 +3034,37 @@ async fn handle_relay_receive(
         .into_response()
 }
 
-// ─── Complete-workspace relay handlers ────────────────────────────────────────
+// ─── Project relay handlers (issue #4 — share a whole project) ───────────────
+// Replaces the deleted `/workspaces/*/relay/*` pair: same relay transport,
+// but the payload is a `ProjectBundle` (structure + values for N
+// environments at once) instead of a single flat item list or a
+// frozen-table-backed workspace. See `project::relay` for the orchestration
+// (build/receive) and `share::relay::ProjectBundle` for the wire format.
+
+#[derive(serde::Deserialize)]
+struct ProjectRelaySendBody {
+    environment_ids: Vec<i64>,
+}
 
 #[derive(serde::Serialize)]
-struct WorkspaceRelaySendResponse {
+struct ProjectRelaySendResponse {
     code: String,
     passphrase: String,
-    workspace: String,
+    project: String,
+    environment_count: usize,
     item_count: usize,
 }
 
-/// Share an entire workspace (definition + decrypted values) via the relay.
-async fn handle_workspace_relay_send(
+/// Share a whole project (selected environments, structure + decrypted
+/// values, deduped items) via the relay. `environment_ids` is the sender's
+/// explicit selection — the GUI/CLI default non-default environments to
+/// unchecked (D4), but that's a client-side safety default, not enforced
+/// here; this endpoint shares exactly what it's asked to.
+async fn handle_project_relay_send(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
+    Json(body): Json<ProjectRelaySendBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
         let (msg, err_code) = match code {
@@ -3055,6 +3073,15 @@ async fn handle_workspace_relay_send(
             _ => ("internal error", "INTERNAL_ERROR"),
         };
         return err_json(code, msg, err_code).into_response();
+    }
+
+    if body.environment_ids.is_empty() {
+        return err_json(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "environment_ids must not be empty",
+            "VALIDATION_ERROR",
+        )
+        .into_response();
     }
 
     let (supabase_url, anon_key, bundle) = {
@@ -3098,98 +3125,27 @@ async fn handle_workspace_relay_send(
             }
         };
 
-        let workspaces = match vault.db.list_workspaces().await {
-            Ok(w) => w,
+        let bundle = match project::relay::build_project_bundle(&vault.db, &k, id, &body.environment_ids).await {
+            Ok(b) => b,
+            Err(e) if e.contains("not found") => {
+                return err_json(StatusCode::NOT_FOUND, &e, "NOT_FOUND").into_response()
+            }
+            Err(e) if e.contains("too large") => {
+                return err_json(StatusCode::PAYLOAD_TOO_LARGE, &e, "PAYLOAD_TOO_LARGE").into_response()
+            }
             Err(e) => {
                 return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
                     .into_response()
             }
-        };
-        let ws = match workspaces.into_iter().find(|w| w.id == id) {
-            Some(w) => w,
-            None => {
-                return err_json(StatusCode::NOT_FOUND, "workspace not found", "NOT_FOUND")
-                    .into_response()
-            }
-        };
-        let ws_vars = match vault.db.get_workspace_vars(id).await {
-            Ok(v) => v,
-            Err(e) => {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                    .into_response()
-            }
-        };
-
-        // Decrypt every vault item once, keyed by id.
-        let raw = match vault.db.list_items().await {
-            Ok(r) => r,
-            Err(e) => {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                    .into_response()
-            }
-        };
-        let mut items_by_id: std::collections::HashMap<i64, VaultItem> =
-            std::collections::HashMap::new();
-        for (item_id, _, data, _, _) in &raw {
-            if let Ok(json) = crypto::decrypt(&k, data) {
-                if let Ok(item) = serde_json::from_slice::<VaultItem>(&json) {
-                    items_by_id.insert(*item_id, item);
-                }
-            }
-        }
-
-        // Build manifest vars + the set of bundled items (deduped by name).
-        let mut bundle_vars: Vec<relay::WorkspaceBundleVar> = Vec::with_capacity(ws_vars.len());
-        let mut bundled: std::collections::HashMap<String, PlainItem> =
-            std::collections::HashMap::new();
-        for v in &ws_vars {
-            match v.item_id {
-                Some(iid) => {
-                    let item = match items_by_id.get(&iid) {
-                        Some(it) => it,
-                        // Referenced item was deleted — skip cleanly rather than fail.
-                        None => continue,
-                    };
-                    let item_name = item.name.clone().unwrap_or_default();
-                    bundled.entry(item_name.clone()).or_insert_with(|| PlainItem {
-                        item_type: item.item_type.clone(),
-                        name: item_name.clone(),
-                        value: item.value.clone(),
-                        username: item.username.clone(),
-                        password: item.password.clone(),
-                        url: item.url.clone(),
-                        notes: item.notes.clone(),
-                        category: item.categories.clone().and_then(|c| c.into_iter().next()),
-                        command: item.command.clone(),
-                    });
-                    bundle_vars.push(relay::WorkspaceBundleVar {
-                        key: v.key.clone(),
-                        item_name: Some(item_name),
-                        literal: None,
-                    });
-                }
-                None => bundle_vars.push(relay::WorkspaceBundleVar {
-                    key: v.key.clone(),
-                    item_name: None,
-                    literal: v.literal.clone(),
-                }),
-            }
-        }
-
-        let bundle = relay::WorkspaceBundle {
-            kind: relay::WorkspaceBundle::KIND.to_string(),
-            name: ws.name.clone(),
-            description: ws.description.clone(),
-            template: ws.template.clone(),
-            vars: bundle_vars,
-            items: bundled.into_values().collect(),
         };
 
         (supabase_url, anon_key, bundle)
     };
 
-    let workspace_name = bundle.name.clone();
+    let project_name = bundle.name.clone();
+    let environment_count = bundle.environments.len();
     let item_count = bundle.items.len();
+
     let code = relay::generate_share_code();
     let passphrase = crate::share::crypto::generate_passphrase();
 
@@ -3200,7 +3156,7 @@ async fn handle_workspace_relay_send(
                 .into_response()
         }
     };
-    let payload = match relay::encrypt_workspace(&bundle, &relay_key) {
+    let payload = match relay::encrypt_project(&bundle, &relay_key) {
         Ok(p) => p,
         Err(e) => {
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), "INTERNAL_ERROR")
@@ -3235,28 +3191,40 @@ async fn handle_workspace_relay_send(
 
     (
         StatusCode::OK,
-        Json(WorkspaceRelaySendResponse {
+        Json(ProjectRelaySendResponse {
             code,
             passphrase,
-            workspace: workspace_name,
+            project: project_name,
+            environment_count,
             item_count,
         }),
     )
         .into_response()
 }
 
-#[derive(serde::Serialize)]
-struct WorkspaceRelayReceiveResponse {
-    workspace: String,
-    names: Vec<String>,
+#[derive(serde::Deserialize)]
+struct ProjectRelayReceiveBody {
+    code: String,
+    passphrase: String,
+    #[serde(default)]
+    project_name_override: Option<String>,
 }
 
-/// Receive a complete workspace shared via the relay: recreate the bundled items,
-/// then recreate the workspace and re-link its variables to the new items by name.
-async fn handle_workspace_relay_receive(
+#[derive(serde::Serialize)]
+struct ProjectRelayReceiveResponse {
+    project: String,
+    environments: Vec<String>,
+    item_count: usize,
+}
+
+/// Receive a whole project shared via the relay: recreates it as a brand-new
+/// project (never merges into an existing one — D5), in one transaction
+/// (D7). A case-insensitive project-name collision is reported as `409
+/// CONFLICT` so the caller can retry with `project_name_override`.
+async fn handle_project_relay_receive(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
-    Json(body): Json<RelayReceiveBody>,
+    Json(body): Json<ProjectRelayReceiveBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
         let (msg, err_code) = match code {
@@ -3353,12 +3321,12 @@ async fn handle_workspace_relay_receive(
         }
     };
 
-    let bundle = match relay::decrypt_workspace(&payload, &relay_key) {
+    let bundle = match relay::decrypt_project(&payload, &relay_key) {
         Ok(b) => b,
         Err(e) => {
             return err_json(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                &format!("decrypt failed (wrong passphrase or not a workspace?): {e}"),
+                &format!("decrypt failed (wrong passphrase or not a project package?): {e}"),
                 "DECRYPT_ERROR",
             )
             .into_response()
@@ -3375,105 +3343,27 @@ async fn handle_workspace_relay_receive(
     .await;
 
     let vault = state.vault.lock().await;
-    let now_ts = now_ts_str();
+    let result = project::relay::receive_project_bundle(&vault.db, &vault_key, bundle, body.project_name_override)
+        .await;
 
-    // 1. Import bundled items, tracking name → new id so vars can re-link.
-    let mut id_by_name: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut names: Vec<String> = Vec::new();
-    for plain in &bundle.items {
-        let vault_item = VaultItem {
-            id: 0,
-            item_type: plain.item_type.clone(),
-            name: Some(plain.name.clone()),
-            value: plain.value.clone(),
-            username: plain.username.clone(),
-            password: plain.password.clone(),
-            url: plain.url.clone(),
-            notes: plain.notes.clone(),
-            title: None,
-            description: None,
-            command: plain.command.clone(),
-            shell: None,
-            content: None,
-            categories: Some(plain.category.iter().cloned().collect()),
-            created: now_ts.clone(),
-            is_global: None,
-        };
-        let json = match serde_json::to_vec(&vault_item) {
-            Ok(j) => j,
-            Err(e) => {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("serialize item: {e}"),
-                    "INTERNAL_ERROR",
-                )
-                .into_response()
-            }
-        };
-        let encrypted = match crypto::encrypt(&vault_key, &json) {
-            Ok(e) => e,
-            Err(e) => {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("encrypt item: {e}"),
-                    "INTERNAL_ERROR",
-                )
-                .into_response()
-            }
-        };
-        match vault
-            .db
-            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created, false)
-            .await
-        {
-            Ok(new_id) => {
-                id_by_name.insert(plain.name.clone(), new_id);
-                names.push(plain.name.clone());
-            }
-            Err(e) => {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                    .into_response()
-            }
+    match result {
+        Ok(r) => (
+            StatusCode::OK,
+            Json(ProjectRelayReceiveResponse {
+                project: r.project_name,
+                environments: r.environment_names,
+                item_count: r.item_count,
+            }),
+        )
+            .into_response(),
+        // Matches #12's "conflict:" string-prefix convention for db/project
+        // layer errors — see docs/plans/issue-4 D5. Swap for the shared
+        // `PROJECT_NAME_CONFLICT` constant once that branch merges.
+        Err(e) if e.starts_with("conflict:") => {
+            err_json(StatusCode::CONFLICT, &e, "CONFLICT").into_response()
         }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
-
-    // 2. Recreate the workspace (no paths — receiver sets their own .env targets).
-    let ws_id = match vault
-        .db
-        .upsert_workspace(0, &bundle.name, bundle.description.as_deref(), &bundle.template)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                .into_response()
-        }
-    };
-
-    // 3. Re-link vars to the newly imported items by name.
-    let db_vars: Vec<DbWorkspaceVar> = bundle
-        .vars
-        .iter()
-        .map(|v| DbWorkspaceVar {
-            id: 0,
-            workspace_id: ws_id,
-            key: v.key.clone(),
-            item_id: v.item_name.as_ref().and_then(|n| id_by_name.get(n).copied()),
-            literal: v.literal.clone(),
-        })
-        .collect();
-    if let Err(e) = vault.db.set_workspace_vars(ws_id, &db_vars).await {
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response();
-    }
-
-    (
-        StatusCode::OK,
-        Json(WorkspaceRelayReceiveResponse {
-            workspace: bundle.name,
-            names,
-        }),
-    )
-        .into_response()
 }
 
 // ─── Función pública de arranque ──────────────────────────────────────────────
@@ -3522,8 +3412,8 @@ pub(crate) fn build_router(state: Arc<ApiState>) -> Router {
         .route("/environments/:id/example", post(handle_environment_example))
         .route("/relay/send", post(handle_relay_send))
         .route("/relay/receive", post(handle_relay_receive))
-        .route("/workspaces/:id/relay/send", post(handle_workspace_relay_send))
-        .route("/workspaces/relay/receive", post(handle_workspace_relay_receive))
+        .route("/projects/:id/relay/send", post(handle_project_relay_send))
+        .route("/projects/relay/receive", post(handle_project_relay_receive))
         .with_state(state)
         .layer(middleware::from_fn(cors_guard))
 }

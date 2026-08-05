@@ -38,6 +38,7 @@ use project::{
     project_delete, project_export, project_import, project_list, project_pick_env_path,
     project_preview_delete, project_save,
 };
+use project::relay_commands::{project_relay_receive, project_relay_send};
 use wsl::{wsl_distro_home, wsl_list_distros};
 
 struct PendingUpdate(std::sync::Mutex<Option<tauri_plugin_updater::Update>>);
@@ -227,6 +228,8 @@ pub fn run() {
             wsl_list_distros,
             wsl_distro_home,
             environment_inject_preview,
+            project_relay_send,
+            project_relay_receive,
             check_for_update,
             install_update,
             app_is_first_run,

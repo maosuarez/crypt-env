@@ -7,6 +7,9 @@ use crate::db::{DbEnvironmentVar, ProjectDeleteImpact, VaultDb};
 use crate::envfile;
 use crate::vault::SharedState;
 
+pub mod relay;
+pub mod relay_commands;
+
 // ─── Frontend-facing types ────────────────────────────────────────────────────
 
 /// Every variable is a real vault item now — no more bare literals. `item_id`

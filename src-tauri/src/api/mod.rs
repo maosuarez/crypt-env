@@ -37,6 +37,26 @@ pub struct ApiState {
     share: Arc<ShareState>,
 }
 
+impl ApiState {
+    /// Builds a fresh state: no active session, rate limiter reset, new share
+    /// session. Used by `start_server` and by `crate::test_support::router`
+    /// so both build `ApiState` identically — no duplicated initialisation to
+    /// drift. `pub(crate)` (not `pub`): visible to the in-crate test harness
+    /// without widening the crate's public API.
+    pub(crate) fn new(vault: SharedState) -> Self {
+        ApiState {
+            vault,
+            session_token: Arc::new(Mutex::new(None)),
+            token_expires: Arc::new(Mutex::new(None)),
+            unlock_rate: Mutex::new(RateLimitState {
+                attempts: 0,
+                window_start: Instant::now(),
+            }),
+            share: Arc::new(ShareState::new()),
+        }
+    }
+}
+
 // ─── Tipos de respuesta ───────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -231,9 +251,14 @@ struct EnvScopeQuery {
     environment: Option<String>,
 }
 
-/// Resolves the environment for a scoped request, or a 422 response with a
-/// clear message when the identifier is missing or doesn't match anything —
-/// matching the existing validation-error convention (see `err_validation`).
+/// Resolves the environment for a scoped request. A missing/unmatched
+/// identifier is a 422 (matching the existing validation-error convention,
+/// see `err_validation`); an *ambiguous* case-insensitive match — more than
+/// one project or environment satisfying the given name — is a distinct 409
+/// `AMBIGUOUS_SCOPE` instead, since the request itself is well-formed and the
+/// fix (`environment_id`) is deterministic. Every endpoint that scopes a
+/// request via `EnvScopeQuery` goes through this single function, so this is
+/// the one place the 409 mapping needs to live.
 async fn resolve_scope(
     state: &ApiState,
     environment_id: Option<i64>,
@@ -243,7 +268,13 @@ async fn resolve_scope(
     let vault = state.vault.lock().await;
     project::resolve_environment(&vault.db, environment_id, project, environment)
         .await
-        .map_err(|msg| err_validation("project/environment", &msg))
+        .map_err(|msg| {
+            if msg.starts_with(project::AMBIGUOUS_MATCH_PREFIX) {
+                err_json(StatusCode::CONFLICT, &msg, "AMBIGUOUS_SCOPE").into_response()
+            } else {
+                err_validation("project/environment", &msg)
+            }
+        })
 }
 
 /// Validates fields for a POST /items (create) request.
@@ -1954,15 +1985,25 @@ async fn handle_save_project(
             (status, Json(serde_json::json!({ "id": id }))).into_response()
         }
         // A concurrent request may have already created a project with the
-        // same case-insensitive name (enforced by the DB's unique index) —
+        // same case-insensitive name (enforced by the DB's unique index,
+        // surfaced here via the stable `"conflict:"` sentinel from
+        // `db::upsert_project` — never sqlx's own error text, which is not a
+        // stable string and would leak SQL identifiers on any mismatch) —
         // report it as a distinguishable conflict so callers like the CLI's
         // auto-create fallback can re-fetch and reuse the existing project
         // instead of treating this as a hard failure.
-        Err(e) if e.to_lowercase().contains("unique constraint") => {
+        Err(e) if e.starts_with("conflict:") => {
             err_json(StatusCode::CONFLICT, "a project with this name already exists", "CONFLICT")
                 .into_response()
         }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+        // Never echo `e` here: on any other failure it may carry raw sqlx/SQL
+        // text (table, column, index names), which CLAUDE.md forbids in an
+        // API response. Log the detail server-side instead — never the
+        // input `name`, never any var value.
+        Err(e) => {
+            eprintln!("handle_save_project: {e}");
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal error", "INTERNAL_ERROR").into_response()
+        }
     }
 }
 
@@ -2058,7 +2099,25 @@ async fn handle_save_environment(
             let status = if is_new { StatusCode::CREATED } else { StatusCode::OK };
             (status, Json(serde_json::json!({ "id": id }))).into_response()
         }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+        // Same "conflict:" sentinel contract as `handle_save_project` — set
+        // either by `db::upsert_environment`'s unique-index violation (ASCII
+        // case) or `project::ensure_no_case_collision`'s app-level
+        // Unicode-aware pre-check (non-ASCII case). Both return the exact
+        // same string, so one match arm covers both layers.
+        Err(e) if e.starts_with("conflict:") => err_json(
+            StatusCode::CONFLICT,
+            "an environment with this name already exists in this project",
+            "CONFLICT",
+        )
+        .into_response(),
+        // Never echo `e`: on any other failure it may carry raw sqlx/SQL text
+        // (table, column, index names), which CLAUDE.md forbids in an API
+        // response. Log the detail server-side instead — never the input
+        // `name`, never any var value.
+        Err(e) => {
+            eprintln!("handle_save_environment: {e}");
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal error", "INTERNAL_ERROR").into_response()
+        }
     }
 }
 
@@ -3039,19 +3098,15 @@ async fn handle_workspace_relay_receive(
 
 // ─── Función pública de arranque ──────────────────────────────────────────────
 
-pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
-    let api_state = Arc::new(ApiState {
-        vault,
-        session_token: Arc::new(Mutex::new(None)),
-        token_expires: Arc::new(Mutex::new(None)),
-        unlock_rate: Mutex::new(RateLimitState {
-            attempts: 0,
-            window_start: Instant::now(),
-        }),
-        share: Arc::new(ShareState::new()),
-    });
-
-    let app = Router::new()
+/// Builds the plain `axum::Router` with all 36 routes plus the `cors_guard`
+/// middleware layer, given an already-constructed `ApiState`. `pub(crate)`
+/// (not `pub`): reachable from `api::tests` (a descendant module) and from
+/// `crate::test_support::router` (same crate), but never part of the crate's
+/// external public API — no production caller outside this crate can build a
+/// router or bind it to a socket other than the one fixed inside
+/// `start_server` below.
+pub(crate) fn build_router(state: Arc<ApiState>) -> Router {
+    Router::new()
         .route("/health", get(handle_health))
         .route("/unlock", post(handle_unlock))
         .route("/fill", post(handle_fill))
@@ -3088,8 +3143,13 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         .route("/relay/receive", post(handle_relay_receive))
         .route("/workspaces/:id/relay/send", post(handle_workspace_relay_send))
         .route("/workspaces/relay/receive", post(handle_workspace_relay_receive))
-        .with_state(api_state)
-        .layer(middleware::from_fn(cors_guard));
+        .with_state(state)
+        .layer(middleware::from_fn(cors_guard))
+}
+
+pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
+    let api_state = Arc::new(ApiState::new(vault));
+    let app = build_router(api_state);
 
     const ADDR: &str = "127.0.0.1:47821";
 
@@ -3120,3 +3180,6 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
         eprintln!("[api] REST server error: {e}");
     }
 }
+
+#[cfg(test)]
+mod tests;

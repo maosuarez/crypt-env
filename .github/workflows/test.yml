@@ -31,9 +31,13 @@ jobs:
             libsoup-3.0-dev \
             build-essential
 
-      - name: Run tests (lib + bins)
+      # `--tests` is required, not cosmetic: the integration suites under
+      # src-tauri/tests/ (environment_naming, path_containment,
+      # project_relay, vault_integration) are separate targets that
+      # `--lib --bins` does not build or run.
+      - name: Run tests (lib + bins + integration)
         working-directory: src-tauri
-        run: cargo test --lib --bins --no-fail-fast
+        run: cargo test --lib --bins --tests --no-fail-fast
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov

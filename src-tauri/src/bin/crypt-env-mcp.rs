@@ -517,13 +517,13 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_inject_environment",
-            "description": "Inject an environment's vars into its configured .env path(s). Identify by environment id, or by 'project' + 'environment' names. If the environment has no configured paths, provide 'output_path' or 'output_dir' to write there instead.",
+            "description": "Inject an environment's vars into its configured .env path(s). Requires scope: 'environment_id', or both 'project' and 'environment'. If the environment has no configured paths, provide 'output_path' or 'output_dir' to write there instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "id": { "type": "integer", "description": "Environment ID" },
-                    "project": { "type": "string", "description": "Project name (case-insensitive, used with 'environment' if id not given)" },
-                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive, e.g. production, local, test)" },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." },
                     "output_path": { "type": "string", "description": "Absolute path to write the .env to, in addition to the environment's configured paths." },
                     "output_dir": { "type": "string", "description": "Directory to write '.env.<environment-name>' into. Used as fallback when the environment has no configured paths and no output_path is given." }
                 }
@@ -531,13 +531,13 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_generate_example_env",
-            "description": "Generates a safe-to-commit '.env.example'-style placeholder for an environment: every linked variable key with an empty value (KEY=). Never reads or returns secret values. Identify by environment id, or by 'project' + 'environment' names.",
+            "description": "Generates a safe-to-commit '.env.example'-style placeholder for an environment: every linked variable key with an empty value (KEY=). Never reads or returns secret values. Requires scope: 'environment_id', or both 'project' and 'environment'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "id": { "type": "integer", "description": "Environment ID" },
-                    "project": { "type": "string", "description": "Project name (case-insensitive, used with 'environment' if id not given)" },
-                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive, e.g. production, local, test)" },
+                    "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
+                    "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
+                    "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." },
                     "output_path": { "type": "string", "description": "Absolute path to write the placeholder .env.example to. If omitted, content is returned inline (still placeholders only, never secrets)." },
                     "output_dir": { "type": "string", "description": "Directory to write '.env.example.<environment-name>' into. Ignored if output_path is given." }
                 }
@@ -1839,16 +1839,33 @@ fn tool_list_projects(token: &str) -> serde_json::Value {
     }
 }
 
+/// Outcome of resolving an environment identifier from MCP tool args.
+#[derive(Debug, PartialEq, Eq)]
+struct ResolvedEnvironment {
+    id: i64,
+    /// True when the caller used the deprecated `id` key instead of `environment_id`.
+    /// Callers surface this to the model; remove together with the alias in 1.1.0.
+    via_deprecated_id: bool,
+}
+
 /// Resolves an environment id from tool args shaped like `crypt_env_inject_environment`'s
-/// schema: `id` directly, or `project` + `environment` names (case-insensitive, resolved
-/// via GET /projects). Shared by every tool that identifies an environment this way.
+/// schema: canonical `environment_id`, or the deprecated `id` alias (accepted through the
+/// 1.0.x line, see issue #10), or `project` + `environment` names (case-insensitive,
+/// resolved via GET /projects). Shared by every tool that identifies an environment this way.
 ///
 /// Split into a network-fetching half (this function) and a pure matching
 /// half (`pick_environment_id`) so the matching logic is unit-testable
 /// without a live server.
-fn resolve_environment_id(args: &serde_json::Value, token: &str) -> Result<i64, serde_json::Value> {
+fn resolve_environment_id(
+    args: &serde_json::Value,
+    token: &str,
+) -> Result<ResolvedEnvironment, serde_json::Value> {
+    if let Some(id) = args.get("environment_id").and_then(|v| v.as_i64()) {
+        return Ok(ResolvedEnvironment { id, via_deprecated_id: false });
+    }
+    // DEPRECATED(remove in 1.1.0): environment 'id' alias, issue #10
     if let Some(id) = args.get("id").and_then(|v| v.as_i64()) {
-        return Ok(id);
+        return Ok(ResolvedEnvironment { id, via_deprecated_id: true });
     }
     let projects = fetch_projects(token)?;
     pick_environment_id(args, &projects)
@@ -1859,7 +1876,10 @@ fn resolve_environment_id(args: &serde_json::Value, token: &str) -> Result<i64, 
 /// matching `project` + `environment` (case-insensitive). Does not touch the
 /// network or consult `id` in `args` — that shortcut is handled by the
 /// caller before this is reached.
-fn pick_environment_id(args: &serde_json::Value, projects: &serde_json::Value) -> Result<i64, serde_json::Value> {
+fn pick_environment_id(
+    args: &serde_json::Value,
+    projects: &serde_json::Value,
+) -> Result<ResolvedEnvironment, serde_json::Value> {
     let (project, environment) = match (
         args.get("project").and_then(|v| v.as_str()),
         args.get("environment").and_then(|v| v.as_str()),
@@ -1867,7 +1887,7 @@ fn pick_environment_id(args: &serde_json::Value, projects: &serde_json::Value) -
         (Some(p), Some(e)) => (p, e),
         _ => {
             return Err(tool_err(
-                "required: 'id' (environment id), or 'project' + 'environment' (names)",
+                "required: 'environment_id' (environment id), or 'project' + 'environment' (names)",
             ))
         }
     };
@@ -1893,12 +1913,14 @@ fn pick_environment_id(args: &serde_json::Value, projects: &serde_json::Value) -
         })
     }).and_then(|e| e.get("id").and_then(|v| v.as_i64()));
 
-    found.ok_or_else(|| tool_err(format!("environment '{environment}' not found in project '{project}'")))
+    found
+        .map(|id| ResolvedEnvironment { id, via_deprecated_id: false })
+        .ok_or_else(|| tool_err(format!("environment '{environment}' not found in project '{project}'")))
 }
 
 fn tool_inject_environment(args: &serde_json::Value, token: &str) -> serde_json::Value {
-    let environment_id: i64 = match resolve_environment_id(args, token) {
-        Ok(id) => id,
+    let ResolvedEnvironment { id: environment_id, via_deprecated_id } = match resolve_environment_id(args, token) {
+        Ok(resolved) => resolved,
         Err(e) => return e,
     };
 
@@ -1929,10 +1951,14 @@ fn tool_inject_environment(args: &serde_json::Value, token: &str) -> serde_json:
     if status == 404 { return tool_err(format!("environment {environment_id} not found")); }
     if status >= 400 { return tool_err(format!("inject failed (HTTP {status}): {text}")); }
 
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
-        Err(_) => tool_ok(text),
+    let mut result_text = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or(text),
+        Err(_) => text,
+    };
+    if via_deprecated_id {
+        result_text.push_str("\n\nnote: parameter 'id' is deprecated on this tool; use 'environment_id' instead.");
     }
+    tool_ok(result_text)
 }
 
 /// Generates a `.env.example`-shaped placeholder for an environment via
@@ -1940,8 +1966,8 @@ fn tool_inject_environment(args: &serde_json::Value, token: &str) -> serde_json:
 /// The API never reads or decrypts the referenced items' actual values for
 /// this endpoint, so there is no secret-leakage surface here by construction.
 fn tool_generate_example_env(args: &serde_json::Value, token: &str) -> serde_json::Value {
-    let environment_id: i64 = match resolve_environment_id(args, token) {
-        Ok(id) => id,
+    let ResolvedEnvironment { id: environment_id, via_deprecated_id } = match resolve_environment_id(args, token) {
+        Ok(resolved) => resolved,
         Err(e) => return e,
     };
 
@@ -1972,10 +1998,14 @@ fn tool_generate_example_env(args: &serde_json::Value, token: &str) -> serde_jso
     if status == 404 { return tool_err(format!("environment {environment_id} not found")); }
     if status >= 400 { return tool_err(format!("example generation failed (HTTP {status}): {text}")); }
 
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
-        Err(_) => tool_ok(text),
+    let mut result_text = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or(text),
+        Err(_) => text,
+    };
+    if via_deprecated_id {
+        result_text.push_str("\n\nnote: parameter 'id' is deprecated on this tool; use 'environment_id' instead.");
     }
+    tool_ok(result_text)
 }
 
 // ─── Relay tool implementations ───────────────────────────────────────────────
@@ -2746,7 +2776,7 @@ fn tool_inject_env_by_name(args: &serde_json::Value, token: &str) -> serde_json:
             .map(|(pid, eid, pname, ename)| format!("{pname} / {ename} (project {pid}, environment {eid})"))
             .collect();
         return tool_err(format!(
-            "ambiguous match for environment '{environment}': {}. Use crypt_env_inject_environment with a specific 'id'.",
+            "ambiguous match for environment '{environment}': {}. Use crypt_env_inject_environment with a specific 'environment_id'.",
             options.join(", ")
         ));
     }
@@ -3148,6 +3178,8 @@ fn main() {
     }
 }
 
+// ─── Tests (issues #10, #11 — MCP unit coverage) ──────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3220,8 +3252,10 @@ mod tests {
     #[test]
     fn pick_environment_id_matches_case_insensitively() {
         let args = serde_json::json!({ "project": "demo", "environment": "PRODUCTION" });
-        let id = pick_environment_id(&args, &sample_projects()).unwrap();
-        assert_eq!(id, 10);
+        let resolved = pick_environment_id(&args, &sample_projects()).unwrap();
+        assert_eq!(resolved.id, 10);
+        // Name-pair resolution is never the deprecated `id` alias path.
+        assert!(!resolved.via_deprecated_id);
     }
 
     #[test]
@@ -3240,5 +3274,176 @@ mod tests {
     fn pick_environment_id_errors_when_project_or_environment_args_missing() {
         let args = serde_json::json!({ "project": "demo" });
         assert!(pick_environment_id(&args, &sample_projects()).is_err());
+    }
+
+    // ─── tool-list schema invariants (issue #10) ────────────────────────────
+
+    const CANON_ENVIRONMENT_ID_DESC: &str =
+        "Environment ID (scope). Provide this, or both 'project' and 'environment'.";
+    const CANON_PROJECT_DESC: &str =
+        "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given.";
+    const CANON_ENVIRONMENT_DESC: &str =
+        "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'.";
+
+    fn tool_name(tool: &serde_json::Value) -> &str {
+        tool.get("name").and_then(|v| v.as_str()).unwrap_or("<unnamed>")
+    }
+
+    /// A tool is treated as environment-scoped iff its `inputSchema.properties`
+    /// contains both `project` and `environment`. `crypt_env_inject_env_by_name` is
+    /// excluded by construction: it only has `project_path`, not `project`.
+    fn environment_scoped_tools(tools: &serde_json::Value) -> Vec<&serde_json::Value> {
+        tools
+            .as_array()
+            .expect("tool_definitions() must return a JSON array")
+            .iter()
+            .filter(|t| match t.pointer("/inputSchema/properties") {
+                Some(props) => props.get("project").is_some() && props.get("environment").is_some(),
+                None => false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn environment_scoped_tool_count_is_stable() {
+        let tools = tool_definitions();
+        let scoped = environment_scoped_tools(&tools);
+        assert_eq!(
+            scoped.len(),
+            15,
+            "expected exactly 15 environment-scoped tools (project+environment present); found {}: {:?}",
+            scoped.len(),
+            scoped.iter().map(|t| tool_name(t)).collect::<Vec<_>>()
+        );
+    }
+
+    /// Test 1 (plan §1): every environment-scoped tool declares `environment_id`
+    /// and none declares a bare `id`.
+    #[test]
+    fn every_environment_scoped_tool_declares_environment_id() {
+        let tools = tool_definitions();
+        for tool in environment_scoped_tools(&tools) {
+            let name = tool_name(tool);
+            let props = tool
+                .pointer("/inputSchema/properties")
+                .unwrap_or_else(|| panic!("tool {name} has no inputSchema.properties"));
+            assert!(
+                props.get("environment_id").is_some(),
+                "tool {name} is environment-scoped but does not declare 'environment_id'"
+            );
+            assert!(
+                props.get("id").is_none(),
+                "tool {name} declares a bare 'id' for an environment"
+            );
+        }
+    }
+
+    /// Test 2 (plan §1): the three canonical description strings are byte-identical
+    /// across every environment-scoped tool.
+    #[test]
+    fn environment_scope_descriptions_are_canonical() {
+        let tools = tool_definitions();
+        for tool in environment_scoped_tools(&tools) {
+            let name = tool_name(tool);
+            let props = tool
+                .pointer("/inputSchema/properties")
+                .unwrap_or_else(|| panic!("tool {name} has no inputSchema.properties"));
+
+            let environment_id_desc = props
+                .pointer("/environment_id/description")
+                .and_then(|v| v.as_str());
+            assert_eq!(
+                environment_id_desc,
+                Some(CANON_ENVIRONMENT_ID_DESC),
+                "tool {name} has a non-canonical 'environment_id' description"
+            );
+
+            let project_desc = props.pointer("/project/description").and_then(|v| v.as_str());
+            assert_eq!(
+                project_desc,
+                Some(CANON_PROJECT_DESC),
+                "tool {name} has a non-canonical 'project' description"
+            );
+
+            let environment_desc = props.pointer("/environment/description").and_then(|v| v.as_str());
+            assert_eq!(
+                environment_desc,
+                Some(CANON_ENVIRONMENT_DESC),
+                "tool {name} has a non-canonical 'environment' description"
+            );
+        }
+    }
+
+    /// Test 3 (plan §1): the five tools where `id` correctly means an item, category,
+    /// or workspace id keep declaring bare `id` and do not pick up `environment_id`.
+    /// Guards against an over-eager find-and-replace.
+    #[test]
+    fn id_tools_keep_bare_id() {
+        let tools = tool_definitions();
+        let arr = tools.as_array().expect("tool_definitions() must return a JSON array");
+        let id_tools = [
+            "crypt_env_get_item",
+            "crypt_env_update_item",
+            "crypt_env_delete_item",
+            "crypt_env_update_category",
+            "crypt_env_delete_category",
+        ];
+        for name in id_tools {
+            let tool = arr
+                .iter()
+                .find(|t| tool_name(t) == name)
+                .unwrap_or_else(|| panic!("tool {name} not found in tool_definitions()"));
+            let props = tool
+                .pointer("/inputSchema/properties")
+                .unwrap_or_else(|| panic!("tool {name} has no inputSchema.properties"));
+            assert!(
+                props.get("id").is_some(),
+                "tool {name} should still declare bare 'id'"
+            );
+            assert!(
+                props.get("environment_id").is_none(),
+                "tool {name} should not declare 'environment_id'"
+            );
+        }
+    }
+
+    /// Test 4 (plan §1): pure resolver behaviour, no network — `fetch_projects()` is
+    /// only reached on the name-pair path, which none of these cases hit.
+    #[test]
+    fn resolve_environment_id_prefers_canonical_key() {
+        let resolved = resolve_environment_id(&serde_json::json!({ "environment_id": 7 }), "")
+            .expect("environment_id alone should resolve");
+        assert_eq!(resolved, ResolvedEnvironment { id: 7, via_deprecated_id: false });
+
+        let resolved = resolve_environment_id(&serde_json::json!({ "id": 7 }), "")
+            .expect("deprecated id alias should resolve");
+        assert_eq!(resolved, ResolvedEnvironment { id: 7, via_deprecated_id: true });
+
+        let resolved = resolve_environment_id(
+            &serde_json::json!({ "environment_id": 7, "id": 9 }),
+            "",
+        )
+        .expect("environment_id should win when both keys are present");
+        assert_eq!(resolved, ResolvedEnvironment { id: 7, via_deprecated_id: false });
+    }
+
+    /// Test 5 (plan §1): missing scope names the canonical key in the error and
+    /// drops the old "'id' (environment id)" wording.
+    #[test]
+    fn resolve_environment_id_missing_scope_names_the_canonical_key() {
+        let err = resolve_environment_id(&serde_json::json!({}), "")
+            .expect_err("empty args must fail to resolve");
+        let msg = err
+            .pointer("/content/0/text")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("environment_id"),
+            "error should mention 'environment_id'; got: {msg}"
+        );
+        assert!(
+            !msg.contains("'id' (environment id)"),
+            "error should not use the old wording; got: {msg}"
+        );
     }
 }

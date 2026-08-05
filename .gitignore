@@ -28,6 +28,7 @@ src-tauri/target/
 
 # Claude Code local configuration
 .claude/
+CLAUDE.local.md
 
 # Environment
 .env

@@ -6,6 +6,7 @@ pub mod biometric;
 pub mod cli;
 pub mod crypto;
 pub mod db;
+pub mod envfile;
 pub mod mcp;
 pub mod project;
 pub mod share;
@@ -32,8 +33,9 @@ use vault::share_commands::{
     share_start_send, SharedShareState,
 };
 use project::{
-    environment_delete, environment_inject, environment_save, project_delete, project_export,
-    project_import, project_list, project_pick_env_path, project_preview_delete, project_save,
+    environment_delete, environment_inject, environment_inject_preview, environment_save,
+    project_delete, project_export, project_import, project_list, project_pick_env_path,
+    project_preview_delete, project_save,
 };
 use wsl::{wsl_distro_home, wsl_list_distros};
 
@@ -221,6 +223,7 @@ pub fn run() {
             environment_inject,
             wsl_list_distros,
             wsl_distro_home,
+            environment_inject_preview,
             check_for_update,
             install_update,
             app_is_first_run,

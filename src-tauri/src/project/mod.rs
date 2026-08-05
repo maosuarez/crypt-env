@@ -411,7 +411,11 @@ pub async fn inject_environment(
     let mut written: HashSet<String> = HashSet::new();
 
     for path in &paths {
-        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        let existing = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("read .env ({path}): {e}")),
+        };
         let mut lines: Vec<String> = existing.lines().map(String::from).collect();
         let mut updated_keys: HashSet<String> = HashSet::new();
 
@@ -499,13 +503,16 @@ pub async fn environment_inject(state: State<'_, SharedState>, id: i64) -> Resul
 }
 
 #[tauri::command]
-pub async fn project_pick_env_path() -> Result<Option<String>, String> {
-    let result = tokio::task::spawn_blocking(|| {
-        rfd::FileDialog::new()
+pub async fn project_pick_env_path(start_dir: Option<String>) -> Result<Option<String>, String> {
+    let result = tokio::task::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new()
             .set_title("Select .env file")
             .add_filter("All files", &["*"])
-            .add_filter("Env files", &["env"])
-            .pick_file()
+            .add_filter("Env files", &["env"]);
+        if let Some(dir) = start_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.pick_file()
     })
     .await
     .map_err(|e| e.to_string())?;

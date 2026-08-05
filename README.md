@@ -107,6 +107,13 @@ crypt-env workspace inject "my-node-project"
 
 Via UI: Settings → Workspaces → [select workspace] → **INJECT TO PATH**
 
+### WSL paths (Windows only)
+
+If your project's source lives inside a WSL2 distro, its `.env` file is reachable from Windows at `\\wsl.localhost\<distro>\...` — the environment path picker has a **WSL** button (next to the regular browse button) that lists your installed distros and opens the file dialog right there, so you don't have to type the UNC path or know your distro's exact registered name. Two things to know:
+
+- Browsing (or injecting to) a WSL path **starts the distro** if it's stopped — this can take a few seconds and uses memory, the same as running `wsl` from a terminal would.
+- A stopped distro must be running for **inject** to succeed too — if the distro isn't up, the write fails with an error instead of silently succeeding.
+
 ---
 
 ## 💻 Interactive TUI

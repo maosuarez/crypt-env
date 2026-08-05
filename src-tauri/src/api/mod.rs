@@ -251,9 +251,14 @@ struct EnvScopeQuery {
     environment: Option<String>,
 }
 
-/// Resolves the environment for a scoped request, or a 422 response with a
-/// clear message when the identifier is missing or doesn't match anything —
-/// matching the existing validation-error convention (see `err_validation`).
+/// Resolves the environment for a scoped request. A missing/unmatched
+/// identifier is a 422 (matching the existing validation-error convention,
+/// see `err_validation`); an *ambiguous* case-insensitive match — more than
+/// one project or environment satisfying the given name — is a distinct 409
+/// `AMBIGUOUS_SCOPE` instead, since the request itself is well-formed and the
+/// fix (`environment_id`) is deterministic. Every endpoint that scopes a
+/// request via `EnvScopeQuery` goes through this single function, so this is
+/// the one place the 409 mapping needs to live.
 async fn resolve_scope(
     state: &ApiState,
     environment_id: Option<i64>,
@@ -263,7 +268,13 @@ async fn resolve_scope(
     let vault = state.vault.lock().await;
     project::resolve_environment(&vault.db, environment_id, project, environment)
         .await
-        .map_err(|msg| err_validation("project/environment", &msg))
+        .map_err(|msg| {
+            if msg.starts_with(project::AMBIGUOUS_MATCH_PREFIX) {
+                err_json(StatusCode::CONFLICT, &msg, "AMBIGUOUS_SCOPE").into_response()
+            } else {
+                err_validation("project/environment", &msg)
+            }
+        })
 }
 
 /// Validates fields for a POST /items (create) request.
@@ -1974,15 +1985,25 @@ async fn handle_save_project(
             (status, Json(serde_json::json!({ "id": id }))).into_response()
         }
         // A concurrent request may have already created a project with the
-        // same case-insensitive name (enforced by the DB's unique index) —
+        // same case-insensitive name (enforced by the DB's unique index,
+        // surfaced here via the stable `"conflict:"` sentinel from
+        // `db::upsert_project` — never sqlx's own error text, which is not a
+        // stable string and would leak SQL identifiers on any mismatch) —
         // report it as a distinguishable conflict so callers like the CLI's
         // auto-create fallback can re-fetch and reuse the existing project
         // instead of treating this as a hard failure.
-        Err(e) if e.to_lowercase().contains("unique constraint") => {
+        Err(e) if e.starts_with("conflict:") => {
             err_json(StatusCode::CONFLICT, "a project with this name already exists", "CONFLICT")
                 .into_response()
         }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+        // Never echo `e` here: on any other failure it may carry raw sqlx/SQL
+        // text (table, column, index names), which CLAUDE.md forbids in an
+        // API response. Log the detail server-side instead — never the
+        // input `name`, never any var value.
+        Err(e) => {
+            eprintln!("handle_save_project: {e}");
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal error", "INTERNAL_ERROR").into_response()
+        }
     }
 }
 
@@ -2078,7 +2099,25 @@ async fn handle_save_environment(
             let status = if is_new { StatusCode::CREATED } else { StatusCode::OK };
             (status, Json(serde_json::json!({ "id": id }))).into_response()
         }
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+        // Same "conflict:" sentinel contract as `handle_save_project` — set
+        // either by `db::upsert_environment`'s unique-index violation (ASCII
+        // case) or `project::ensure_no_case_collision`'s app-level
+        // Unicode-aware pre-check (non-ASCII case). Both return the exact
+        // same string, so one match arm covers both layers.
+        Err(e) if e.starts_with("conflict:") => err_json(
+            StatusCode::CONFLICT,
+            "an environment with this name already exists in this project",
+            "CONFLICT",
+        )
+        .into_response(),
+        // Never echo `e`: on any other failure it may carry raw sqlx/SQL text
+        // (table, column, index names), which CLAUDE.md forbids in an API
+        // response. Log the detail server-side instead — never the input
+        // `name`, never any var value.
+        Err(e) => {
+            eprintln!("handle_save_environment: {e}");
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal error", "INTERNAL_ERROR").into_response()
+        }
     }
 }
 

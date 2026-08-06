@@ -1896,6 +1896,15 @@ fn missing_scope_err() -> serde_json::Value {
     tool_err("required: 'environment_id' (environment id), or 'project' + 'environment' (names)")
 }
 
+/// Pure logic behind `resolve_environment_id`: given the already-fetched
+/// `GET /projects` payload and the tool args, finds the environment id
+/// matching `project` + `environment` (case-insensitive). Does not touch the
+/// network or consult `id` in `args` — that shortcut is handled by the
+/// caller before this is reached.
+fn pick_environment_id(
+    args: &serde_json::Value,
+    projects: &serde_json::Value,
+) -> Result<ResolvedEnvironment, serde_json::Value> {
     let (project, environment) = match (
         args.get("project").and_then(|v| v.as_str()),
         args.get("environment").and_then(|v| v.as_str()),
@@ -3202,6 +3211,82 @@ fn main() {
 
 // ─── Tests (issues #10, #11 — MCP unit coverage) ──────────────────────────────
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── append_scope_params ────────────────────────────────────────────────
+
+    #[test]
+    fn append_scope_params_uses_environment_id_alone_when_present() {
+        let mut url = "/items".to_string();
+        let mut sep = '?';
+        let args = serde_json::json!({ "environment_id": 42, "project": "demo", "environment": "production" });
+        append_scope_params(&mut url, &mut sep, &args);
+        assert_eq!(url, "/items?environment_id=42");
+    }
+
+    #[test]
+    fn append_scope_params_uses_project_and_environment_when_no_id() {
+        let mut url = "/items".to_string();
+        let mut sep = '?';
+        let args = serde_json::json!({ "project": "demo", "environment": "production" });
+        append_scope_params(&mut url, &mut sep, &args);
+        assert_eq!(url, "/items?project=demo&environment=production");
+    }
+
+    #[test]
+    fn append_scope_params_is_a_noop_when_nothing_present() {
+        let mut url = "/items".to_string();
+        let mut sep = '?';
+        let args = serde_json::json!({});
+        append_scope_params(&mut url, &mut sep, &args);
+        assert_eq!(url, "/items");
+    }
+
+    // ─── is_safe_env_key ────────────────────────────────────────────────────
+
+    #[test]
+    fn is_safe_env_key_accepts_a_normal_uppercase_key() {
+        assert!(is_safe_env_key("DB_HOST"));
+    }
+
+    #[test]
+    fn is_safe_env_key_rejects_blocked_system_variables() {
+        assert!(!is_safe_env_key("PATH"));
+        assert!(!is_safe_env_key("LD_PRELOAD"));
+        assert!(!is_safe_env_key("LD_ANYTHING"));
+    }
+
+    #[test]
+    fn is_safe_env_key_rejects_lowercase_and_invalid_leading_chars() {
+        assert!(!is_safe_env_key("db_host"));
+        assert!(!is_safe_env_key("1KEY"));
+        assert!(!is_safe_env_key(""));
+    }
+
+    // ─── pick_environment_id ────────────────────────────────────────────────
+
+    fn sample_projects() -> serde_json::Value {
+        serde_json::json!([
+            {
+                "id": 1,
+                "name": "Demo",
+                "environments": [
+                    { "id": 10, "name": "Production" },
+                    { "id": 11, "name": "local" },
+                ],
+            },
+        ])
+    }
+
+    #[test]
+    fn pick_environment_id_matches_case_insensitively() {
+        let args = serde_json::json!({ "project": "demo", "environment": "PRODUCTION" });
+        let resolved = pick_environment_id(&args, &sample_projects()).unwrap();
+        assert_eq!(resolved.id, 10);
+        // Name-pair resolution is never the deprecated `id` alias path.
+        assert!(!resolved.via_deprecated_id);
     }
 
     #[test]

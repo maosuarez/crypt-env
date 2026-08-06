@@ -629,6 +629,43 @@ async fn run_receive_background(
     Ok(())
 }
 
+/// Serializes and encrypts a single `PlainItem` into vault-item ciphertext:
+/// `(item_type, encrypted_data)`, ready for `db::upsert_item` or a batched
+/// insert like `db::insert_received_project`. Extracted out of
+/// `import_plain_items_into_vault`'s per-item body (issue #4 D7) so the
+/// project-relay receive path — which needs ciphertext up front for a single
+/// transactional multi-row insert, rather than one `db.upsert_item` call per
+/// item — can share the encrypt step instead of duplicating it. `db` never
+/// sees the vault key or a `PlainItem`, only the ciphertext this returns.
+pub(crate) fn build_encrypted_item(
+    plain: &PlainItem,
+    vault_key: &[u8; 32],
+    created: &str,
+) -> Result<(String, String), ShareError> {
+    let vault_item = crate::vault::VaultItem {
+        id: 0,
+        item_type: plain.item_type.clone(),
+        name: Some(plain.name.clone()),
+        value: plain.value.clone(),
+        username: plain.username.clone(),
+        password: plain.password.clone(),
+        url: plain.url.clone(),
+        notes: plain.notes.clone(),
+        title: None,
+        description: None,
+        command: plain.command.clone(),
+        shell: None,
+        content: None,
+        categories: Some(plain.category.iter().cloned().collect()),
+        created: created.to_string(),
+        is_global: None,
+    };
+
+    let json = serde_json::to_vec(&vault_item).map_err(|e| ShareError::Protocol(e.to_string()))?;
+    let encrypted = crate::crypto::encrypt(vault_key, &json).map_err(ShareError::Vault)?;
+    Ok((vault_item.item_type, encrypted))
+}
+
 /// Result of [`import_plain_items_into_vault`].
 pub struct ImportOutcome {
     /// Names of every item actually imported into the vault (regardless of
@@ -685,32 +722,10 @@ pub(crate) async fn import_plain_items_into_vault(
     let mut skipped_keys = Vec::new();
 
     for plain in items {
-        let vault_item = crate::vault::VaultItem {
-            id: 0,
-            item_type: plain.item_type.clone(),
-            name: Some(plain.name.clone()),
-            value: plain.value.clone(),
-            username: plain.username.clone(),
-            password: plain.password.clone(),
-            url: plain.url.clone(),
-            notes: plain.notes.clone(),
-            title: None,
-            description: None,
-            command: plain.command.clone(),
-            shell: None,
-            content: None,
-            categories: Some(plain.category.iter().cloned().collect()),
-            created: now_ts.clone(),
-            is_global: None,
-        };
-
-        let json = serde_json::to_vec(&vault_item)
-            .map_err(|e| ShareError::Protocol(e.to_string()))?;
-        let encrypted = crate::crypto::encrypt(vault_key, &json)
-            .map_err(|e| ShareError::Vault(e))?;
+        let (item_type, encrypted) = build_encrypted_item(plain, vault_key, &now_ts)?;
 
         let new_id = db
-            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created, false)
+            .upsert_item(0, &item_type, &encrypted, &now_ts, false)
             .await
             .map_err(|e| ShareError::Vault(e))?;
 

@@ -202,6 +202,7 @@ fn tool_definitions() -> serde_json::Value {
                 "properties": {
                     "type": { "type": "string", "description": "Filter by type: secret, credential, link, command, note" },
                     "category": { "type": "string", "description": "Filter by category name" },
+                    "include_global": { "type": "string", "enum": ["true", "false", "only"], "description": "true (default) also lists reusable global secrets not yet linked into this environment — these appear with `linked: false` and will NOT be written by generate/inject/fill until linked. false restricts to items actually linked into this environment (what fill/inject will materialize). only returns just the global secrets, ignoring linkage." },
                     "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
                     "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
                     "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
@@ -226,6 +227,7 @@ fn tool_definitions() -> serde_json::Value {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Search term to match against item names" },
+                    "include_global": { "type": "string", "enum": ["true", "false", "only"], "description": "true (default) also searches reusable global secrets not yet linked into this environment — these appear with `linked: false` and will NOT be written by generate/inject/fill until linked. false restricts to items actually linked into this environment (what fill/inject will materialize). only returns just the global secrets, ignoring linkage." },
                     "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
                     "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
                     "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
@@ -263,7 +265,7 @@ fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "crypt_env_add_item",
-            "description": "Adds a new item to the vault, owned by the given project and linked into the given environment. Requires scope: 'environment_id', or both 'project' and 'environment'.",
+            "description": "Adds a new item to the vault, owned by the given project and linked into the given environment. Requires scope: 'environment_id', or both 'project' and 'environment'. If the key already exists in the target environment, the existing item is updated in place (its previous value is destroyed) — this is the default ('on_conflict': 'update'). If that item is shared with other environments or projects (or is global), the call fails with a conflict instead of silently changing it elsewhere; retry with 'on_conflict': 'replace' to create a new item and repoint just this environment's link, or update the shared item explicitly with crypt_env_update_item. Set 'on_conflict': 'error' to fail on any existing key instead of updating it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -275,6 +277,7 @@ fn tool_definitions() -> serde_json::Value {
                     "url": { "type": "string" },
                     "username": { "type": "string" },
                     "key": { "type": "string", "description": "Environment variable key this item is linked under. Defaults to 'name' if omitted." },
+                    "on_conflict": { "type": "string", "enum": ["update", "replace", "error"], "description": "How to handle an existing item already linked under this key. 'update' (default): re-encrypt onto the existing item, destroying its previous value; fails if the item is shared elsewhere. 'replace': always create a new item and repoint this environment's link to it; the superseded item is deleted only if nothing else still references it. 'error': fail on any existing key." },
                     "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
                     "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
                     "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
@@ -577,29 +580,6 @@ fn tool_definitions() -> serde_json::Value {
             }
         },
         {
-            "name": "crypt_env_share_workspace_send",
-            "description": "Share a COMPLETE workspace via internet relay: its definition PLUS the decrypted values of every referenced secret, bundled into one encrypted package. The receiver reconstructs a ready-to-inject workspace in a single step — no need to share individual items. Returns a code and passphrase. IMPORTANT: Show the code and passphrase to the user immediately; the passphrase is only shown once. Identify the workspace by name or id.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "integer", "description": "Workspace ID" },
-                    "name": { "type": "string", "description": "Workspace name (case-insensitive, used if id not given)" }
-                }
-            }
-        },
-        {
-            "name": "crypt_env_share_workspace_receive",
-            "description": "Receive a complete workspace shared via internet relay using a code and passphrase from the sender. Recreates the bundled secrets in the vault and rebuilds the workspace with its variables re-linked, ready to inject into a .env with crypt_env_inject_environment.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "code": { "type": "string", "description": "Relay code provided by the sender (e.g. X7K2-M9P4)" },
-                    "passphrase": { "type": "string", "description": "Passphrase provided by the sender" }
-                },
-                "required": ["code", "passphrase"]
-            }
-        },
-        {
             "name": "crypt_env_list_mcp_servers",
             "description": "List registered MCP servers from Claude config files. Returns name, command, args, and env key names — never env values.",
             "inputSchema": {
@@ -689,7 +669,7 @@ fn tool_definitions() -> serde_json::Value {
                 "properties": {
                     "path": { "type": "string", "description": "Absolute path to the .env file to import, e.g. C:\\projects\\myapp\\.env" },
                     "category": { "type": "string", "description": "Optional category name to assign to all imported items" },
-                    "overwrite": { "type": "boolean", "description": "If true, update existing vault items that have the same name. Default: false (skip duplicates)." },
+                    "overwrite": { "type": "boolean", "description": "If true, update existing vault items that have the same name or environment key in place, destroying their previous value. Default: false (skip duplicates instead of erroring)." },
                     "environment_id": { "type": "integer", "description": "Environment ID (scope). Provide this, or both 'project' and 'environment'." },
                     "project": { "type": "string", "description": "Project name (case-insensitive). Used with 'environment' when 'environment_id' is not given." },
                     "environment": { "type": "string", "description": "Environment name within the project (case-insensitive), e.g. production, local, test. Used with 'project'." }
@@ -868,6 +848,10 @@ fn tool_list_items(args: &serde_json::Value, token: &str) -> serde_json::Value {
         url.push_str(&format!("{}category={}", sep, cat));
         sep = '&';
     }
+    if let Some(ig) = args.get("include_global").and_then(|v| v.as_str()) {
+        url.push_str(&format!("{}include_global={}", sep, urlencod(ig)));
+        sep = '&';
+    }
     append_scope_params(&mut url, &mut sep, args);
 
     let resp = match vault_get(&url, token) {
@@ -902,6 +886,10 @@ fn tool_search_items(args: &serde_json::Value, token: &str) -> serde_json::Value
 
     let mut url = format!("/items?search={}", urlencod(&query));
     let mut sep = '&';
+    if let Some(ig) = args.get("include_global").and_then(|v| v.as_str()) {
+        url.push_str(&format!("{}include_global={}", sep, urlencod(ig)));
+        sep = '&';
+    }
     append_scope_params(&mut url, &mut sep, args);
 
     let resp = match vault_get(&url, token) {
@@ -1220,6 +1208,9 @@ fn tool_add_item(args: &serde_json::Value, token: &str) -> serde_json::Value {
     let mut url = "/items".to_string();
     let mut sep = '?';
     append_scope_params(&mut url, &mut sep, args);
+    if let Some(mode) = args.get("on_conflict").and_then(|v| v.as_str()) {
+        url.push_str(&format!("{sep}on_conflict={mode}"));
+    }
 
     let resp = match vault_post(&url, token, &body) {
         Ok(r) => r,
@@ -1237,6 +1228,11 @@ fn tool_add_item(args: &serde_json::Value, token: &str) -> serde_json::Value {
     }
     if status == 422 {
         return tool_err(format!("validation error (scope or field): {text}"));
+    }
+    if status == 409 {
+        // SHARED_ITEM_CONFLICT / KEY_EXISTS / CONFLICT_RETRY — the response
+        // body already names the item and the remedy, never a secret value.
+        return tool_err(format!("conflict creating item: {text}"));
     }
     if status >= 400 {
         return tool_err(format!("error creating item (HTTP {status}): {text}"));
@@ -2110,99 +2106,6 @@ fn tool_relay_receive(args: &serde_json::Value, token: &str) -> serde_json::Valu
     }
 }
 
-fn tool_share_workspace_send(args: &serde_json::Value, token: &str) -> serde_json::Value {
-    // Resolve workspace ID: use id directly, or find by name (mirrors inject_workspace).
-    let workspace_id: i64 = if let Some(id) = args.get("id").and_then(|v| v.as_i64()) {
-        id
-    } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
-        let resp = match vault_get("/workspaces", token) {
-            Ok(r) => r,
-            Err(e) => return tool_err(e),
-        };
-        if resp.status().as_u16() == 403 {
-            return tool_err("vault_locked: unlock the vault first");
-        }
-        let text = match resp.text() {
-            Ok(t) => t,
-            Err(e) => return tool_err(format!("error reading workspaces: {e}")),
-        };
-        let list: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => return tool_err("error parsing workspace list"),
-        };
-        let name_lower = name.to_lowercase();
-        let found = list.as_array().and_then(|arr| {
-            arr.iter().find(|ws| {
-                ws.get("name")
-                    .and_then(|n| n.as_str())
-                    .map(|n| n.to_lowercase() == name_lower)
-                    .unwrap_or(false)
-            })
-        }).and_then(|ws| ws.get("id").and_then(|v| v.as_i64()));
-        match found {
-            Some(id) => id,
-            None => return tool_err(format!("workspace '{name}' not found")),
-        }
-    } else {
-        return tool_err("required: 'id' (integer) or 'name' (string)");
-    };
-
-    let resp = match vault_post(
-        &format!("/workspaces/{workspace_id}/relay/send"),
-        token,
-        &serde_json::json!({}),
-    ) {
-        Ok(r) => r,
-        Err(e) => return tool_err(e),
-    };
-
-    let status = resp.status().as_u16();
-    let text = match resp.text() {
-        Ok(t) => t,
-        Err(e) => return tool_err(format!("error reading response: {e}")),
-    };
-
-    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
-    if status == 404 { return tool_err(format!("workspace {workspace_id} not found")); }
-    if status >= 400 { return tool_err(format!("workspace share failed (HTTP {status}): {text}")); }
-
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
-        Err(_) => tool_ok(text),
-    }
-}
-
-fn tool_share_workspace_receive(args: &serde_json::Value, token: &str) -> serde_json::Value {
-    let code = match args.get("code").and_then(|v| v.as_str()) {
-        Some(c) => c.to_string(),
-        None => return tool_err("required parameter: 'code'"),
-    };
-    let passphrase = match args.get("passphrase").and_then(|v| v.as_str()) {
-        Some(p) => p.to_string(),
-        None => return tool_err("required parameter: 'passphrase'"),
-    };
-
-    let body = serde_json::json!({ "code": code, "passphrase": passphrase });
-    let resp = match vault_post("/workspaces/relay/receive", token, &body) {
-        Ok(r) => r,
-        Err(e) => return tool_err(e),
-    };
-
-    let status = resp.status().as_u16();
-    let text = match resp.text() {
-        Ok(t) => t,
-        Err(e) => return tool_err(format!("error reading response: {e}")),
-    };
-
-    if status == 403 { return tool_err("vault_locked: unlock the vault first"); }
-    if status >= 400 { return tool_err(format!("workspace receive failed (HTTP {status}): {text}")); }
-
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => tool_ok(serde_json::to_string_pretty(&v).unwrap_or(text)),
-        Err(_) => tool_ok(text),
-    }
-}
-
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
 
 // ─── Category tool implementations ───────────────────────────────────────────
@@ -3019,11 +2922,21 @@ fn tool_import_env_file(args: &serde_json::Value, token: &str) -> serde_json::Va
             updated += 1;
             keys.push(key.clone());
         } else {
-            // Create new item, linked into the scoped environment.
+            // Create new item, linked into the scoped environment. The
+            // name-based search above can miss a key that is linked under a
+            // renamed item (name != key), so this POST can still collide on
+            // the environment key even when `existing` was None — map
+            // `overwrite` onto `on_conflict` explicitly rather than relying
+            // on the server default, so that path is covered too:
+            // overwrite=true -> update in place; overwrite=false -> error,
+            // treated below as a skip like the by-name check above. This is
+            // what keeps bulk import from mass-producing orphans (issue #9).
             let body = build_item_body(0, key, value, &category, &now_ts);
             let mut create_url = "/items".to_string();
             let mut create_sep = '?';
             append_scope_params(&mut create_url, &mut create_sep, args);
+            let on_conflict = if overwrite { "update" } else { "error" };
+            create_url.push_str(&format!("{create_sep}on_conflict={on_conflict}"));
             let resp = match vault_post(&create_url, token, &body) {
                 Ok(r) => r,
                 Err(e) => {
@@ -3038,6 +2951,12 @@ fn tool_import_env_file(args: &serde_json::Value, token: &str) -> serde_json::Va
             if status == 422 {
                 let text = resp.text().unwrap_or_default();
                 return tool_err(format!("scope required: pass 'environment_id', or both 'project' and 'environment' ({text})"));
+            }
+            if status == 409 {
+                // Racing/renamed-item collision the name search couldn't see.
+                // Same report bucket as the by-name skip path above.
+                skipped_existing.push(key.clone());
+                continue;
             }
             if status >= 400 {
                 let text = resp.text().unwrap_or_default();
@@ -3124,8 +3043,6 @@ fn handle_tool_call(name: &str, args: &serde_json::Value, token: &str) -> serde_
         "crypt_env_generate_example_env" => tool_generate_example_env(args, token),
         "crypt_env_relay_send" => tool_relay_send(args, token),
         "crypt_env_relay_receive" => tool_relay_receive(args, token),
-        "crypt_env_share_workspace_send" => tool_share_workspace_send(args, token),
-        "crypt_env_share_workspace_receive" => tool_share_workspace_receive(args, token),
         "crypt_env_list_mcp_servers" => tool_list_mcp_servers(args, token),
         "crypt_env_add_mcp_server" => tool_add_mcp_server(args, token),
         "crypt_env_update_mcp_server" => tool_update_mcp_server(args, token),

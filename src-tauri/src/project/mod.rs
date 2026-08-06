@@ -7,6 +7,9 @@ use crate::db::{DbEnvironmentVar, ProjectDeleteImpact, VaultDb};
 use crate::envfile;
 use crate::vault::SharedState;
 
+pub mod relay;
+pub mod relay_commands;
+
 // ─── Frontend-facing types ────────────────────────────────────────────────────
 
 /// Every variable is a real vault item now — no more bare literals. `item_id`
@@ -177,9 +180,104 @@ async fn category_names_to_ids(db: &VaultDb, names: &[String]) -> Result<Vec<Str
         .collect())
 }
 
+// ─── Name validation (issue #7) ────────────────────────────────────────────────
+//
+// Two rules, deliberately asymmetric (see the plan §3/step 2 and §4/D2):
+// environment names are machine identifiers that end up as a filename
+// component, so they get a strict allowlist; project names are human labels
+// ("My App" is normal) so they get a laxer deny-list instead. Both share the
+// hostile-character core below, which mirrors (but does not import — this
+// module has no dependency on `fsguard`, and `fsguard`'s public surface is
+// deliberately just `resolve_within`/`ContainmentError`) `fsguard`'s
+// step-1..3 rules. This is the choke point: called from `save_environment`
+// and `save_project` below, so every caller — HTTP, the Tauri commands, an
+// imported `.cryptenv-proj` template, and the CLI — goes through the same
+// check before a name is ever persisted.
+
+/// Hostile-character core shared by both name validators: separators,
+/// control characters, NUL, `.`/`..` as a whole name, NTFS alternate-data-
+/// stream `:` and the rest of the Win32-illegal set, trailing dot/space, and
+/// Windows reserved device names. Returns the specific rule that was broken
+/// (never echoes `name` itself — see plan §4/D5).
+fn reject_filesystem_hostile(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("must not be empty or whitespace-only".to_string());
+    }
+    if name.contains('\0') || name.chars().any(|c| c.is_control()) {
+        return Err("must not contain control characters or a NUL byte".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("must not contain '/' or '\\'".to_string());
+    }
+    if name == "." || name == ".." {
+        return Err("must not be '.' or '..'".to_string());
+    }
+    if name.contains(':') || name.chars().any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*')) {
+        return Err("must not contain ':', '<', '>', '\"', '|', '?', or '*'".to_string());
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Err("must not end with a trailing '.' or space".to_string());
+    }
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let base = name.split('.').next().unwrap_or(name);
+    if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(base)) {
+        return Err("must not be a reserved device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9)".to_string());
+    }
+    Ok(())
+}
+
+/// Strict allowlist: `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, plus an explicit
+/// rejection of a trailing `.` or `-`. Environment names are machine
+/// identifiers, land in a filename (`.env.<name>`), and are the field with
+/// the proven traversal exploit (issue #7) — the tight rule costs nothing
+/// real for names like `production`, `local`, `staging-2`.
+pub fn validate_environment_name(name: &str) -> Result<(), String> {
+    const RULE: &str =
+        "must be 1-64 chars, start with a letter or digit, and contain only letters, digits, '.', '_' or '-'";
+    if reject_filesystem_hostile(name).is_err() {
+        return Err(format!("name: {RULE}"));
+    }
+    let starts_alnum = name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
+    let charset_ok = name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && starts_alnum
+        && charset_ok
+        && !name.ends_with('.')
+        && !name.ends_with('-');
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("name: {RULE}"))
+    }
+}
+
+/// Deny-list, deliberately laxer than the environment rule: rejects the
+/// filesystem-hostile core above, plus a length cap and leading dot/
+/// whitespace. Allows spaces and non-ASCII letters — project names are human
+/// labels ("Mi Proyecto" is a perfectly normal edit to an existing project)
+/// and an ASCII-only allowlist would reject real edits for no present
+/// security gain (see plan §4/D2).
+pub fn validate_project_name(name: &str) -> Result<(), String> {
+    if let Err(reason) = reject_filesystem_hostile(name) {
+        return Err(format!("name: {reason}"));
+    }
+    if name.chars().count() > 128 {
+        return Err("name: must be 128 characters or fewer".to_string());
+    }
+    if name.starts_with('.') || name.starts_with(' ') {
+        return Err("name: must not start with '.' or whitespace".to_string());
+    }
+    Ok(())
+}
+
 /// Creates (id = 0) or updates (id > 0) a project's metadata. A newly created
 /// project always gets one 'default' environment so it's immediately usable.
 pub async fn save_project(db: &VaultDb, input: ProjectInput) -> Result<i64, String> {
+    validate_project_name(&input.name)?;
     let is_new = input.id == 0;
     let project_id = db
         .upsert_project(input.id, &input.name, input.description.as_deref(), &input.template)
@@ -239,7 +337,11 @@ async fn ensure_no_case_collision(
 /// when that item is global. A local item can never silently gain a second
 /// owner through this path; the caller must mark it global first.
 pub async fn save_environment(db: &VaultDb, input: EnvironmentInput) -> Result<i64, String> {
+    // Order matters: reject a structurally invalid name (issue #7) before
+    // spending a query on the collision check (issue #12).
+    validate_environment_name(&input.name)?;
     ensure_no_case_collision(db, input.project_id, input.id, &input.name).await?;
+
 
     let env_id = db
         .upsert_environment(input.id, input.project_id, &input.name, input.is_default)
@@ -403,8 +505,16 @@ async fn resolve_and_inspect(
         }
     } else if resolved.is_empty() {
         if let Some(dir) = output_dir {
-            let dir = dir.trim_end_matches(['/', '\\']);
-            resolved.push((format!("{dir}/.env.{}", env.name), PathOrigin::CallerSupplied));
+            // Contained resolution (issue #7): the environment name is
+            // stored, untrusted data — it may only pick the filename inside
+            // `dir`, never redirect the write elsewhere. This is the same
+            // sink `/fill` and `/environments/:id/example` guard in
+            // `api::mod`; issue #8 moved the resolution in here, so the
+            // containment check has to live here too rather than at the
+            // former call site.
+            let target = crate::fsguard::resolve_within(dir.as_str(), &format!(".env.{}", env.name))
+                .map_err(|e| format!("output_dir: {e}"))?;
+            resolved.push((target.to_string_lossy().into_owned(), PathOrigin::CallerSupplied));
         }
     }
 

@@ -118,19 +118,32 @@ pub fn run(args: AddArgs) -> Result<(), CliError> {
         .map(|(k, _)| k.clone())
         .collect();
 
+    // Server default (`on_conflict=update`, omitted below) now does what this
+    // prompt has always claimed: re-encrypts onto the existing item in place
+    // instead of orphaning it. Declining no longer silently drops the key
+    // client-side — it is still sent, but with `on_conflict=error`, so a
+    // collision that is still there by request time is rejected loudly
+    // rather than the CLI pretending nothing was asked for it. This also
+    // covers the race where the key stopped existing between the `existing`
+    // check above and the request (the server always re-checks).
+    let mut declined_keys: HashSet<String> = HashSet::new();
     if !conflict_keys.is_empty() && !args.force {
         // Show only key names — never values
         eprintln!("The following keys already exist: {}", conflict_keys.join(", "));
         if !crate::prompts::confirm("Update all conflicting keys?") {
-            let conflict_set: HashSet<&str> =
-                conflict_keys.iter().map(|s| s.as_str()).collect();
-            pairs.retain(|(k, _)| !conflict_set.contains(k.as_str()));
+            declined_keys = conflict_keys.into_iter().collect();
         }
     }
 
-    let items_url = resolved_scope.append_query(&format!("{}/items", client::API_BASE));
+    let base_items_url = resolved_scope.append_query(&format!("{}/items", client::API_BASE));
 
     for (key, value) in &pairs {
+        let items_url = if declined_keys.contains(key) {
+            format!("{base_items_url}&on_conflict=error")
+        } else {
+            base_items_url.clone()
+        };
+
         let body = serde_json::json!({
             "id": 0,
             "type": item_type,
@@ -141,9 +154,24 @@ pub fn run(args: AddArgs) -> Result<(), CliError> {
             "key": key,
         });
         let resp = client::authenticated_post(&items_url, &body)?;
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status == reqwest::StatusCode::CONFLICT {
+            // Surface the conflict reason, not a bare HTTP 409 — only the
+            // key name and server-provided reason, never the value.
+            let (msg, code) = resp
+                .json::<serde_json::Value>()
+                .ok()
+                .and_then(|v| {
+                    Some((
+                        v.get("error")?.as_str()?.to_string(),
+                        v.get("code")?.as_str()?.to_string(),
+                    ))
+                })
+                .unwrap_or_else(|| ("conflict".to_string(), "CONFLICT".to_string()));
+            eprintln!("Conflict for '{key}' [{code}]: {msg}");
+        } else if !status.is_success() {
             // Only key name in error — never the value
-            eprintln!("Failed to add '{}': HTTP {}", key, resp.status());
+            eprintln!("Failed to add '{}': HTTP {}", key, status);
         } else {
             eprintln!("Added: {} ({} / {})", key, resolved_scope.project, resolved_scope.environment);
         }

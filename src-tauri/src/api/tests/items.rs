@@ -6,7 +6,11 @@ use crate::test_support::{read_item, req, router, unlocked_vault};
 async fn list_scoped_to_environment_only_returns_linked_items() {
     let v = unlocked_vault().await;
     let app = router(&v);
-    let (status, json) = req(&app, "GET", &format!("/items?environment_id={}", v.env_id), Some(&v.token), None).await;
+    // `include_global=false` is the exact-linked set — the pre-issue-#13
+    // filter, and what /fill and /inject will actually materialize. The
+    // default (`true`) now unions unlinked globals in; that union is covered
+    // by `api::scope_tests` and the #13 cases below.
+    let (status, json) = req(&app, "GET", &format!("/items?environment_id={}&include_global=false", v.env_id), Some(&v.token), None).await;
     assert_eq!(status.as_u16(), 200);
     let items = json.as_array().unwrap();
     // 3 linked into "production"; the 4th seeded item (SHARED_TOKEN, global)

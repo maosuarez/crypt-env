@@ -1,7 +1,7 @@
 // Integration tests for VaultDb using a real SQLite database in a temp directory.
 // Run with: cargo test --test vault_integration
 
-use crypt_env_lib::db::VaultDb;
+use crypt_env_lib::db::{LinkMode, VaultDb};
 use crypt_env_lib::project::{self, EnvironmentInput, EnvironmentVar, ProjectInput};
 use crypt_env_lib::vault::{self, VaultItem};
 use tempfile::tempdir;
@@ -209,4 +209,169 @@ async fn test_db_init_vault_and_get_meta() {
     let (salt, token) = meta.unwrap();
     assert_eq!(salt, "deadbeef_salt");
     assert_eq!(token, "deadbeef_token");
+}
+
+// ─── Issue #9: db-layer tests (12-15 of the plan's test matrix) ───────────
+//
+// Tests 1-11 need an HTTP-level harness (bound router + token + unlocked
+// temp vault) that issue #11 owns and had not landed in this worktree at the
+// time of writing — see the plan's §3.9 and this repo's parallel-worktree
+// setup. Consuming that harness for the `api`-level create-or-update-on-
+// collision assertions (200/201/409 status codes, `SHARED_ITEM_CONFLICT` /
+// `KEY_EXISTS` / `CONFLICT_RETRY` bodies) is a documented follow-up once
+// `crate::test_support` / `TestVault` land here. These four are pure
+// `VaultDb` tests and need no HTTP surface at all.
+
+#[tokio::test]
+async fn test_link_item_rolls_back_when_link_fails() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let db = VaultDb::open(&db_path).await.unwrap();
+
+    let project_id = db.upsert_project(0, "acme", None, "generic").await.unwrap();
+    let bogus_environment_id = 999_999; // no such environment exists
+
+    let result = db
+        .create_or_link_item(
+            bogus_environment_id,
+            project_id,
+            "API_KEY",
+            "secret",
+            "ciphertext-blob",
+            "2026-01-01T00:00:00Z",
+            LinkMode::Update,
+            None, // caller's inspect_env_key saw a free key
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "linking into a nonexistent environment must fail (FK violation on environment_vars)"
+    );
+
+    let items = db.list_items().await.unwrap();
+    assert!(items.is_empty(), "the item insert must be rolled back with the rest of the transaction");
+
+    let owned = db.list_owned_item_ids(project_id).await.unwrap();
+    assert!(owned.is_empty(), "the item_projects insert must be rolled back too — no orphaned ownership row");
+}
+
+#[tokio::test]
+async fn test_list_orphan_items_finds_unlinked_nonglobal() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let db = VaultDb::open(&db_path).await.unwrap();
+
+    let id = db.upsert_item(0, "secret", "ciphertext", "2026-01-01", false).await.unwrap();
+    // No environment_vars row created — this item is unreferenced.
+
+    let orphans = db.list_orphan_item_ids().await.unwrap();
+    assert_eq!(orphans, vec![id], "an unlinked, non-global item must be reported as an orphan");
+}
+
+#[tokio::test]
+async fn test_list_orphan_items_excludes_global_and_linked() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let db = VaultDb::open(&db_path).await.unwrap();
+
+    // Unlinked but global: has a reachable surface (Global Secrets) even
+    // without a link, so it must NOT be reported as an orphan.
+    let global_id = db.upsert_item(0, "secret", "global-ciphertext", "2026-01-01", true).await.unwrap();
+
+    // Non-global but linked: reachable via its environment's scoped list,
+    // so it must NOT be reported as an orphan either.
+    let linked_id = db.upsert_item(0, "secret", "linked-ciphertext", "2026-01-01", false).await.unwrap();
+    let project_id = db.upsert_project(0, "acme", None, "generic").await.unwrap();
+    let environment_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+    db.upsert_environment_var(environment_id, "DB_PASSWORD", linked_id).await.unwrap();
+
+    let orphans = db.list_orphan_item_ids().await.unwrap();
+    assert!(!orphans.contains(&global_id), "a global unlinked item must not be reported as an orphan");
+    assert!(!orphans.contains(&linked_id), "a linked non-global item must not be reported as an orphan");
+    assert!(orphans.is_empty(), "no other rows were created in this test");
+}
+
+#[tokio::test]
+async fn test_prune_orphan_items_clears_item_projects() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let db = VaultDb::open(&db_path).await.unwrap();
+
+    let project_id = db.upsert_project(0, "acme", None, "generic").await.unwrap();
+
+    // The orphan to be pruned: owned, but never linked into any environment.
+    let orphan_id = db.upsert_item(0, "secret", "orphan-ciphertext", "2026-01-01", false).await.unwrap();
+    db.add_item_owner(orphan_id, project_id).await.unwrap();
+
+    // A second, unrelated item that must survive the prune untouched.
+    let kept_id = db.upsert_item(0, "secret", "kept-ciphertext", "2026-01-01", false).await.unwrap();
+    db.add_item_owner(kept_id, project_id).await.unwrap();
+    let environment_id = db.upsert_environment(0, project_id, "production", true).await.unwrap();
+    db.upsert_environment_var(environment_id, "DB_PASSWORD", kept_id).await.unwrap();
+
+    vault::prune_orphan_items(&db, &[orphan_id]).await.unwrap();
+
+    let items = db.list_items().await.unwrap();
+    assert!(
+        items.iter().all(|(id, ..)| *id != orphan_id),
+        "the orphan's items row must be deleted"
+    );
+    assert!(
+        db.list_owned_item_ids(project_id).await.unwrap().iter().all(|id| *id != orphan_id),
+        "the orphan's item_projects row must be deleted too"
+    );
+
+    assert!(items.iter().any(|(id, ..)| *id == kept_id), "an item not in the prune list must survive");
+    assert!(
+        db.list_owned_item_ids(project_id).await.unwrap().contains(&kept_id),
+        "the surviving item's ownership link must be untouched"
+    );
+}
+
+// ─── Issue #13: global-item scoped visibility — data-path guards ─────────────
+//
+// The API's scope filter (src-tauri/src/api/mod.rs, `scope_items`) now reads
+// `is_global` off every row returned by `list_items()` to decide whether an
+// unlinked item should be unioned into a discovery response. These two tests
+// guard the data path that decision depends on: the DB layer must round-trip
+// `is_global` faithfully through both insert/update (`upsert_item`) and the
+// dedicated toggle (`set_item_global`).
+
+#[tokio::test]
+async fn test_db_list_items_preserves_is_global_flag() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let db = VaultDb::open(&db_path).await.unwrap();
+
+    let global_id = db.upsert_item(0, "secret", "global_data", "2026-01-01", true).await.unwrap();
+    let non_global_id = db.upsert_item(0, "secret", "scoped_data", "2026-01-01", false).await.unwrap();
+
+    let items = db.list_items().await.unwrap();
+    assert_eq!(items.len(), 2);
+
+    let global_row = items.iter().find(|r| r.0 == global_id).expect("global item must be present");
+    assert!(global_row.4, "tuple index 4 (is_global) must be true for the item created global");
+
+    let scoped_row = items.iter().find(|r| r.0 == non_global_id).expect("non-global item must be present");
+    assert!(!scoped_row.4, "tuple index 4 (is_global) must be false for the item created non-global");
+}
+
+#[tokio::test]
+async fn test_db_set_item_global_roundtrip() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let db = VaultDb::open(&db_path).await.unwrap();
+
+    let id = db.upsert_item(0, "secret", "data", "2026-01-01", false).await.unwrap();
+
+    db.set_item_global(id, true).await.unwrap();
+    let items = db.list_items().await.unwrap();
+    let row = items.iter().find(|r| r.0 == id).unwrap();
+    assert!(row.4, "set_item_global(true) must flip is_global to true in list_items");
+
+    db.set_item_global(id, false).await.unwrap();
+    let items = db.list_items().await.unwrap();
+    let row = items.iter().find(|r| r.0 == id).unwrap();
+    assert!(!row.4, "set_item_global(false) must flip is_global back to false in list_items");
 }

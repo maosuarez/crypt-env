@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { platform } from '@tauri-apps/plugin-os';
 import { Icon } from './ui/Icon';
 import { TagInput } from './ui/TagInput';
+import { ProjectShareModal, type ProjectShareMode } from './ProjectShareModal';
 import { useVaultStore } from '../store';
 import { useProjectStore } from '../store/projectStore';
 import {
@@ -39,6 +40,33 @@ const TEMPLATES: { id: ProjectTemplate; label: string; vars: string[] }[] = [
 ];
 
 const ENV_PRESETS = ['production', 'local', 'test', 'staging'];
+
+// ─── Name validation (UX mirror only — see issue #7) ──────────────────────────
+//
+// These mirror `validate_environment_name` / `validate_project_name` in
+// `src-tauri/src/project/mod.rs` purely to avoid a pointless round-trip to
+// the server. The server is the actual enforcement point (reachable from
+// the GUI, HTTP API, CLI, and an imported `.cryptenv-proj` template) — this
+// copy may drift from it over time and that is an accepted risk, not a bug.
+
+const ENV_NAME_RULE =
+  "must be 1-64 chars, start with a letter or digit, and contain only letters, digits, '.', '_' or '-'";
+
+function isValidEnvironmentName(name: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name) && !name.endsWith('.') && !name.endsWith('-');
+}
+
+const PROJECT_NAME_RULE =
+  'must not contain \'/\', \'\\\', control characters, \':\', \'<\', \'>\', \'"\', \'|\', \'?\', \'*\', or start/end with \'.\' or whitespace (128 chars max)';
+
+function isValidProjectName(name: string): boolean {
+  if (name.trim().length === 0 || name.length > 128) return false;
+  if (name === '.' || name === '..') return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f/\\:<>"|?*]/.test(name)) return false;
+  if (name.endsWith('.') || name.endsWith(' ') || name.startsWith('.') || name.startsWith(' ')) return false;
+  return true;
+}
 
 function TemplateModal({
   onSelect,
@@ -628,6 +656,7 @@ export function ProjectManager() {
   const [isCreatingProj,  setIsCreatingProj]  = useState(false);
   const [templateModal,   setTemplateModal]   = useState(false);
   const [confirmDelProj,  setConfirmDelProj]  = useState(false);
+  const [shareModalMode,  setShareModalMode]  = useState<ProjectShareMode | null>(null);
 
   // Environment form state
   const [envName,       setEnvName]       = useState('');
@@ -754,7 +783,7 @@ export function ProjectManager() {
   };
 
   const handleSaveProject = async () => {
-    if (!projName.trim()) { showToast('Name is required', 'error'); return; }
+    if (!isValidProjectName(projName.trim())) { showToast(`Name ${PROJECT_NAME_RULE}`, 'error'); return; }
     setSaving(true);
     try {
       const id = await saveProject({
@@ -907,7 +936,7 @@ export function ProjectManager() {
 
   const handleSaveEnvironment = async () => {
     if (!selectedProject) return;
-    if (!envName.trim()) { showToast('Name is required', 'error'); return; }
+    if (!isValidEnvironmentName(envName.trim())) { showToast(`Name ${ENV_NAME_RULE}`, 'error'); return; }
     setSaving(true);
     try {
       await saveEnvironment({
@@ -972,6 +1001,12 @@ export function ProjectManager() {
               className="text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors"
             >
               LOAD TEMPLATE
+            </button>
+            <button
+              onClick={() => setShareModalMode('receive')}
+              className="text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors whitespace-nowrap"
+            >
+              RECEIVE PROJECT
             </button>
             <button
               onClick={handleNewProject}
@@ -1099,6 +1134,12 @@ export function ProjectManager() {
               {selectedProject.name}
             </div>
             <button
+              onClick={() => setShareModalMode('send')}
+              className="text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors whitespace-nowrap"
+            >
+              SHARE PROJECT
+            </button>
+            <button
               onClick={handleExportProject}
               className="text-[11px] font-bold font-ui text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[4px] hover:text-tx transition-colors whitespace-nowrap"
             >
@@ -1115,6 +1156,9 @@ export function ProjectManager() {
                 placeholder="my-project"
                 className="w-full bg-bg border border-bd2 text-tx font-mono text-[13px] rounded-[3px] px-3 py-[7px] outline-none focus:border-accent-d transition-colors"
               />
+              {projName.length > 0 && !isValidProjectName(projName.trim()) && (
+                <div className="text-[10px] font-mono text-danger mt-1">{PROJECT_NAME_RULE}</div>
+              )}
             </div>
             <div className="mb-3">
               <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">DESCRIPTION</div>
@@ -1143,7 +1187,7 @@ export function ProjectManager() {
                 </button>
                 <button
                   onClick={handleSaveProject}
-                  disabled={saving || !projName.trim()}
+                  disabled={saving || !isValidProjectName(projName.trim())}
                   className="ml-auto text-[10px] font-ui font-bold text-tx2 border border-bd2 rounded-[3px] px-2.5 py-[3px] hover:text-tx transition-colors disabled:opacity-40"
                 >
                   SAVE
@@ -1214,6 +1258,9 @@ export function ProjectManager() {
                     placeholder="my-project"
                     className="w-full bg-bg border border-bd2 text-tx font-mono text-[13px] rounded-[3px] px-3 py-[7px] outline-none focus:border-accent-d transition-colors"
                   />
+                  {projName.length > 0 && !isValidProjectName(projName.trim()) && (
+                    <div className="text-[10px] font-mono text-danger mt-1">{PROJECT_NAME_RULE}</div>
+                  )}
                 </div>
                 <div className="mb-3">
                   <div className="text-[10px] font-semibold text-tx3 font-mono tracking-[0.06em] mb-1">DESCRIPTION</div>
@@ -1273,6 +1320,9 @@ export function ProjectManager() {
                     default
                   </label>
                 </div>
+                {envName.length > 0 && !isValidEnvironmentName(envName.trim()) && (
+                  <div className="text-[10px] font-mono text-danger -mt-2 mb-3">{ENV_NAME_RULE}</div>
+                )}
 
                 {/* Paths */}
                 <div className="mb-3">
@@ -1429,7 +1479,7 @@ export function ProjectManager() {
               )}
               <button
                 onClick={isCreatingProj ? handleSaveProject : handleSaveEnvironment}
-                disabled={saving || (isCreatingProj ? !projName.trim() : !envName.trim())}
+                disabled={saving || (isCreatingProj ? !isValidProjectName(projName.trim()) : !isValidEnvironmentName(envName.trim()))}
                 className="px-4 py-[7px] rounded-[3px] text-[11px] font-bold tracking-[0.06em] font-ui cursor-pointer bg-accent border-none text-[#020504] hover:opacity-90 transition-opacity disabled:opacity-40 flex items-center gap-1.5"
               >
                 {saving
@@ -1464,6 +1514,19 @@ export function ProjectManager() {
           foreign={injectConfirm.foreign}
           onCancel={cancelPendingInject}
           onConfirm={confirmPendingInject}
+        />
+      )}
+
+      {shareModalMode && (
+        <ProjectShareModal
+          mode={shareModalMode}
+          project={shareModalMode === 'send' ? (selectedProject ?? undefined) : undefined}
+          items={items}
+          onClose={() => setShareModalMode(null)}
+          onReceived={async () => {
+            await load();
+            await refreshVaultItems();
+          }}
         />
       )}
     </div>

@@ -54,57 +54,88 @@ pub fn decrypt_payload(payload: &str, key: &[u8; 32]) -> Result<Vec<PlainItem>, 
     serde_json::from_slice(&plaintext).map_err(|e| ShareError::Protocol(e.to_string()))
 }
 
-// ─── Complete-workspace bundle (template + values) ────────────────────────────
-// A workspace bundle carries the workspace definition AND the decrypted values of
-// every referenced vault item, so a teammate can reconstruct a ready-to-inject
-// workspace in one step. It rides on the same relay encryption as plain items.
+// ─── Project bundle (structure + values for N environments at once) ──────────
+// A project bundle carries an entire project's definition — its environments
+// and the decrypted values of every item they reference — so a teammate can
+// reconstruct a ready-to-inject multi-environment project in one step. Items
+// are hoisted to the bundle root and deduped by name, referenced from each
+// environment's vars by name (see docs/plans/issue-4 D1): this is what lets
+// "the same item linked into 3 environments" be told apart from "3 items
+// that happen to share a name" on receive, which the old per-environment
+// `WorkspaceBundle` shape (removed) could not distinguish.
 
-/// One variable in a shared workspace. Either references a bundled item (by name)
-/// or carries an inline literal value — never both.
-#[derive(Serialize, Deserialize, Clone)]
-pub struct WorkspaceBundleVar {
+/// One variable in a shared environment — always references a bundled item
+/// by name. Unlike the legacy workspace format, there is no inline literal:
+/// `environment_vars.item_id` is mandatory post-migration, so every var this
+/// bundle can even represent already resolves to a real item (D3).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ProjectBundleVar {
     pub key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub item_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub literal: Option<String>,
+    pub item_name: String,
 }
 
-/// A complete, self-contained workspace ready to import.
-#[derive(Serialize, Deserialize, Clone)]
-pub struct WorkspaceBundle {
-    /// Discriminator so a workspace payload is never mistaken for a bare item list.
+/// One environment's shape, values-free of anything machine-specific.
+/// Deliberately has no `paths` field (D6) — absolute filesystem paths from
+/// the sender's machine are meaningless (and identity-leaking) on the
+/// receiver's, so the field does not exist in the wire type rather than
+/// being included-but-ignored.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EnvironmentBundle {
+    pub name: String,
+    pub is_default: bool,
+    pub vars: Vec<ProjectBundleVar>,
+}
+
+/// A complete, self-contained project ready to import: N environments plus
+/// the deduped set of items they reference.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ProjectBundle {
+    /// Discriminator so a project payload is never mistaken for a bare item list.
     pub kind: String,
+    /// Format version, checked on decrypt (D2) — bumping it is free now and
+    /// impossible to retrofit later, so it's checked from day one even
+    /// though only version 1 currently exists.
+    pub version: u32,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub template: String,
-    pub vars: Vec<WorkspaceBundleVar>,
-    /// Decrypted values for the item-backed vars. Matched to vars by `name`.
+    pub environments: Vec<EnvironmentBundle>,
+    /// Decrypted values, deduped by name. Matched to vars by `item_name`.
     pub items: Vec<PlainItem>,
 }
 
-impl WorkspaceBundle {
-    pub const KIND: &'static str = "workspace";
+impl ProjectBundle {
+    pub const KIND: &'static str = "project";
+    pub const VERSION: u32 = 1;
 }
 
-pub fn encrypt_workspace(bundle: &WorkspaceBundle, key: &[u8; 32]) -> Result<String, ShareError> {
+pub fn encrypt_project(bundle: &ProjectBundle, key: &[u8; 32]) -> Result<String, ShareError> {
     let json = serde_json::to_vec(bundle).map_err(|e| ShareError::Protocol(e.to_string()))?;
     let ciphertext = encrypt_message(key, &json);
     Ok(B64.encode(&ciphertext))
 }
 
-pub fn decrypt_workspace(payload: &str, key: &[u8; 32]) -> Result<WorkspaceBundle, ShareError> {
+/// Decrypts and validates a project bundle: rejects a wrong `kind` (e.g. a
+/// payload produced by `encrypt_items`) and an unknown `version` before
+/// returning, so a format change never has to repeat this discriminator dance.
+pub fn decrypt_project(payload: &str, key: &[u8; 32]) -> Result<ProjectBundle, ShareError> {
     let ciphertext = B64
         .decode(payload)
         .map_err(|e| ShareError::Protocol(format!("base64 decode: {e}")))?;
     let plaintext = decrypt_message(key, &ciphertext)?;
-    let bundle: WorkspaceBundle =
+    let bundle: ProjectBundle =
         serde_json::from_slice(&plaintext).map_err(|e| ShareError::Protocol(e.to_string()))?;
-    if bundle.kind != WorkspaceBundle::KIND {
+    if bundle.kind != ProjectBundle::KIND {
         return Err(ShareError::Protocol(
-            "this code is not a workspace package (use the items receive flow instead)".into(),
+            "this code is not a project package (use the items receive flow instead)".into(),
         ));
+    }
+    if bundle.version != ProjectBundle::VERSION {
+        return Err(ShareError::Protocol(format!(
+            "this package was created by a newer version of CryptEnv (format v{}); update to receive it",
+            bundle.version
+        )));
     }
     Ok(bundle)
 }
@@ -266,4 +297,133 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 
 fn is_leap(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_bundle() -> ProjectBundle {
+        ProjectBundle {
+            kind: ProjectBundle::KIND.to_string(),
+            version: ProjectBundle::VERSION,
+            name: "MyApp".to_string(),
+            description: Some("a sample project".to_string()),
+            template: "node".to_string(),
+            environments: vec![
+                EnvironmentBundle {
+                    name: "local".to_string(),
+                    is_default: true,
+                    vars: vec![
+                        ProjectBundleVar { key: "DB_HOST".to_string(), item_name: "db-host".to_string() },
+                        ProjectBundleVar { key: "DB_PASSWORD".to_string(), item_name: "db-password".to_string() },
+                    ],
+                },
+                EnvironmentBundle {
+                    name: "production".to_string(),
+                    is_default: false,
+                    vars: vec![ProjectBundleVar {
+                        key: "DB_HOST".to_string(),
+                        item_name: "db-host".to_string(),
+                    }],
+                },
+            ],
+            items: vec![
+                PlainItem {
+                    item_type: "secret".to_string(),
+                    name: "db-host".to_string(),
+                    value: Some("localhost".to_string()),
+                    username: None,
+                    password: None,
+                    url: None,
+                    notes: None,
+                    category: None,
+                    command: None,
+                },
+                PlainItem {
+                    item_type: "secret".to_string(),
+                    name: "db-password".to_string(),
+                    value: Some("hunter2".to_string()),
+                    username: None,
+                    password: None,
+                    url: None,
+                    notes: None,
+                    category: None,
+                    command: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn project_bundle_roundtrip_preserves_structure() {
+        let bundle = sample_bundle();
+        let key = derive_relay_key("TEST-CODE", "correct horse battery staple").unwrap();
+
+        let payload = encrypt_project(&bundle, &key).unwrap();
+        let decrypted = decrypt_project(&payload, &key).unwrap();
+
+        assert_eq!(decrypted.environments.len(), bundle.environments.len());
+        for (a, b) in decrypted.environments.iter().zip(bundle.environments.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.is_default, b.is_default);
+            let a_keys: Vec<&str> = a.vars.iter().map(|v| v.key.as_str()).collect();
+            let b_keys: Vec<&str> = b.vars.iter().map(|v| v.key.as_str()).collect();
+            assert_eq!(a_keys, b_keys);
+        }
+        let mut a_names: Vec<&str> = decrypted.items.iter().map(|i| i.name.as_str()).collect();
+        let mut b_names: Vec<&str> = bundle.items.iter().map(|i| i.name.as_str()).collect();
+        a_names.sort();
+        b_names.sort();
+        assert_eq!(a_names, b_names);
+    }
+
+    #[test]
+    fn decrypt_project_rejects_items_payload() {
+        let key = derive_relay_key("TEST-CODE", "correct horse battery staple").unwrap();
+        let items = vec![PlainItem {
+            item_type: "secret".to_string(),
+            name: "loose-item".to_string(),
+            value: Some("x".to_string()),
+            username: None,
+            password: None,
+            url: None,
+            notes: None,
+            category: None,
+            command: None,
+        }];
+        let payload = encrypt_items(&items, &key).unwrap();
+
+        let result = decrypt_project(&payload, &key);
+        match result {
+            Err(ShareError::Protocol(_)) => {}
+            other => panic!("expected ShareError::Protocol, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decrypt_project_rejects_unknown_version() {
+        let key = derive_relay_key("TEST-CODE", "correct horse battery staple").unwrap();
+        let mut bundle = sample_bundle();
+        bundle.version = 99;
+        let payload = encrypt_project(&bundle, &key).unwrap();
+
+        let err = decrypt_project(&payload, &key).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("v99"), "message should name the unsupported version, got: {msg}");
+    }
+
+    #[test]
+    fn decrypt_project_rejects_wrong_passphrase() {
+        let bundle = sample_bundle();
+        let key = derive_relay_key("TEST-CODE", "correct horse battery staple").unwrap();
+        let payload = encrypt_project(&bundle, &key).unwrap();
+
+        let wrong_key = derive_relay_key("TEST-CODE", "totally different passphrase").unwrap();
+        let result = decrypt_project(&payload, &wrong_key);
+        match result {
+            Err(ShareError::Crypto(_)) => {}
+            other => panic!("expected ShareError::Crypto, got {other:?}"),
+        }
+    }
 }

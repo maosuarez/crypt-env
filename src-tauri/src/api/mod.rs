@@ -14,8 +14,11 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::crypto;
-use crate::db::{DbCategory, DbWorkspaceVar};
+// `DbWorkspaceVar` went unused when issue #4 replaced the workspace-relay
+// handlers with the project-relay ones.
+use crate::db::DbCategory;
 use crate::envfile;
+use crate::fsguard;
 use crate::project::{self, EnvironmentInput, ProjectInput};
 use crate::share::{ShareState, ShareSessionState};
 use crate::share::relay;
@@ -91,6 +94,19 @@ struct CommandDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<String>,
     placeholders: Vec<String>,
+}
+
+/// `/commands`-list-only wrapper adding the same `isGlobal`/`linked`
+/// discriminators as `ScopedItem`, kept off the shared `CommandDetail` (used
+/// unscoped by `GET /commands/:id`, which this change deliberately leaves
+/// alone — see plan §3/§4).
+#[derive(Serialize)]
+struct ScopedCommand {
+    #[serde(flatten)]
+    detail: CommandDetail,
+    #[serde(rename = "isGlobal")]
+    is_global: bool,
+    linked: bool,
 }
 
 #[derive(Serialize)]
@@ -280,6 +296,120 @@ struct EnvScopeQuery {
     environment_id: Option<i64>,
     project: Option<String>,
     environment: Option<String>,
+    /// Only consumed by `handle_list_commands` — see `IncludeGlobal`. Present
+    /// here (rather than only on `ItemsQuery`) because `/commands` shares
+    /// this extractor; other handlers reusing `EnvScopeQuery` simply ignore
+    /// an unused query param, matching the existing per-handler duplication
+    /// style instead of refactoring the shared extractor in a bug-fix PR.
+    include_global: Option<String>,
+}
+
+/// Discovery-endpoint tri-state for whether globally-reusable, unlinked
+/// items are unioned into the response. Materialization endpoints
+/// (`/fill`, `/environments/:id/inject`, `/environments/:id/example`,
+/// `/share/listen`) never consult this — they stay strictly linkage-based.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IncludeGlobal {
+    With,
+    Without,
+    Only,
+}
+
+impl IncludeGlobal {
+    /// `None` (param omitted) defaults to `With` — see plan §4.5: a
+    /// default-`false` fix is invisible to callers who don't know the
+    /// param exists, which is precisely the bug being fixed.
+    fn parse(raw: Option<&str>) -> Result<IncludeGlobal, axum::response::Response> {
+        match raw {
+            None | Some("true") | Some("with") => Ok(IncludeGlobal::With),
+            Some("false") | Some("without") => Ok(IncludeGlobal::Without),
+            Some("only") => Ok(IncludeGlobal::Only),
+            Some(_) => Err(err_validation(
+                "include_global",
+                "must be one of: true, false, only",
+            )),
+        }
+    }
+}
+
+/// Union (or restriction) of `items` against the `linked` id set, per `mode`.
+/// Pure function — no `ApiState`, no lock, no crypto — fully unit-testable
+/// without a vault or an HTTP server. Stamps `linked` on every returned item.
+fn scope_items(items: Vec<VaultItem>, linked: &HashSet<i64>, mode: IncludeGlobal) -> Vec<ScopedItem> {
+    items
+        .into_iter()
+        .filter_map(|item| {
+            let is_linked = linked.contains(&item.id);
+            let is_global = item.is_global.unwrap_or(false);
+            let include = match mode {
+                IncludeGlobal::With => is_linked || is_global,
+                IncludeGlobal::Without => is_linked,
+                IncludeGlobal::Only => is_global,
+            };
+            include.then(|| ScopedItem { linked: is_linked, item })
+        })
+        .collect()
+}
+
+/// Applies the `/items` type/category/search filters over `ScopedItem`s.
+/// `type_filter`/`cat_filter`/`search_filter` are expected pre-lowercased by
+/// the caller, matching the pre-existing filter behaviour byte-for-byte.
+fn filter_scoped_items(
+    items: Vec<ScopedItem>,
+    type_filter: Option<&str>,
+    cat_filter: Option<&str>,
+    search_filter: Option<&str>,
+) -> Vec<ScopedItem> {
+    items
+        .into_iter()
+        .filter(|s| {
+            if let Some(t) = type_filter {
+                if s.item.item_type.to_lowercase() != t {
+                    return false;
+                }
+            }
+            if let Some(cat) = cat_filter {
+                let found = s
+                    .item
+                    .categories
+                    .iter()
+                    .flatten()
+                    .any(|c| c.to_lowercase() == cat);
+                if !found {
+                    return false;
+                }
+            }
+            if let Some(q) = search_filter {
+                let name_match = s
+                    .item
+                    .name
+                    .as_deref()
+                    .map(|n| n.to_lowercase().contains(q))
+                    .unwrap_or(false);
+                let title_match = s
+                    .item
+                    .title
+                    .as_deref()
+                    .map(|t| t.to_lowercase().contains(q))
+                    .unwrap_or(false);
+                if !name_match && !title_match {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
+}
+
+/// API-response-only wrapper adding the `linked` discriminator on top of
+/// `VaultItem`. MUST NOT be merged into `VaultItem` — that struct is what
+/// gets AES-GCM encrypted (`vault::encrypt_item`), so a view-only field on
+/// it risks being persisted into ciphertext by any round-trip write path.
+#[derive(Serialize)]
+struct ScopedItem {
+    #[serde(flatten)]
+    item: VaultItem,
+    linked: bool,
 }
 
 /// Resolves the environment for a scoped request. A missing/unmatched
@@ -493,6 +623,8 @@ struct ItemsQuery {
     environment_id: Option<i64>,
     project: Option<String>,
     environment: Option<String>,
+    /// Tri-state `true|false|only`, default `true` — see `IncludeGlobal`.
+    include_global: Option<String>,
 }
 
 /// The set of item ids linked into an environment's `environment_vars` — the
@@ -528,6 +660,11 @@ async fn handle_list_items(
     };
     let allowed_ids = environment_item_ids(&env);
 
+    let mode = match IncludeGlobal::parse(params.include_global.as_deref()) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+
     let items = match decrypt_all_items(&state).await {
         Ok(i) => i,
         Err(StatusCode::FORBIDDEN) => {
@@ -539,52 +676,24 @@ async fn handle_list_items(
                 .into_response()
         }
     };
-    let items = items.into_iter().filter(|item| allowed_ids.contains(&item.id));
+
+    // Union linked items with globals (per `mode`) before applying the
+    // type/category/search filters, so `search` also searches globals.
+    let scoped = scope_items(items, &allowed_ids, mode);
 
     let type_filter = params.item_type.as_deref().map(|s| s.to_lowercase());
     let cat_filter = params.category.as_deref().map(|s| s.to_lowercase());
     let search_filter = params.search.as_deref().map(|s| s.to_lowercase());
 
-    let filtered: Vec<VaultItem> = items
-        .into_iter()
-        .filter(|item| {
-            // Filtro por tipo
-            if let Some(ref t) = type_filter {
-                if item.item_type.to_lowercase() != *t {
-                    return false;
-                }
-            }
-            // Filtro por categoría
-            if let Some(ref cat) = cat_filter {
-                let found = item
-                    .categories
-                    .iter()
-                    .flatten()
-                    .any(|c| c.to_lowercase() == *cat);
-                if !found {
-                    return false;
-                }
-            }
-            // Filtro por búsqueda en nombre/título
-            if let Some(ref q) = search_filter {
-                let name_match = item
-                    .name
-                    .as_deref()
-                    .map(|n| n.to_lowercase().contains(q.as_str()))
-                    .unwrap_or(false);
-                let title_match = item
-                    .title
-                    .as_deref()
-                    .map(|t| t.to_lowercase().contains(q.as_str()))
-                    .unwrap_or(false);
-                if !name_match && !title_match {
-                    return false;
-                }
-            }
-            true
-        })
-        .map(redact_item)
-        .collect();
+    let filtered: Vec<ScopedItem> = filter_scoped_items(
+        scoped,
+        type_filter.as_deref(),
+        cat_filter.as_deref(),
+        search_filter.as_deref(),
+    )
+    .into_iter()
+    .map(|s| ScopedItem { item: redact_item(s.item), linked: s.linked })
+    .collect();
 
     (StatusCode::OK, Json(filtered)).into_response()
 }
@@ -631,10 +740,30 @@ struct CreateItemBody {
     key: Option<String>,
 }
 
+/// Separate extractor (rather than folding `on_conflict` into `EnvScopeQuery`,
+/// which every scoped GET/PUT/DELETE endpoint also uses) so that only
+/// `POST /items` gives the parameter any meaning — everywhere else it would
+/// be silently accepted and ignored, which is worse than a second struct.
+#[derive(Deserialize)]
+struct ConflictQuery {
+    on_conflict: Option<String>,
+}
+
+fn parse_link_mode(raw: Option<&str>) -> Result<crate::db::LinkMode, axum::response::Response> {
+    match raw {
+        None => Ok(crate::db::LinkMode::Update),
+        Some("update") => Ok(crate::db::LinkMode::Update),
+        Some("replace") => Ok(crate::db::LinkMode::Replace),
+        Some("error") => Ok(crate::db::LinkMode::Error),
+        Some(_) => Err(err_validation("on_conflict", "must be one of: update, replace, error")),
+    }
+}
+
 async fn handle_create_item(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Query(scope): Query<EnvScopeQuery>,
+    Query(conflict): Query<ConflictQuery>,
     Json(mut body): Json<CreateItemBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
@@ -645,6 +774,11 @@ async fn handle_create_item(
         };
         return err_json(code, msg, err_code).into_response();
     }
+
+    let mode = match parse_link_mode(conflict.on_conflict.as_deref()) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
 
     let env = match resolve_scope(
         &state,
@@ -677,7 +811,7 @@ async fn handle_create_item(
         body.item.created = now_ts_str();
     }
 
-    let new_id = {
+    let outcome = {
         let vault = state.vault.lock().await;
         let key = match vault.key.as_ref() {
             Some(k) => k.clone(),
@@ -687,27 +821,51 @@ async fn handle_create_item(
             }
         };
 
-        // Create + own the item atomically (same primitive as the Tauri
-        // command `vault_create_project_item`), then link it into this
-        // environment's vars under `key_name`.
-        let new_id = match crate::vault::create_project_item(&vault.db, &key, &body.item, env.project_id).await {
-            Ok(id) => id,
-            Err(e) => {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                    .into_response()
-            }
-        };
-
-        if let Err(e) = vault.db.upsert_environment_var(env.id, &key_name, new_id).await {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response();
-        }
-
-        new_id
+        crate::vault::create_or_update_env_item(
+            &vault.db,
+            &key,
+            &body.item,
+            env.project_id,
+            env.id,
+            &key_name,
+            mode,
+        )
+        .await
     };
 
-    body.item.id = new_id;
-    body.item.is_global = Some(false);
-    (StatusCode::CREATED, Json(redact_item(body.item))).into_response()
+    match outcome {
+        Ok(crate::vault::UpsertOutcome::Created(item)) => {
+            (StatusCode::CREATED, Json(redact_item(item))).into_response()
+        }
+        Ok(crate::vault::UpsertOutcome::Updated(item)) => {
+            (StatusCode::OK, Json(redact_item(item))).into_response()
+        }
+        Ok(crate::vault::UpsertOutcome::Conflict { item_id, reason }) => match reason {
+            crate::vault::ConflictReason::Shared => err_json(
+                StatusCode::CONFLICT,
+                &format!(
+                    "key '{key_name}' is linked to item {item_id}, which is shared (global, multi-linked, \
+                     or multi-owned). Use ?on_conflict=replace to repoint this link to a new copy, or \
+                     PUT /items/{item_id} to change the shared value everywhere."
+                ),
+                "SHARED_ITEM_CONFLICT",
+            )
+            .into_response(),
+            crate::vault::ConflictReason::KeyExists => err_json(
+                StatusCode::CONFLICT,
+                &format!("key '{key_name}' already exists in this environment"),
+                "KEY_EXISTS",
+            )
+            .into_response(),
+            crate::vault::ConflictReason::StateChanged => err_json(
+                StatusCode::CONFLICT,
+                &format!("key '{key_name}' changed concurrently, retry the request"),
+                "CONFLICT_RETRY",
+            )
+            .into_response(),
+        },
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
+    }
 }
 
 async fn handle_update_item(
@@ -844,6 +1002,43 @@ async fn handle_delete_item(
         Err(e) => {
             err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response()
         }
+    }
+}
+
+/// Read-only, redacted report of items with no `environment_vars` reference
+/// and `is_global = 0` (issue #9 §3.6). Deliberately no REST prune endpoint —
+/// a static MCP token should not be able to bulk-delete vault rows; the
+/// destructive half stays behind the GUI's confirmation
+/// (`vault_prune_orphan_items`), matching every other destructive vault
+/// operation. Lets `crypt-env doctor` surface a one-line orphan count.
+async fn handle_list_orphans(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(code) = verify_token(&headers, &state).await {
+        let (msg, err_code) = match code {
+            StatusCode::UNAUTHORIZED => ("no autorizado", "UNAUTHORIZED"),
+            StatusCode::FORBIDDEN => ("bóveda bloqueada", "VAULT_LOCKED"),
+            _ => ("error interno", "INTERNAL_ERROR"),
+        };
+        return err_json(code, msg, err_code).into_response();
+    }
+
+    let vault = state.vault.lock().await;
+    let key = match vault.key.as_ref() {
+        Some(k) => k.clone(),
+        None => {
+            return err_json(StatusCode::FORBIDDEN, "bóveda bloqueada", "VAULT_LOCKED")
+                .into_response()
+        }
+    };
+
+    match crate::vault::list_orphan_items(&vault.db, &key).await {
+        Ok(items) => {
+            let redacted: Vec<VaultItem> = items.into_iter().map(redact_item).collect();
+            (StatusCode::OK, Json(redacted)).into_response()
+        }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
 }
 
@@ -1050,6 +1245,11 @@ async fn handle_list_commands(
     };
     let allowed_ids = environment_item_ids(&env);
 
+    let mode = match IncludeGlobal::parse(scope.include_global.as_deref()) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+
     let items = match decrypt_all_items(&state).await {
         Ok(i) => i,
         Err(StatusCode::FORBIDDEN) => {
@@ -1062,19 +1262,26 @@ async fn handle_list_commands(
         }
     };
 
-    let commands: Vec<CommandDetail> = items
+    let commands: Vec<ScopedCommand> = scope_items(items, &allowed_ids, mode)
         .into_iter()
-        .filter(|item| item.item_type == "command" && allowed_ids.contains(&item.id))
-        .map(|item| {
+        .filter(|s| s.item.item_type == "command")
+        .map(|s| {
+            let is_global = s.item.is_global.unwrap_or(false);
+            let linked = s.linked;
+            let item = s.item;
             let template = item.command.as_deref().unwrap_or("");
             let placeholders = extract_placeholders(template);
-            CommandDetail {
-                id: item.id,
-                name: item.name.unwrap_or_default(),
-                description: item.description,
-                shell: item.shell,
-                command: item.command,
-                placeholders,
+            ScopedCommand {
+                detail: CommandDetail {
+                    id: item.id,
+                    name: item.name.unwrap_or_default(),
+                    description: item.description,
+                    shell: item.shell,
+                    command: item.command,
+                    placeholders,
+                },
+                is_global,
+                linked,
             }
         })
         .collect();
@@ -1432,6 +1639,51 @@ async fn handle_fill(
         Err(resp) => return resp,
     };
 
+    // Resolve and validate the write target *before* any decryption happens
+    // (issue #7, objective 3): on rejection, no plaintext has been produced
+    // for this request, on disk or in memory.
+    //
+    // `output_path` is exact caller intent for *this* request and is passed
+    // through verbatim — validating it is issue #8's territory (clobber /
+    // no-clobber), not this one. `output_dir` only ever decides the
+    // *filename* inside it, and that filename is derived from the
+    // environment's `name` — untrusted, persisted data — so it goes through
+    // `fsguard::resolve_within`, which guarantees the result cannot land
+    // outside the caller-supplied directory.
+    let write_target: Option<PathBuf> = if let Some(out) = body.output_path.as_deref() {
+        Some(PathBuf::from(out))
+    } else if let Some(dir) = body.output_dir.as_deref() {
+        match fsguard::resolve_within(dir, &format!(".env.{}", env.name)) {
+            Ok(p) => Some(p),
+            Err(fsguard::ContainmentError::BaseUnusable(msg)) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("cannot use output directory: {msg}"),
+                    "INTERNAL_ERROR",
+                )
+                .into_response();
+            }
+            Err(e) => {
+                // Never echo the environment name or the resolved path (see
+                // plan §4/D5) — the id is enough to identify the row, and a
+                // rejection firing at all means a hostile name reached a
+                // sink and layer 2 caught it.
+                eprintln!(
+                    "[api] /fill rejected: environment id {} — output_dir not contained ({e:?})",
+                    env.id
+                );
+                return err_json(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "output_dir: environment name does not resolve to a path contained within the requested directory",
+                    "PATH_NOT_CONTAINED",
+                )
+                .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
     let items = match decrypt_all_items(&state).await {
         Ok(i) => i,
         Err(StatusCode::FORBIDDEN) => {
@@ -1510,33 +1762,29 @@ async fn handle_fill(
         filled.push('\n');
     }
 
-    // Explicit output_path: write to exactly that file. No output_path but an
-    // output_dir: write to the default-filename-with-environment-suffix
-    // convention inside it. Neither: return content inline (unchanged).
-    let write_target = if let Some(out) = body.output_path {
-        Some(out)
-    } else if let Some(dir) = body.output_dir {
-        let dir = dir.trim_end_matches(['/', '\\']);
-        Some(format!("{dir}/.env.{}", env.name))
-    } else {
-        None
-    };
-
     // When writing to disk: write via RAII guard, return stats only (no
-    // secret content in the response).
+    // secret content in the response). `write_target` was already resolved
+    // and validated above, before decryption.
     //
     // The guard zeros and deletes the file if any error occurs before persist().
     // On success, persist() disarms the guard so the caller can consume the file.
-    if let Some(out) = write_target {
-        let path = std::path::PathBuf::from(&out);
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("cannot create directory: {e}"),
-                    "INTERNAL_ERROR",
-                )
-                .into_response();
+    if let Some(path) = write_target {
+        // Only the explicit `output_path` branch needs a directory created
+        // here: it is exact caller intent with no interpolated name in it.
+        // The `output_dir` branch's base was already created inside
+        // `fsguard::resolve_within` above, on the caller-supplied directory
+        // alone (issue #7, objective 4 — no `create_dir_all` ever sees a
+        // path with an interpolated name in it).
+        if body.output_path.is_some() {
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return err_json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("cannot create directory: {e}"),
+                        "INTERNAL_ERROR",
+                    )
+                    .into_response();
+                }
             }
         }
 
@@ -2058,6 +2306,14 @@ async fn handle_save_project(
             err_json(StatusCode::CONFLICT, "a project with this name already exists", "CONFLICT")
                 .into_response()
         }
+        // `project::save_project` runs `validate_project_name` as its first
+        // statement (issue #7's choke point) and prefixes its message with
+        // "name: " on failure — surface that as a caller error, not a
+        // server fault. Safe to echo: `validate_project_name` returns the
+        // rule that was broken and never the input `name` itself.
+        Err(e) if e.starts_with("name: ") => {
+            err_json(StatusCode::UNPROCESSABLE_ENTITY, &e, "VALIDATION_ERROR").into_response()
+        }
         // Never echo `e` here: on any other failure it may carry raw sqlx/SQL
         // text (table, column, index names), which CLAUDE.md forbids in an
         // API response. Log the detail server-side instead — never the
@@ -2160,6 +2416,14 @@ async fn handle_save_environment(
         Ok(id) => {
             let status = if is_new { StatusCode::CREATED } else { StatusCode::OK };
             (status, Json(serde_json::json!({ "id": id }))).into_response()
+        }
+        // `project::save_environment` runs `validate_environment_name` as
+        // its first statement (issue #7's choke point — the same check the
+        // Tauri command, CLI, and an imported `.cryptenv-proj` template all
+        // go through) and prefixes its message with "name: " on failure.
+        // Safe to echo: the message names the rule, never the input `name`.
+        Err(e) if e.starts_with("name: ") => {
+            err_json(StatusCode::UNPROCESSABLE_ENTITY, &e, "VALIDATION_ERROR").into_response()
         }
         // Same "conflict:" sentinel contract as `handle_save_project` — set
         // either by `db::upsert_environment`'s unique-index violation (ASCII
@@ -2331,25 +2595,54 @@ async fn handle_environment_example(
     // values are never read or decrypted here.
     let content = keys.iter().map(|k| format!("{k}=")).collect::<Vec<_>>().join("\n") + "\n";
 
-    let write_target = if let Some(p) = body.output_path {
-        Some(p)
-    } else if let Some(dir) = body.output_dir {
-        let dir = dir.trim_end_matches(['/', '\\']);
-        Some(format!("{dir}/.env.example.{}", env.name))
+    // Same containment split as `/fill` (issue #7): `output_path` is exact
+    // caller intent, passed through verbatim; `output_dir` only picks the
+    // filename inside it, and that filename is derived from the untrusted,
+    // persisted environment `name`, so it goes through `fsguard`. Content
+    // here is placeholder keys only (never decrypted), so there is no
+    // decrypt-ordering concern like `/fill`'s objective 3 — but the code
+    // shape is kept the same so the two sinks stay diff-comparable.
+    let write_target: Option<PathBuf> = if let Some(p) = body.output_path.as_deref() {
+        Some(PathBuf::from(p))
+    } else if let Some(dir) = body.output_dir.as_deref() {
+        match fsguard::resolve_within(dir, &format!(".env.example.{}", env.name)) {
+            Ok(p) => Some(p),
+            Err(fsguard::ContainmentError::BaseUnusable(msg)) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("cannot use output directory: {msg}"),
+                    "INTERNAL_ERROR",
+                )
+                .into_response();
+            }
+            Err(e) => {
+                eprintln!(
+                    "[api] /environments/{{id}}/example rejected: environment id {} — output_dir not contained ({e:?})",
+                    env.id
+                );
+                return err_json(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "output_dir: environment name does not resolve to a path contained within the requested directory",
+                    "PATH_NOT_CONTAINED",
+                )
+                .into_response();
+            }
+        }
     } else {
         None
     };
 
-    if let Some(out) = write_target {
-        let path = std::path::PathBuf::from(&out);
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("cannot create directory: {e}"),
-                    "INTERNAL_ERROR",
-                )
-                .into_response();
+    if let Some(path) = write_target {
+        if body.output_path.is_some() {
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return err_json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("cannot create directory: {e}"),
+                        "INTERNAL_ERROR",
+                    )
+                    .into_response();
+                }
             }
         }
         // No RAII zero-wipe needed here — the content holds no secret value,
@@ -2359,6 +2652,10 @@ async fn handle_environment_example(
         // `FileMode::Inherit` (not `Private0600`) because this file exists
         // to be committed and shared — forcing owner-only permissions on a
         // `.env.example` would be surprising on a shared build machine.
+        //
+        // `path` is already containment-checked above (issue #7): the
+        // `output_dir` branch routes through `fsguard::resolve_within`, so
+        // the reported path is the post-canonicalization one.
         let marker = build_marker(&state, &env).await;
         let opts = envfile::WriteOptions { overwrite: body.overwrite, mode: envfile::FileMode::Inherit };
         let committed = match envfile::commit(&path, &content, &marker, &opts) {
@@ -2366,7 +2663,8 @@ async fn handle_environment_example(
             Err(e) => return err_envfile(e),
         };
         let backup = committed.backup.map(|p| p.to_string_lossy().into_owned());
-        return (StatusCode::OK, Json(ExampleResponse { content: None, path: Some(out), keys, backup })).into_response();
+        let resolved = path.to_string_lossy().into_owned();
+        return (StatusCode::OK, Json(ExampleResponse { content: None, path: Some(resolved), keys, backup })).into_response();
     }
 
     (StatusCode::OK, Json(ExampleResponse { content: Some(content), path: None, keys, backup: None })).into_response()
@@ -2736,21 +3034,37 @@ async fn handle_relay_receive(
         .into_response()
 }
 
-// ─── Complete-workspace relay handlers ────────────────────────────────────────
+// ─── Project relay handlers (issue #4 — share a whole project) ───────────────
+// Replaces the deleted `/workspaces/*/relay/*` pair: same relay transport,
+// but the payload is a `ProjectBundle` (structure + values for N
+// environments at once) instead of a single flat item list or a
+// frozen-table-backed workspace. See `project::relay` for the orchestration
+// (build/receive) and `share::relay::ProjectBundle` for the wire format.
+
+#[derive(serde::Deserialize)]
+struct ProjectRelaySendBody {
+    environment_ids: Vec<i64>,
+}
 
 #[derive(serde::Serialize)]
-struct WorkspaceRelaySendResponse {
+struct ProjectRelaySendResponse {
     code: String,
     passphrase: String,
-    workspace: String,
+    project: String,
+    environment_count: usize,
     item_count: usize,
 }
 
-/// Share an entire workspace (definition + decrypted values) via the relay.
-async fn handle_workspace_relay_send(
+/// Share a whole project (selected environments, structure + decrypted
+/// values, deduped items) via the relay. `environment_ids` is the sender's
+/// explicit selection — the GUI/CLI default non-default environments to
+/// unchecked (D4), but that's a client-side safety default, not enforced
+/// here; this endpoint shares exactly what it's asked to.
+async fn handle_project_relay_send(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
+    Json(body): Json<ProjectRelaySendBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
         let (msg, err_code) = match code {
@@ -2759,6 +3073,15 @@ async fn handle_workspace_relay_send(
             _ => ("internal error", "INTERNAL_ERROR"),
         };
         return err_json(code, msg, err_code).into_response();
+    }
+
+    if body.environment_ids.is_empty() {
+        return err_json(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "environment_ids must not be empty",
+            "VALIDATION_ERROR",
+        )
+        .into_response();
     }
 
     let (supabase_url, anon_key, bundle) = {
@@ -2802,98 +3125,27 @@ async fn handle_workspace_relay_send(
             }
         };
 
-        let workspaces = match vault.db.list_workspaces().await {
-            Ok(w) => w,
+        let bundle = match project::relay::build_project_bundle(&vault.db, &k, id, &body.environment_ids).await {
+            Ok(b) => b,
+            Err(e) if e.contains("not found") => {
+                return err_json(StatusCode::NOT_FOUND, &e, "NOT_FOUND").into_response()
+            }
+            Err(e) if e.contains("too large") => {
+                return err_json(StatusCode::PAYLOAD_TOO_LARGE, &e, "PAYLOAD_TOO_LARGE").into_response()
+            }
             Err(e) => {
                 return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
                     .into_response()
             }
-        };
-        let ws = match workspaces.into_iter().find(|w| w.id == id) {
-            Some(w) => w,
-            None => {
-                return err_json(StatusCode::NOT_FOUND, "workspace not found", "NOT_FOUND")
-                    .into_response()
-            }
-        };
-        let ws_vars = match vault.db.get_workspace_vars(id).await {
-            Ok(v) => v,
-            Err(e) => {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                    .into_response()
-            }
-        };
-
-        // Decrypt every vault item once, keyed by id.
-        let raw = match vault.db.list_items().await {
-            Ok(r) => r,
-            Err(e) => {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                    .into_response()
-            }
-        };
-        let mut items_by_id: std::collections::HashMap<i64, VaultItem> =
-            std::collections::HashMap::new();
-        for (item_id, _, data, _, _) in &raw {
-            if let Ok(json) = crypto::decrypt(&k, data) {
-                if let Ok(item) = serde_json::from_slice::<VaultItem>(&json) {
-                    items_by_id.insert(*item_id, item);
-                }
-            }
-        }
-
-        // Build manifest vars + the set of bundled items (deduped by name).
-        let mut bundle_vars: Vec<relay::WorkspaceBundleVar> = Vec::with_capacity(ws_vars.len());
-        let mut bundled: std::collections::HashMap<String, PlainItem> =
-            std::collections::HashMap::new();
-        for v in &ws_vars {
-            match v.item_id {
-                Some(iid) => {
-                    let item = match items_by_id.get(&iid) {
-                        Some(it) => it,
-                        // Referenced item was deleted — skip cleanly rather than fail.
-                        None => continue,
-                    };
-                    let item_name = item.name.clone().unwrap_or_default();
-                    bundled.entry(item_name.clone()).or_insert_with(|| PlainItem {
-                        item_type: item.item_type.clone(),
-                        name: item_name.clone(),
-                        value: item.value.clone(),
-                        username: item.username.clone(),
-                        password: item.password.clone(),
-                        url: item.url.clone(),
-                        notes: item.notes.clone(),
-                        category: item.categories.clone().and_then(|c| c.into_iter().next()),
-                        command: item.command.clone(),
-                    });
-                    bundle_vars.push(relay::WorkspaceBundleVar {
-                        key: v.key.clone(),
-                        item_name: Some(item_name),
-                        literal: None,
-                    });
-                }
-                None => bundle_vars.push(relay::WorkspaceBundleVar {
-                    key: v.key.clone(),
-                    item_name: None,
-                    literal: v.literal.clone(),
-                }),
-            }
-        }
-
-        let bundle = relay::WorkspaceBundle {
-            kind: relay::WorkspaceBundle::KIND.to_string(),
-            name: ws.name.clone(),
-            description: ws.description.clone(),
-            template: ws.template.clone(),
-            vars: bundle_vars,
-            items: bundled.into_values().collect(),
         };
 
         (supabase_url, anon_key, bundle)
     };
 
-    let workspace_name = bundle.name.clone();
+    let project_name = bundle.name.clone();
+    let environment_count = bundle.environments.len();
     let item_count = bundle.items.len();
+
     let code = relay::generate_share_code();
     let passphrase = crate::share::crypto::generate_passphrase();
 
@@ -2904,7 +3156,7 @@ async fn handle_workspace_relay_send(
                 .into_response()
         }
     };
-    let payload = match relay::encrypt_workspace(&bundle, &relay_key) {
+    let payload = match relay::encrypt_project(&bundle, &relay_key) {
         Ok(p) => p,
         Err(e) => {
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), "INTERNAL_ERROR")
@@ -2939,28 +3191,40 @@ async fn handle_workspace_relay_send(
 
     (
         StatusCode::OK,
-        Json(WorkspaceRelaySendResponse {
+        Json(ProjectRelaySendResponse {
             code,
             passphrase,
-            workspace: workspace_name,
+            project: project_name,
+            environment_count,
             item_count,
         }),
     )
         .into_response()
 }
 
-#[derive(serde::Serialize)]
-struct WorkspaceRelayReceiveResponse {
-    workspace: String,
-    names: Vec<String>,
+#[derive(serde::Deserialize)]
+struct ProjectRelayReceiveBody {
+    code: String,
+    passphrase: String,
+    #[serde(default)]
+    project_name_override: Option<String>,
 }
 
-/// Receive a complete workspace shared via the relay: recreate the bundled items,
-/// then recreate the workspace and re-link its variables to the new items by name.
-async fn handle_workspace_relay_receive(
+#[derive(serde::Serialize)]
+struct ProjectRelayReceiveResponse {
+    project: String,
+    environments: Vec<String>,
+    item_count: usize,
+}
+
+/// Receive a whole project shared via the relay: recreates it as a brand-new
+/// project (never merges into an existing one — D5), in one transaction
+/// (D7). A case-insensitive project-name collision is reported as `409
+/// CONFLICT` so the caller can retry with `project_name_override`.
+async fn handle_project_relay_receive(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
-    Json(body): Json<RelayReceiveBody>,
+    Json(body): Json<ProjectRelayReceiveBody>,
 ) -> impl IntoResponse {
     if let Err(code) = verify_token(&headers, &state).await {
         let (msg, err_code) = match code {
@@ -3057,12 +3321,12 @@ async fn handle_workspace_relay_receive(
         }
     };
 
-    let bundle = match relay::decrypt_workspace(&payload, &relay_key) {
+    let bundle = match relay::decrypt_project(&payload, &relay_key) {
         Ok(b) => b,
         Err(e) => {
             return err_json(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                &format!("decrypt failed (wrong passphrase or not a workspace?): {e}"),
+                &format!("decrypt failed (wrong passphrase or not a project package?): {e}"),
                 "DECRYPT_ERROR",
             )
             .into_response()
@@ -3079,105 +3343,27 @@ async fn handle_workspace_relay_receive(
     .await;
 
     let vault = state.vault.lock().await;
-    let now_ts = now_ts_str();
+    let result = project::relay::receive_project_bundle(&vault.db, &vault_key, bundle, body.project_name_override)
+        .await;
 
-    // 1. Import bundled items, tracking name → new id so vars can re-link.
-    let mut id_by_name: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut names: Vec<String> = Vec::new();
-    for plain in &bundle.items {
-        let vault_item = VaultItem {
-            id: 0,
-            item_type: plain.item_type.clone(),
-            name: Some(plain.name.clone()),
-            value: plain.value.clone(),
-            username: plain.username.clone(),
-            password: plain.password.clone(),
-            url: plain.url.clone(),
-            notes: plain.notes.clone(),
-            title: None,
-            description: None,
-            command: plain.command.clone(),
-            shell: None,
-            content: None,
-            categories: Some(plain.category.iter().cloned().collect()),
-            created: now_ts.clone(),
-            is_global: None,
-        };
-        let json = match serde_json::to_vec(&vault_item) {
-            Ok(j) => j,
-            Err(e) => {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("serialize item: {e}"),
-                    "INTERNAL_ERROR",
-                )
-                .into_response()
-            }
-        };
-        let encrypted = match crypto::encrypt(&vault_key, &json) {
-            Ok(e) => e,
-            Err(e) => {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("encrypt item: {e}"),
-                    "INTERNAL_ERROR",
-                )
-                .into_response()
-            }
-        };
-        match vault
-            .db
-            .upsert_item(0, &vault_item.item_type, &encrypted, &vault_item.created, false)
-            .await
-        {
-            Ok(new_id) => {
-                id_by_name.insert(plain.name.clone(), new_id);
-                names.push(plain.name.clone());
-            }
-            Err(e) => {
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                    .into_response()
-            }
+    match result {
+        Ok(r) => (
+            StatusCode::OK,
+            Json(ProjectRelayReceiveResponse {
+                project: r.project_name,
+                environments: r.environment_names,
+                item_count: r.item_count,
+            }),
+        )
+            .into_response(),
+        // Matches #12's "conflict:" string-prefix convention for db/project
+        // layer errors — see docs/plans/issue-4 D5. Swap for the shared
+        // `PROJECT_NAME_CONFLICT` constant once that branch merges.
+        Err(e) if e.starts_with("conflict:") => {
+            err_json(StatusCode::CONFLICT, &e, "CONFLICT").into_response()
         }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response(),
     }
-
-    // 2. Recreate the workspace (no paths — receiver sets their own .env targets).
-    let ws_id = match vault
-        .db
-        .upsert_workspace(0, &bundle.name, bundle.description.as_deref(), &bundle.template)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR")
-                .into_response()
-        }
-    };
-
-    // 3. Re-link vars to the newly imported items by name.
-    let db_vars: Vec<DbWorkspaceVar> = bundle
-        .vars
-        .iter()
-        .map(|v| DbWorkspaceVar {
-            id: 0,
-            workspace_id: ws_id,
-            key: v.key.clone(),
-            item_id: v.item_name.as_ref().and_then(|n| id_by_name.get(n).copied()),
-            literal: v.literal.clone(),
-        })
-        .collect();
-    if let Err(e) = vault.db.set_workspace_vars(ws_id, &db_vars).await {
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e, "INTERNAL_ERROR").into_response();
-    }
-
-    (
-        StatusCode::OK,
-        Json(WorkspaceRelayReceiveResponse {
-            workspace: bundle.name,
-            names,
-        }),
-    )
-        .into_response()
 }
 
 // ─── Función pública de arranque ──────────────────────────────────────────────
@@ -3200,6 +3386,7 @@ pub(crate) fn build_router(state: Arc<ApiState>) -> Router {
         .route("/items/:id", put(handle_update_item))
         .route("/items/:id", delete(handle_delete_item))
         .route("/items/:id/reveal", post(handle_reveal_item))
+        .route("/maintenance/orphans", get(handle_list_orphans))
         .route("/categories", get(handle_list_categories))
         .route("/categories", post(handle_create_category))
         .route("/categories/:id", put(handle_update_category))
@@ -3225,8 +3412,8 @@ pub(crate) fn build_router(state: Arc<ApiState>) -> Router {
         .route("/environments/:id/example", post(handle_environment_example))
         .route("/relay/send", post(handle_relay_send))
         .route("/relay/receive", post(handle_relay_receive))
-        .route("/workspaces/:id/relay/send", post(handle_workspace_relay_send))
-        .route("/workspaces/relay/receive", post(handle_workspace_relay_receive))
+        .route("/projects/:id/relay/send", post(handle_project_relay_send))
+        .route("/projects/relay/receive", post(handle_project_relay_receive))
         .with_state(state)
         .layer(middleware::from_fn(cors_guard))
 }
@@ -3267,3 +3454,160 @@ pub async fn start_server(vault: SharedState, app_data_dir: PathBuf) {
 
 #[cfg(test)]
 mod tests;
+
+// ─── Tests: issue #13, global-item scoped visibility ─────────────────────────
+//
+// Pure-function tests: plain `VaultItem` values and a `project::Environment`
+// with synthetic `vars`, no database, no key, no async. `VaultItem`
+// deliberately has no `#[derive(Debug)]` (it holds decrypted plaintext
+// secrets — CLAUDE.md forbids secrets in logs/errors, and a stray `{:?}` on
+// assertion failure would leak one into CI output), so assertions below
+// compare individual fields rather than whole structs.
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    /// Builds a minimal `VaultItem` fixture. `is_global` mirrors the
+    /// `Option<bool>` shape of the real field (`None` behaves like `false`
+    /// for scoping purposes, same as `unwrap_or(false)` in `scope_items`).
+    fn item(id: i64, name: &str, is_global: Option<bool>) -> VaultItem {
+        VaultItem {
+            id,
+            item_type: "secret".to_string(),
+            name: Some(name.to_string()),
+            value: None,
+            url: None,
+            username: None,
+            password: None,
+            title: None,
+            description: None,
+            command: None,
+            shell: None,
+            categories: None,
+            notes: None,
+            content: None,
+            created: "2026-01-01T00:00:00Z".to_string(),
+            is_global,
+        }
+    }
+
+    fn env_with_vars(pairs: &[(&str, i64)]) -> project::Environment {
+        project::Environment {
+            id: 1,
+            project_id: 1,
+            name: "test".to_string(),
+            is_default: true,
+            paths: vec![],
+            vars: pairs
+                .iter()
+                .map(|(key, item_id)| project::EnvironmentVar {
+                    id: 0,
+                    key: key.to_string(),
+                    item_id: *item_id,
+                })
+                .collect(),
+            created: "2026-01-01T00:00:00Z".to_string(),
+            updated: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn global_unlinked_item_visible_by_default() {
+        let item_a = item(1, "A", Some(false)); // linked, non-global
+        let item_b = item(2, "B", Some(true)); // unlinked, global
+        let env = env_with_vars(&[("A_KEY", 1)]);
+        let linked = environment_item_ids(&env);
+
+        let result = scope_items(vec![item_a, item_b], &linked, IncludeGlobal::With);
+
+        assert_eq!(result.len(), 2, "default mode must return both linked and unlinked-global items");
+        let b = result.iter().find(|s| s.item.id == 2).expect("item B must be present");
+        assert_eq!(b.item.is_global, Some(true));
+        assert!(!b.linked, "unlinked global item must report linked: false");
+    }
+
+    #[test]
+    fn linked_item_reports_linked_true() {
+        let item_a = item(1, "A", Some(false));
+        let env = env_with_vars(&[("A_KEY", 1)]);
+        let linked = environment_item_ids(&env);
+
+        let result = scope_items(vec![item_a], &linked, IncludeGlobal::With);
+
+        assert_eq!(result.len(), 1);
+        assert!(result[0].linked, "linked item must report linked: true");
+        assert_eq!(result[0].item.is_global, Some(false));
+    }
+
+    #[test]
+    fn global_and_linked_item_appears_once() {
+        let item_c = item(3, "C", Some(true)); // both global and linked
+        let env = env_with_vars(&[("C_KEY", 3)]);
+        let linked = environment_item_ids(&env);
+
+        let result = scope_items(vec![item_c], &linked, IncludeGlobal::With);
+
+        assert_eq!(result.len(), 1, "item that is both global and linked must appear exactly once (dedup guard)");
+        assert!(result[0].linked);
+        assert_eq!(result[0].item.is_global, Some(true));
+    }
+
+    #[test]
+    fn include_global_false_matches_legacy_scope() {
+        let item_a = item(1, "A", Some(false)); // linked, non-global
+        let item_b = item(2, "B", Some(true)); // unlinked, global
+        let env = env_with_vars(&[("A_KEY", 1)]);
+        let linked = environment_item_ids(&env);
+
+        let result = scope_items(vec![item_a, item_b], &linked, IncludeGlobal::Without);
+
+        assert_eq!(result.len(), 1, "Without must return exactly the linked set, matching the pre-change filter");
+        assert_eq!(result[0].item.id, 1);
+        assert!(result[0].linked);
+    }
+
+    #[test]
+    fn include_global_only_returns_globals_regardless_of_link() {
+        let item_a = item(1, "A", Some(false)); // linked, non-global
+        let item_b = item(2, "B", Some(true)); // unlinked, global
+        let item_c = item(3, "C", Some(true)); // linked, global
+        let env = env_with_vars(&[("A_KEY", 1), ("C_KEY", 3)]);
+        let linked = environment_item_ids(&env);
+
+        let result = scope_items(vec![item_a, item_b, item_c], &linked, IncludeGlobal::Only);
+
+        let ids: HashSet<i64> = result.iter().map(|s| s.item.id).collect();
+        assert_eq!(ids, HashSet::from([2, 3]), "Only must return all is_global items regardless of linkage, excluding non-global A");
+    }
+
+    #[test]
+    fn search_and_type_filters_apply_to_unioned_globals() {
+        let item_a = item(1, "DB_HOST", Some(false)); // linked
+        let item_b = item(2, "API_KEY", Some(true)); // unlinked, global
+        let env = env_with_vars(&[("DB_HOST", 1)]);
+        let linked = environment_item_ids(&env);
+
+        let scoped = scope_items(vec![item_a, item_b], &linked, IncludeGlobal::With);
+        assert_eq!(scoped.len(), 2, "union must include both before filtering");
+
+        let filtered = filter_scoped_items(scoped, None, None, Some("api"));
+
+        assert_eq!(filtered.len(), 1, "search must narrow within the union, including unioned globals");
+        assert_eq!(filtered[0].item.id, 2);
+    }
+
+    #[test]
+    fn invalid_include_global_value_is_rejected() {
+        // `axum::response::Response` (the `Err` side) implements neither
+        // `Debug` nor `PartialEq`, so `assert_eq!`/`unwrap()` on the whole
+        // `Result` won't compile — `matches!` pattern-matches without
+        // requiring either trait.
+        assert!(IncludeGlobal::parse(Some("bogus")).is_err());
+        assert!(matches!(IncludeGlobal::parse(None), Ok(IncludeGlobal::With)));
+        assert!(matches!(IncludeGlobal::parse(Some("true")), Ok(IncludeGlobal::With)));
+        assert!(matches!(IncludeGlobal::parse(Some("with")), Ok(IncludeGlobal::With)));
+        assert!(matches!(IncludeGlobal::parse(Some("false")), Ok(IncludeGlobal::Without)));
+        assert!(matches!(IncludeGlobal::parse(Some("without")), Ok(IncludeGlobal::Without)));
+        assert!(matches!(IncludeGlobal::parse(Some("only")), Ok(IncludeGlobal::Only)));
+    }
+}

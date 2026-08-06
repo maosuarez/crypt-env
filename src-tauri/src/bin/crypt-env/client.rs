@@ -61,9 +61,17 @@ pub struct ItemSummary {
     pub title: Option<String>,
     #[serde(default)]
     pub categories: Vec<String>,
+    /// Present on `/items` responses since issue #13 (defaults to `false`
+    /// when absent, e.g. responses from before this change).
+    #[serde(default, rename = "isGlobal")]
+    pub is_global: bool,
+    /// `true` iff this item is linked into the queried environment. Also
+    /// new since issue #13 — defaults to `false` when absent.
+    #[serde(default)]
+    pub linked: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[allow(dead_code)]
 pub struct CommandDetail {
     pub id: i64,
@@ -76,6 +84,43 @@ pub struct CommandDetail {
     pub command: Option<String>,
     #[serde(default)]
     pub placeholders: Vec<String>,
+    /// Present on `/commands` list responses since issue #13. `GET
+    /// /commands/:id` (unscoped, untouched by this change) omits it, so this
+    /// defaults to `false` there.
+    #[serde(default, rename = "isGlobal")]
+    pub is_global: bool,
+    /// `true` iff this command is linked into the queried environment.
+    /// Meaningless outside a scoped `/commands` list — defaults to `false`.
+    #[serde(default)]
+    pub linked: bool,
+}
+
+/// Given the full `/commands` list for a scope, finds the command matching
+/// `name` case-insensitively. When both a linked command and a global
+/// (unlinked) command share the same name, the linked one wins — matching
+/// `/fill`'s and `/inject`'s materialization-only semantics — and a warning
+/// naming the shadowed global's id is printed to stderr.
+pub fn resolve_command_by_name(commands: Vec<CommandDetail>, name: &str) -> Option<CommandDetail> {
+    let name_lower = name.to_lowercase();
+    let mut matches: Vec<CommandDetail> = commands
+        .into_iter()
+        .filter(|c| c.name.to_lowercase() == name_lower)
+        .collect();
+
+    if matches.len() > 1 {
+        if let Some(linked_idx) = matches.iter().position(|c| c.linked) {
+            let linked = matches.remove(linked_idx);
+            for shadowed in matches.iter().filter(|c| !c.linked) {
+                eprintln!(
+                    "warning: command '{}' also exists as a global item (id {}) — using the linked one",
+                    name, shadowed.id
+                );
+            }
+            return Some(linked);
+        }
+    }
+
+    matches.into_iter().next()
 }
 
 #[derive(Deserialize, Debug)]

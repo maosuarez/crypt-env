@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Share a whole project via relay** (issue #4) — one send + one receive now carries a project's structure (environments, `isDefault`) *and* the decrypted values of every item they reference, for however many environments are selected, in a single encrypted relay round-trip. Previously the same outcome took an export-template + relay-send-per-environment workaround.
+  - **Protocol**: `ProjectBundle`/`EnvironmentBundle`/`ProjectBundleVar` in `share/relay.rs` (`kind: "project"`, `version: 1`, checked on decrypt). Items are deduped by name and hoisted to the bundle root, so an item linked into 3 environments produces one bundled item, not three. Never carries `paths` (machine-specific, dropped) or a `literal` value field.
+  - **REST**: `POST /projects/:id/relay/send` (body `{environment_ids}`), `POST /projects/relay/receive` (body `{code, passphrase, project_name_override?}`).
+  - **Tauri**: `project_relay_send(project_id, environment_ids)`, `project_relay_receive(code, passphrase, project_name_override?)`.
+  - **CLI**: `crypt-env project share --id N --envs a,b [--yes]`, `crypt-env project receive --code X --passphrase Y [--as NAME]`. `--envs` omitted defaults to the default environment only; `--envs all` opts in explicitly.
+  - **GUI**: "SHARE PROJECT" / "RECEIVE PROJECT" on the Projects screen, with a per-environment key manifest (KEY → item name, never values) shown before upload and a rename prompt on a name collision.
+  - **Receive semantics**: always creates a **new** project — never merges into an existing one. A case-insensitive project-name collision is a hard error (`409 CONFLICT` over REST), retryable with an override name. The whole receive is one transaction (all-or-nothing). Received items are owned by the new project only, never `isGlobal`.
+  - **No MCP tool** — deliberately not exposed to MCP; see `docs/reference.md`'s Notes for the reasoning.
+
+### Removed (Breaking)
+
+- **Legacy workspace relay endpoints and MCP tools**, dead since the Projects/Environments migration: they read/wrote the frozen `workspaces`/`workspace_vars` tables that no product surface displays post-migration, so any import through them landed as ownerless, invisible items.
+  - REST: `POST /workspaces/:id/relay/send`, `POST /workspaces/relay/receive`.
+  - MCP tools: `crypt_env_share_workspace_send`, `crypt_env_share_workspace_receive`.
+  - `WorkspaceBundle`/`WorkspaceBundleVar`/`encrypt_workspace`/`decrypt_workspace` deleted from `share/relay.rs`. The underlying `workspaces`/`workspace_vars`/`workspace_paths` tables and their `db` accessors are **kept** — they remain the one-time migration backfill source for pre-migration installs.
+  - Not aliased: both endpoints were already documented as legacy/broken, and their one shipped consumer (the MCP server) is updated in the same change.
+
+---
+
 ## [1.0.2] - 2026-08-04
 
 ### Changed

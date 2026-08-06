@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { Icon } from './ui/Icon';
+import { RelayCodeDisplay } from './ui/RelayCodeDisplay';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -338,8 +339,6 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
   const [relayRxPass,      setRelayRxPass]      = useState('');
   const [relayRxLoading,   setRelayRxLoading]   = useState(false);
   const [relayRxNames,     setRelayRxNames]     = useState<string[]>([]);
-  const [copiedRelayCode,  setCopiedRelayCode]  = useState(false);
-  const [copiedRelayPass,  setCopiedRelayPass]  = useState(false);
 
   // Error state
   const [error, setError] = useState('');
@@ -1051,8 +1050,6 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
   }
 
   function renderInternetDoneSend() {
-    const copyCode = () => { navigator.clipboard.writeText(relayCode); setCopiedRelayCode(true); setTimeout(() => setCopiedRelayCode(false), 2000); };
-    const copyPass = () => { navigator.clipboard.writeText(relayPassphrase); setCopiedRelayPass(true); setTimeout(() => setCopiedRelayPass(false), 2000); };
     return (
       <>
         <Breadcrumb path="INTERNET  /  SEND  /  DONE" />
@@ -1065,31 +1062,8 @@ export function ShareModal({ selectedIds, onClose, onImportDone, onSendDone }: S
 
         <SectionLabel>Send BOTH to your teammate via any channel</SectionLabel>
 
-        <div className="mb-3">
-          <div className="text-[9px] font-mono text-tx3 tracking-[0.08em] mb-1">CODE</div>
-          <div className="bg-raised border border-bd2 rounded-[3px] px-4 py-2.5 flex items-center gap-3">
-            <span className="flex-1 font-mono text-[18px] text-accent tracking-[0.3em] font-bold select-all">{relayCode}</span>
-            <button onClick={copyCode} className={['flex items-center gap-1.5 border rounded px-2 py-1 text-[10px] font-mono tracking-wide transition-all cursor-pointer', copiedRelayCode ? 'bg-accent-b border-accent-d text-accent' : 'border-bd2 text-tx3 bg-transparent hover:border-tx3'].join(' ')}>
-              <Icon name={copiedRelayCode ? 'check' : 'copy'} size={10} color={copiedRelayCode ? 'oklch(0.70 0.17 162)' : 'currentColor'} />
-              {copiedRelayCode ? 'COPIED' : 'COPY'}
-            </button>
-          </div>
-        </div>
+        <RelayCodeDisplay code={relayCode} passphrase={relayPassphrase} />
 
-        <div className="mb-4">
-          <div className="text-[9px] font-mono text-tx3 tracking-[0.08em] mb-1">PASSPHRASE</div>
-          <div className="bg-raised border border-bd2 rounded-[3px] px-4 py-2.5 flex items-center gap-3">
-            <span className="flex-1 font-mono text-[13px] text-accent tracking-[0.05em] select-all break-all">{relayPassphrase}</span>
-            <button onClick={copyPass} className={['flex items-center gap-1.5 border rounded px-2 py-1 text-[10px] font-mono tracking-wide transition-all cursor-pointer', copiedRelayPass ? 'bg-accent-b border-accent-d text-accent' : 'border-bd2 text-tx3 bg-transparent hover:border-tx3'].join(' ')}>
-              <Icon name={copiedRelayPass ? 'check' : 'copy'} size={10} color={copiedRelayPass ? 'oklch(0.70 0.17 162)' : 'currentColor'} />
-              {copiedRelayPass ? 'COPIED' : 'COPY'}
-            </button>
-          </div>
-        </div>
-
-        <p className="text-[10px] text-tx3 font-mono leading-[1.5] mb-3">
-          The relay link expires in 24 hours and is destroyed after first use. Never share code + passphrase in the same message.
-        </p>
         <Divider />
         <div className="flex justify-end">
           <BtnPrimary onClick={() => { onSendDone?.(); onClose(); }}>DONE</BtnPrimary>

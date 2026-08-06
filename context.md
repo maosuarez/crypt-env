@@ -30,6 +30,7 @@ crypt-env/
 │   │   ├── crypto/mod.rs         # Argon2id KDF + AES-256-GCM encrypt/decrypt
 │   │   ├── vault/mod.rs          # VaultState, Tauri commands for vault management
 │   │   ├── project/mod.rs        # Project/environment business logic (shared by Tauri + HTTP API)
+│   │   ├── wsl/mod.rs            # WSL bridge (Phase 1): distro discovery + UNC seed dir for the env path picker
 │   │   ├── api/mod.rs            # Axum server on 127.0.0.1:47821, dual token auth
 │   │   ├── share/mod.rs          # Secure secret sharing (LAN bridge + encrypted packages)
 │   │   ├── share/relay.rs        # Internet relay sharing (Supabase-based)
@@ -54,6 +55,7 @@ crypt-env/
 **New Tauri Commands** (Session 4+):
 - Projects/Environments: `project_list`, `project_save`, `project_delete`, `project_preview_delete`, `environment_save`, `environment_delete`, `environment_inject`, `vault_create_project_item`, `vault_set_item_global`, `vault_get_item_owners`
 - Internet Relay: `share_relay_send`, `share_relay_receive`
+- WSL bridge (issue #3, Phase 1, Windows-only affordance): `wsl_list_distros() → Vec<String>` (always `Ok`, empty on non-Windows/no-WSL), `wsl_distro_home(distro: String) → Result<String, String>` (seed dir for the env path picker). `project_pick_env_path` gained an optional `start_dir: Option<String>` argument to seed the native dialog at that directory
 
 ## Vault Item Types
 1. **Secret / API Key**: name, encrypted value, category, notes. Export as `.env` / `export` / `$env:`
@@ -869,6 +871,34 @@ CREATE TABLE settings (
 - Code is short (XXXX-XXXX, ~10,000 values); brute-forceable in ~10 minutes on 1000 req/sec, but expires in 5 minutes
 - Passphrase must be communicated out-of-band (via chat, call, email; Supabase only stores encrypted payload)
 - Each import requires ~1-2s Argon2id KDF (acceptable for infrequent use, but not suitable for bulk imports)
+
+---
+
+### 16. WSL Bridge for the Environment Path Picker (Issue #3, Phase 1)
+**Context**: Windows developers who keep their project source inside a WSL2 distro (this repo itself, per `CLAUDE.local.md`) can already attach a WSL `.env` to an environment by typing its `\\wsl.localhost\<distro>\...` UNC path into the existing manual path input — but nothing in the UI suggests this is possible, the user must know their distro's exact *registered* name, and a typo or a stopped distro previously surfaced as a confusing later failure. This is discoverability and pre-flight validation, not new capability — see the plan's own accounting in `docs/plans/issue-3-wsl-bridge-env-paths.md` §2.
+
+**Decision**: Add a "Browse WSL" affordance next to the existing browse button in the environment editor's PATHS block, backed by two new Windows-only Tauri commands in a dedicated `wsl` module. Phase 2 (a CLI running inside WSL talking back to the vault) is explicitly deferred, uncommitted work (plan §6).
+
+1. **New module** `src-tauri/src/wsl/mod.rs` — decoupled from `db`/`vault`/`api`/`project`; only the frontend composes it with `project_pick_env_path`.
+   - `parse_distro_list(&[u8]) -> Vec<String>` — pure. Decodes `wsl.exe --list --quiet` stdout: UTF-8 BOM, UTF-16LE BOM, BOM-less UTF-16LE (heuristic: every second byte of the first 32 is `0x00`), or UTF-8 lossy fallback. 11 unit tests in-file.
+   - `unc_root(distro)` / `unc_root_legacy(distro)` — pure, return `\\wsl.localhost\<distro>\` / `\\wsl$\<distro>\`.
+   - `wsl_list_distros() → Result<Vec<String>, String>` (Tauri command) — spawns `wsl.exe --list --quiet` via `tokio::process::Command` + `kill_on_drop` under a 10 s `tokio::time::timeout`. Returns `Ok(vec![])` — never `Err` — when `wsl.exe` is absent, WSL has zero distros, or the target isn't Windows; `Err` only on timeout or a genuine non-`NotFound` spawn error.
+   - `wsl_distro_home(distro) → Result<String, String>` (Tauri command) — validates the argument (no `\`, `/`, `..`, NUL), probes `\\wsl.localhost\<distro>\home\` then falls back once to `\\wsl$\<distro>\home\` (each probe `spawn_blocking` + 10 s timeout, since a UNC probe against a cold distro blocks). Descends into the single child directory if `read_dir` finds exactly one, else returns `...\home\`. Touching the UNC path starts a stopped distro — documented in the button's tooltip.
+2. **`project_pick_env_path`** (`src-tauri/src/project/mod.rs`) gained an optional `start_dir: Option<String>` argument; when given, calls `.set_directory()` on the `rfd::FileDialog` builder before `pick_file()`. The other four `rfd` call sites (`project_export`, `project_import`, the two in `share_commands.rs`) are untouched.
+3. **Frontend** (`src/components/ProjectManager.tsx`): `isWindows` detected via `@tauri-apps/plugin-os` `platform()`, mirroring `WindowChrome.tsx`. `wsl_list_distros` fetched once when `isWindows` becomes true, held in local component state (not Zustand, not TanStack Query — ephemeral machine state). A "WSL" button (terminal icon) renders in the PATHS row only when `isWindows && wslDistros.length > 0`: one distro acts directly, several open a small inline dropdown (same panel styling as the existing tag filter). Click → `wsl_distro_home(distro)` → `project_pick_env_path({ startDir })`, reusing the same picked-path handling as the plain browse button (`applyPickedEnvPath`, extracted from the old `handlePickEnvPath`) → failure shows a toast and falls back to the manual input.
+4. **Data-loss gate landed alongside this** (plan §3.6, cross-cutting with issues #7/#8): `inject_environment`'s read of each target path (`src-tauri/src/project/mod.rs`) previously did `std::fs::read_to_string(path).unwrap_or_default()`, treating *any* read failure — including a stopped WSL distro's dead 9p mount — as "file is empty," then silently overwriting it with only this environment's keys. Changed to a `match e.kind()` guard: `ErrorKind::NotFound` still starts from empty (new file); every other error kind aborts the write with `Err`. This is the single most likely real-world failure mode of attaching a WSL path, and the plan declared Phase 1 not closeable without it.
+
+**Rationale**:
+- `--list --quiet` over the issue-specified `--list --verbose`: verbose output is column-aligned, carries a localized `Running`/`Stopped`/default-marker, and breaks on non-English Windows; quiet emits one bare name per line and needs no state (selecting a distro starts it anyway).
+- `tokio::process::Command` (not `spawn_blocking` + `std::process::Command`, the pattern already used for `rfd` in this file) because a `timeout` around a blocking-pool `JoinHandle` doesn't cancel the blocked thread — it leaks a pool slot for as long as `wsl.exe` hangs. `tokio::process` cancels and kills the child on drop.
+- No new Cargo dependency: hand-rolled UTF-16LE decode (~10 lines) instead of `encoding_rs`, since exactly two known encodings from one known producer don't justify a crate; `tauri-plugin-shell` (listed in this file's own stack-setup checklist, never actually added — see `src-tauri/Cargo.toml`) is deliberately not added either, since it would let the webview spawn processes for no gain when Rust can already do so natively.
+- `\\wsl.localhost\` primary / `\\wsl$\` fallback (not build-number sniffing): two cheap filesystem probes beat silently guessing wrong on older Windows builds.
+
+**Consequences**:
+- Windows-only feature; the command surface still registers on all targets (honest `Ok(vec![])` elsewhere) so there is one `invoke_handler!` list, not a per-platform one.
+- Clicking "Browse WSL" can cold-boot a stopped WSL VM (several seconds, memory cost) — inherent to the UNC bridge, stated in the tooltip, not eagerly triggered (only on explicit click).
+- `docker-desktop`/`docker-desktop-data` distros are not filtered out of the list (would hardcode a vendor's naming into the parser); users recognize their own distros.
+- Requires manual verification on real Windows + WSL2 hardware (checklist M1–M10 in the plan) — not automatable in CI, since CI has no WSL. Automated coverage is limited to the pure `parse_distro_list`/`unc_root` functions and the `inject_environment` read-guard (both covered by `cargo test`).
 
 ---
 

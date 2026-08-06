@@ -107,6 +107,13 @@ crypt-env workspace inject "my-node-project"
 
 Via UI: Settings → Workspaces → [select workspace] → **INJECT TO PATH**
 
+### WSL paths (Windows only)
+
+If your project's source lives inside a WSL2 distro, its `.env` file is reachable from Windows at `\\wsl.localhost\<distro>\...` — the environment path picker has a **WSL** button (next to the regular browse button) that lists your installed distros and opens the file dialog right there, so you don't have to type the UNC path or know your distro's exact registered name. Two things to know:
+
+- Browsing (or injecting to) a WSL path **starts the distro** if it's stopped — this can take a few seconds and uses memory, the same as running `wsl` from a terminal would.
+- A stopped distro must be running for **inject** to succeed too — if the distro isn't up, the write fails with an error instead of silently succeeding.
+
 ---
 
 ## 💻 Interactive TUI
@@ -168,6 +175,8 @@ Useful for SSH sessions, CI/CD scripts, or environments where a GUI is unavailab
 - **Windows**: Microsoft C++ Build Tools + WebView2 Runtime
 - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
 - **Linux**: `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`
+
+> **Known issue (Linux):** the mouse cursor may render oversized inside the app window on some Linux setups. Root cause is not yet confirmed — diagnosis is blocked on a native X11/Wayland desktop session (WSLg is not a valid repro/verification environment for this). No workaround is documented yet. Track status in [issue #6](https://github.com/maosuarez/crypt-env/issues/6).
 
 ### Install & Run
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { platform } from '@tauri-apps/plugin-os';
 import { Icon } from './ui/Icon';
@@ -6,14 +6,22 @@ import { useVaultStore } from '../store';
 
 const win = getCurrentWindow();
 
+type Chrome = { showControls: boolean };
+
+function chromeFor(os: string): Chrome {
+  switch (os) {
+    case 'windows':
+    case 'linux':
+      return { showControls: true };
+    default:            // macos and anything else: unchanged behaviour
+      return { showControls: false };
+  }
+}
+
 export function WindowChrome() {
   const screen = useVaultStore((s) => s.screen);
   const lock   = useVaultStore((s) => s.lock);
-  const [isWindows, setIsWindows] = useState(false);
-
-  useEffect(() => {
-    setIsWindows(platform() === 'windows');
-  }, []);
+  const [chrome] = useState(() => chromeFor(platform()));
 
   return (
     <div
@@ -43,7 +51,7 @@ export function WindowChrome() {
         </button>
       )}
 
-      {isWindows && (
+      {chrome.showControls && (
         <div className="relative z-10 flex h-full items-stretch border-l border-bd">
           <button
             onClick={() => win.minimize()}
@@ -52,6 +60,7 @@ export function WindowChrome() {
             className={[
               'flex items-center justify-center w-12 h-full border-none cursor-pointer',
               'bg-transparent text-tx3 hover:text-tx hover:bg-surface transition-colors duration-100',
+              'focus-visible:outline focus-visible:outline-1 focus-visible:outline-bd focus-visible:-outline-offset-1',
             ].join(' ')}
           >
             <svg width="10" height="1" viewBox="0 0 10 1" fill="currentColor">
@@ -65,6 +74,7 @@ export function WindowChrome() {
             className={[
               'flex items-center justify-center w-12 h-full border-none cursor-pointer',
               'bg-transparent text-tx3 hover:text-tx hover:bg-danger transition-colors duration-100',
+              'focus-visible:outline focus-visible:outline-1 focus-visible:outline-bd focus-visible:-outline-offset-1',
             ].join(' ')}
           >
             <svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round">

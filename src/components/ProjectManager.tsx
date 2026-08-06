@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { platform } from '@tauri-apps/plugin-os';
 import { Icon } from './ui/Icon';
 import { TagInput } from './ui/TagInput';
 import { useVaultStore } from '../store';
@@ -9,7 +10,7 @@ import {
   type ItemFieldsState,
 } from './itemFields/ItemTypeFields';
 import type {
-  EnvironmentVar, Environment, Project, ProjectTemplate, ProjectDeleteImpact, VaultItem, ItemType, Category,
+  EnvironmentVar, Environment, Project, ProjectTemplate, ProjectDeleteImpact, InjectResult, VaultItem, ItemType, Category,
 } from '../types';
 
 interface ExportedEnvironment {
@@ -140,6 +141,58 @@ function DeleteProjectModal({
             className="flex-1 py-2 bg-danger border-none rounded-[3px] text-white text-[12px] font-bold cursor-pointer font-ui disabled:opacity-40"
           >
             {deleting ? 'DELETING…' : 'DELETE'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── InjectConfirmModal ─────────────────────────────────────────────────────────
+// Shown before an inject that would overwrite one or more paths not created
+// by crypt-env (as reported by `environment_inject_preview`). Naming the
+// exact files is the point — the human in front of the GUI is the only
+// surface where that's possible (API/MCP callers get a hard 409 instead).
+
+function InjectConfirmModal({
+  foreign,
+  onCancel,
+  onConfirm,
+}: {
+  foreign:   string[];
+  onCancel:  () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [writing, setWriting] = useState(false);
+
+  return (
+    <div className="absolute inset-0 bg-black/70 flex items-center justify-center z-30 p-4">
+      <div className="w-full max-w-sm bg-surface border border-accent-d rounded-[4px] p-4">
+        <div className="text-[14px] font-bold text-tx mb-2">
+          Overwrite existing file{foreign.length !== 1 ? 's' : ''}?
+        </div>
+        <div className="text-[12px] text-tx3 mb-3 leading-[1.6]">
+          The path{foreign.length !== 1 ? 's below are' : ' below is'} not managed by crypt-env.
+          A <span className="font-mono text-tx">.bak</span> copy of the current contents is kept before writing.
+        </div>
+        <ul className="mb-3 max-h-32 overflow-y-auto space-y-1">
+          {foreign.map((p) => (
+            <li key={p} className="text-[11px] font-mono text-tx bg-bg border border-bd rounded-[2px] px-2 py-1 truncate">
+              {p}
+            </li>
+          ))}
+        </ul>
+        <div className="flex gap-2">
+          <button onClick={onCancel}
+            className="flex-1 py-2 bg-transparent border border-bd2 rounded-[3px] text-tx2 text-[12px] cursor-pointer font-ui">
+            CANCEL
+          </button>
+          <button
+            onClick={async () => { setWriting(true); try { await onConfirm(); } finally { setWriting(false); } }}
+            disabled={writing}
+            className="flex-1 py-2 bg-accent border-none rounded-[3px] text-[#020504] text-[12px] font-bold cursor-pointer font-ui disabled:opacity-40"
+          >
+            {writing ? 'WRITING…' : 'OVERWRITE'}
           </button>
         </div>
       </div>
@@ -422,7 +475,7 @@ function EnvironmentCard({
 }: {
   env:      Environment;
   onOpen:   () => void;
-  onInject: (id: number) => Promise<{ paths: string[]; written: string[] }>;
+  onInject: (id: number) => Promise<InjectResult>;
 }) {
   const [injectState, setInjectState] = useState<'idle' | 'ok' | 'err'>('idle');
 
@@ -438,7 +491,12 @@ function EnvironmentCard({
       await onInject(env.id);
       setInjectState('ok');
       setTimeout(() => setInjectState('idle'), 2000);
-    } catch {
+    } catch (err) {
+      // A cancelled confirm-overwrite dialog isn't a failure — just reset.
+      if (String(err) === 'Error: cancelled') {
+        setInjectState('idle');
+        return;
+      }
       setInjectState('err');
       setTimeout(() => setInjectState('idle'), 2000);
     }
@@ -510,8 +568,48 @@ export function ProjectManager() {
   const cats           = useVaultStore((s) => s.cats);
   const getItemOwners  = useVaultStore((s) => s.getItemOwners);
 
-  const { projects, loading, load, saveProject, removeProject, saveEnvironment, removeEnvironment, inject } =
+  const { projects, loading, load, saveProject, removeProject, saveEnvironment, removeEnvironment, inject, previewInject } =
     useProjectStore();
+
+  // Pending confirm-then-inject flow (see `runInject` below): `injectConfirm`
+  // holds the modal's display data, while the resolve/reject pair for the
+  // promise `runInject` returned to its caller lives in a ref so it survives
+  // re-renders without becoming React state itself.
+  const [injectConfirm, setInjectConfirm] = useState<{ id: number; foreign: string[] } | null>(null);
+  const pendingInjectRef = useRef<{ resolve: (r: InjectResult) => void; reject: (e: unknown) => void } | null>(null);
+
+  // Single entry point for both the project-list quick-inject button and the
+  // environment editor's INJECT button: previews first, and only prompts for
+  // confirmation when the preview reports a path crypt-env doesn't manage.
+  const runInject = async (id: number): Promise<InjectResult> => {
+    const preview = await previewInject(id);
+    if (preview.foreign.length === 0) return inject(id, false);
+    return new Promise<InjectResult>((resolve, reject) => {
+      pendingInjectRef.current = { resolve, reject };
+      setInjectConfirm({ id, foreign: preview.foreign });
+    });
+  };
+
+  const confirmPendingInject = async () => {
+    if (!injectConfirm) return;
+    const { id } = injectConfirm;
+    const pending = pendingInjectRef.current;
+    pendingInjectRef.current = null;
+    setInjectConfirm(null);
+    try {
+      const result = await inject(id, true);
+      pending?.resolve(result);
+    } catch (e) {
+      pending?.reject(e);
+    }
+  };
+
+  const cancelPendingInject = () => {
+    const pending = pendingInjectRef.current;
+    pendingInjectRef.current = null;
+    setInjectConfirm(null);
+    pending?.reject(new Error('cancelled'));
+  };
 
   const [mode, setMode] = useState<Mode>('projects');
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
@@ -543,6 +641,24 @@ export function ProjectManager() {
 
   const [saving,    setSaving]    = useState(false);
   const [injecting, setInjecting] = useState(false);
+
+  // WSL bridge (issue #3) — ephemeral machine state, not vault state, so a
+  // plain local state is enough (no Zustand store, no TanStack Query).
+  const [isWindows,      setIsWindows]      = useState(false);
+  const [wslDistros,     setWslDistros]     = useState<string[]>([]);
+  const [wslBusy,        setWslBusy]        = useState(false);
+  const [wslPickerOpen,  setWslPickerOpen]  = useState(false);
+
+  useEffect(() => {
+    setIsWindows(platform() === 'windows');
+  }, []);
+
+  useEffect(() => {
+    if (!isWindows) return;
+    invoke<string[]>('wsl_list_distros')
+      .then(setWslDistros)
+      .catch(() => setWslDistros([]));
+  }, [isWindows]);
 
   useEffect(() => { load(); }, []);
 
@@ -727,19 +843,38 @@ export function ProjectManager() {
     setEnvPaths((prev) => prev.filter((_, i) => i !== idx));
   };
 
+  // Shared tail of "a path was picked" handling, reused by both the plain
+  // browse button and the WSL-seeded one (plan §3.4).
+  const applyPickedEnvPath = (picked: string | null) => {
+    if (!picked) return;
+    const trimmed = picked.trim();
+    if (!envPaths.includes(trimmed)) setEnvPaths((prev) => [...prev, trimmed]);
+    if (!projName && isCreatingProj) {
+      const folder = folderNameFromPath(trimmed);
+      if (folder) setProjName(folder);
+    }
+  };
+
   const handlePickEnvPath = async () => {
     try {
       const picked = await invoke<string | null>('project_pick_env_path');
-      if (picked) {
-        const trimmed = picked.trim();
-        if (!envPaths.includes(trimmed)) setEnvPaths((prev) => [...prev, trimmed]);
-        if (!projName && isCreatingProj) {
-          const folder = folderNameFromPath(trimmed);
-          if (folder) setProjName(folder);
-        }
-      }
+      applyPickedEnvPath(picked);
     } catch (e) {
       showToast(String(e), 'error');
+    }
+  };
+
+  const handleBrowseWsl = async (distro: string) => {
+    setWslPickerOpen(false);
+    setWslBusy(true);
+    try {
+      const home = await invoke<string>('wsl_distro_home', { distro });
+      const picked = await invoke<string | null>('project_pick_env_path', { startDir: home });
+      applyPickedEnvPath(picked);
+    } catch (e) {
+      showToast(String(e), 'error');
+    } finally {
+      setWslBusy(false);
     }
   };
 
@@ -809,11 +944,15 @@ export function ProjectManager() {
     if (envPaths.length === 0) { showToast('Add at least one path before injecting', 'error'); return; }
     setInjecting(true);
     try {
-      const result = await inject(selectedEnv.id);
+      const result = await runInject(selectedEnv.id);
       const pathLabel = result.paths.length === 1 ? result.paths[0] : `${result.paths.length} paths`;
-      showToast(`Injected ${result.written.length} variable${result.written.length !== 1 ? 's' : ''} → ${pathLabel}`);
+      let msg = `Injected ${result.written.length} variable${result.written.length !== 1 ? 's' : ''} → ${pathLabel}`;
+      if (result.unmanagedPaths.length > 0) {
+        msg += ` (warning: ${result.unmanagedPaths.length} unmanaged path${result.unmanagedPaths.length !== 1 ? 's' : ''} written, backup kept)`;
+      }
+      showToast(msg);
     } catch (e) {
-      showToast(String(e), 'error');
+      if (String(e) !== 'Error: cancelled') showToast(String(e), 'error');
     } finally {
       setInjecting(false);
     }
@@ -1029,7 +1168,7 @@ export function ProjectManager() {
             )}
 
             {selectedProject.environments.map((env) => (
-              <EnvironmentCard key={env.id} env={env} onOpen={() => openEnvironment(env)} onInject={inject} />
+              <EnvironmentCard key={env.id} env={env} onOpen={() => openEnvironment(env)} onInject={runInject} />
             ))}
           </div>
 
@@ -1166,6 +1305,39 @@ export function ProjectManager() {
                     >
                       <Icon name="external" size={12} />
                     </button>
+                    {isWindows && wslDistros.length > 0 && (
+                      <div className="relative">
+                        <button
+                          onClick={() => {
+                            if (wslBusy) return;
+                            if (wslDistros.length === 1) {
+                              handleBrowseWsl(wslDistros[0]);
+                            } else {
+                              setWslPickerOpen((v) => !v);
+                            }
+                          }}
+                          disabled={wslBusy}
+                          title="Browse a WSL distro's filesystem for a .env file — starts the distro if it isn't running, which can take a few seconds"
+                          className="flex items-center gap-1 px-2.5 py-[6px] rounded-[3px] text-[10px] font-bold font-ui text-tx2 border border-bd2 hover:text-tx transition-colors disabled:opacity-40"
+                        >
+                          <Icon name="terminal" size={12} />
+                          {wslBusy ? '…' : 'WSL'}
+                        </button>
+                        {wslPickerOpen && wslDistros.length > 1 && (
+                          <div className="absolute left-0 top-8 z-50 min-w-[160px] bg-bg border border-bd rounded-[3px] shadow-lg py-1 flex flex-col">
+                            {wslDistros.map((distro) => (
+                              <button
+                                key={distro}
+                                onClick={() => handleBrowseWsl(distro)}
+                                className="flex items-center gap-2 px-3 py-1.5 text-left w-full text-[11px] font-mono text-tx2 hover:bg-raised hover:text-tx transition-colors"
+                              >
+                                {distro}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     <button
                       onClick={addPath}
                       disabled={!newPath.trim()}
@@ -1284,6 +1456,14 @@ export function ProjectManager() {
           project={selectedProject}
           onCancel={() => setConfirmDelProj(false)}
           onConfirm={handleDeleteProject}
+        />
+      )}
+
+      {injectConfirm && (
+        <InjectConfirmModal
+          foreign={injectConfirm.foreign}
+          onCancel={cancelPendingInject}
+          onConfirm={confirmPendingInject}
         />
       )}
     </div>

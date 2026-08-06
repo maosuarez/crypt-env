@@ -172,7 +172,8 @@ pub struct ReceivedEnvironment {
 pub struct InsertedProject {
     pub project_id: i64,
     pub environment_ids: Vec<i64>,
-    pub item_ids: Vec<i64>,}
+    pub item_ids: Vec<i64>,
+}
 
 pub struct VaultDb {
     pool: SqlitePool,

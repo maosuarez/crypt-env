@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Not aliased: both endpoints were already documented as legacy/broken, and their one shipped consumer (the MCP server) is updated in the same change.
 
 ---
+
 ## [1.0.2] - 2026-08-04
 
 ### Changed

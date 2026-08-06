@@ -108,6 +108,64 @@ fails the build on drift — see the plan doc for the full reasoning.
 
 **Discovery surfaces union globals; materialization surfaces never do; `linked` is the discriminator.** `GET /items` and `GET /commands` accept `include_global=true|false|only` (default `true`): `true` returns (items linked in the resolved environment) ∪ (all `isGlobal:true` items), deduplicated by id; `false` restricts to exactly what's linked — byte-for-byte what `/fill`/`/inject`/`/environments/:id/example` will materialize; `only` returns just the global set regardless of linkage (the REST equivalent of the GUI's Global Secrets screen), still requiring a valid scope. An invalid value 422s with `include_global` named in the message. Every returned item/command carries `isGlobal` (is it marked reusable) and `linked` (is it actually linked into the queried environment) so a caller can always tell "exists and reusable" apart from "will be written by fill/inject". `POST /fill`, `POST /environments/:id/inject`, `POST /environments/:id/example`, and `POST /share/listen` are unaffected by `include_global` — they resolve strictly through `environment_vars`, so linking a global into an environment remains a deliberate, explicit act.
 
+### Examples
+
+`curl` examples against the local server. `-k` is required — the certificate
+is self-signed (see Notes below). Replace `$TOKEN` with a session token from
+`/unlock` or the static MCP token from Settings.
+
+```bash
+# Unlock — returns a session token with a configurable TTL
+curl -sk -X POST https://127.0.0.1:47821/unlock \
+  -H 'Content-Type: application/json' \
+  -d '{"master_password": "your-master-password"}'
+
+# List items — scoped by environment_id
+curl -sk https://127.0.0.1:47821/items?environment_id=1 \
+  -H "X-Vault-Token: $TOKEN"
+
+# List items — scoped by project + environment names (case-insensitive)
+curl -sk 'https://127.0.0.1:47821/items?project=demo&environment=production' \
+  -H "X-Vault-Token: $TOKEN"
+
+# Create an item, linked into an environment as DB_HOST
+curl -sk -X POST 'https://127.0.0.1:47821/items?environment_id=1' \
+  -H "X-Vault-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"type": "secret", "name": "DB_HOST", "value": "localhost", "key": "DB_HOST"}'
+
+# Reveal a plaintext value — requires explicit confirm
+curl -sk -X POST https://127.0.0.1:47821/items/1/reveal \
+  -H "X-Vault-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"confirm": true}'
+
+# Fill a .env template inline, scoped by project + environment
+curl -sk -X POST 'https://127.0.0.1:47821/fill?project=demo&environment=production' \
+  -H "X-Vault-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"template": "DB_HOST=\nPORT=3000\n"}'
+
+# List all projects with their nested environments
+curl -sk https://127.0.0.1:47821/projects -H "X-Vault-Token: $TOKEN"
+
+# Inject an environment's variables into its configured .env path(s)
+curl -sk -X POST https://127.0.0.1:47821/environments/1/inject \
+  -H "X-Vault-Token: $TOKEN" -H 'Content-Type: application/json' -d '{}'
+```
+
+The server is HTTPS-only on `127.0.0.1:47821` with a self-signed certificate
+generated on first launch (`tls::ensure_tls_config`) — clients must either
+pass `-k`/`--insecure` (as above) or trust that certificate explicitly.
+
+**On the retired Postman collection**: `src-tauri/tests/crypt-env-api.postman_collection.json`
+was deleted (tech-debt issue #11) — it asserted a `GET /health` field that no
+longer exists and none of its 15 requests carried the (now mandatory)
+project/environment scope, so every one of them 422'd. Nothing in CI ever
+executed it, so it silently drifted out of date across a whole schema
+migration. This reference section plus the `api::tests::*` suite (executed
+on every push/PR — see `.github/workflows/test.yml`) are the replacement:
+one documents the contract, the other proves it. A Postman collection may
+return only alongside a test that replays it through the same router and
+fails the build on drift — see the plan doc for the full reasoning.
+
 ### Notes
 
 `decrypt_all_items` decrypts the entire vault on every authenticated request (no caching, no index), making every GET /items a full decryption pass — O(n) per request regardless of filters. Scoped endpoints add a second cost on top: `resolve_scope` loads the full project→environment→vars graph (`GET /projects`-equivalent) before the item decryption pass, so every scoped request is now O(vault) + O(project graph).

@@ -17,6 +17,9 @@ pub mod wsl;
 #[cfg(test)]
 mod test_support;
 
+#[cfg(test)]
+mod test_support;
+
 use vault::{
     app_complete_setup, app_generate_mcp_config, app_is_first_run,
     biometric_check, biometric_disable, biometric_enroll, biometric_is_enrolled, biometric_unlock,
